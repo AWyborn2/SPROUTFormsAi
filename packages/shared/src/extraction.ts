@@ -230,10 +230,80 @@ export interface ExtractionResult {
   pageCount: number;
   fields: ExtractedField[];
   /**
+   * The id of the stored raw-extraction capture (`extraction_captures.id`), when
+   * one was written. Best-effort, like the capture itself: absent when capture is
+   * off, has no database, or its write was swallowed. The review client echoes it
+   * back at publish so the correction diff links to the exact raw it corrects; a
+   * missing id simply means that link cannot be made.
+   */
+  captureId?: string;
+  /**
    * Free-text observations that don't map to any single field but help whoever
    * reviews the extraction (mergeable duplicate sections, validation needs).
    */
   designNotes: string[];
+}
+
+/**
+ * A printed input area the PRIMARY extraction produced no field for.
+ *
+ * The AI path reads a form once and can miss a box — a signature line, a date
+ * cell, a stray tick box off to the side. A missed box is the quiet failure on
+ * a compliance record: nothing errors, the field simply is not there, and the
+ * printed slot goes uncaptured until someone spots it against the paper. The
+ * secondary pass is that spotting, done by a second look rather than by eye.
+ */
+export interface MissedInput {
+  /** What the box is for, read off the page — "Assessor signature", "Date". */
+  label: string;
+  /** Best-guess field type for the box, so an author can add it as-is. */
+  type: FormFieldType;
+  /** 1-based printed page the box sits on. Best-effort — a locating hint. */
+  page?: number;
+  /** Where on the page it is / why it reads as fillable — reviewer context. */
+  note?: string;
+}
+
+/** What the secondary audit pass returns for one PDF. */
+export interface AuditResult {
+  /** Printed input areas that matched no field the primary pass produced. */
+  missedInputs: MissedInput[];
+}
+
+/**
+ * A label reduced to its comparable core — lowercased, punctuation and runs of
+ * whitespace flattened. Two labels the audit and the draft spell differently
+ * ("Assessor signature" vs "Assessor Signature:") collapse to the same key, so
+ * a box already captured is not re-reported as missed.
+ */
+export function normalizeInputLabel(label: string): string {
+  return label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/**
+ * Drop any audited box whose label already matches a known field. The model is
+ * TOLD the known labels, but a second look still re-describes a captured box
+ * often enough that trusting the prompt alone leaks duplicates into the review.
+ * Belt and braces: filter here too, on the same normalized key.
+ */
+export function filterUncapturedInputs(
+  missed: readonly MissedInput[],
+  knownLabels: readonly string[],
+): MissedInput[] {
+  const known = new Set(knownLabels.map(normalizeInputLabel));
+  const seen = new Set<string>();
+  const out: MissedInput[] = [];
+  for (const box of missed) {
+    const key = normalizeInputLabel(box.label);
+    // Skip a blank label, one already captured, or a duplicate within the audit.
+    if (!key || known.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(box);
+  }
+  return out;
 }
 
 /** Confidence threshold below which a field is flagged for manual review. */

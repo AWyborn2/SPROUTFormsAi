@@ -5,19 +5,14 @@ import {
   DISPLAY_IDENTIFIER_LABELS,
   type DateFormat,
   type DisplayIdentifier,
-  type RequiredAssessmentsChangeEffects,
 } from '@formai/shared';
 import {
-  useAssessmentTools,
   useCreateDepartment,
   useCreateLocation,
   useCreateRole,
   usePreviewLocationTransfer,
-  usePreviewRoleRequiredAssessments,
   useResolveTightening,
   useRetirementReview,
-  useRoleRequiredAssessments,
-  useSetRoleRequiredAssessments,
   useStopOfferingRole,
   useTaxonomy,
   useTighteningReview,
@@ -38,6 +33,10 @@ import type {
   TighteningReviewItem,
 } from '../../lib/data/types.js';
 import { ApiError } from '../../lib/data/api-client.js';
+// The four-scope requirements editor (U6), extracted out of this file as the
+// deferred TaxonomyScreen.tsx size split — one component, mounted per role,
+// per department, per location, and once org-wide below.
+import { ScopeRequirements } from './ScopeRequirements.js';
 
 /**
  * Locations & roles — the organisation's own taxonomy. Departments are the
@@ -74,9 +73,45 @@ export function TaxonomyScreen() {
 
       <RetirementReviewPanel taxonomy={data} onError={onError} />
       <SettingsPanel settings={data.settings} onError={onError} />
-      <LocationsPanel locations={data.locations} onError={onError} />
-      <DepartmentsPanel departments={data.departments} onError={onError} />
+      {/* Org-wide requirements sit between Settings and Locations (U6): the
+          broadest scope leads the per-value lists that narrow it. */}
+      <OrgRequirementsPanel taxonomy={data} onError={onError} />
+      <LocationsPanel taxonomy={data} locations={data.locations} onError={onError} />
+      <DepartmentsPanel taxonomy={data} departments={data.departments} onError={onError} />
     </div>
+  );
+}
+
+// ── Organisation-wide requirements (U6 — R1, R2) ─────────────────────────────
+
+/**
+ * The org scope's editor (R1): what EVERY active member requires, wherever
+ * they are placed (R2) — one definition instead of the same competency
+ * re-typed onto every role. Same previewed flow as every other scope; the
+ * preview here counts the whole workforce (AE3).
+ */
+function OrgRequirementsPanel({
+  taxonomy,
+  onError,
+}: {
+  taxonomy: Taxonomy;
+  onError: (e: unknown) => void;
+}) {
+  return (
+    <Card className="p-5">
+      <h3 className="font-ui text-sm font-semibold">Organisation-wide requirements</h3>
+      <p className="mt-1 text-[12px] text-text-tertiary">
+        Required of every active member, wherever they are placed. Location, Department and Role
+        requirements below add to this — never replace it.
+      </p>
+      <div className="mt-2">
+        <ScopeRequirements
+          target={{ scope: 'org', name: 'the organisation' }}
+          taxonomy={taxonomy}
+          onError={onError}
+        />
+      </div>
+    </Card>
   );
 }
 
@@ -357,10 +392,13 @@ function SettingsPanel({
   settings: {
     allowMultipleLocations: boolean;
     allowMultipleDepartments: boolean;
+    allowSelfAssessment: boolean;
+    allowLabelledSignoff: boolean;
     displayIdentifier: DisplayIdentifier;
     pooledCaseOverdueDays: number;
     notificationLeadDays: number;
     dateFormat: DateFormat;
+    candidateSelfStartRecommended: boolean;
   };
   onError: (e: unknown) => void;
 }) {
@@ -389,6 +427,52 @@ function SettingsPanel({
             checked={settings.allowMultipleDepartments}
             aria-label="Allow several Departments"
             onChange={(e) => update.mutate({ allowMultipleDepartments: e.target.checked }, { onError })}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-4">
+          <span className="text-sm">
+            Assessors can assess themselves
+            <span className="block text-[12px] text-text-tertiary">
+              A qualified assessor may run and sign off their own case. Off, nobody certifies
+              themselves.
+            </span>
+          </span>
+          <Switch
+            checked={settings.allowSelfAssessment}
+            aria-label="Assessors can assess themselves"
+            onChange={(e) => update.mutate({ allowSelfAssessment: e.target.checked }, { onError })}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-4">
+          <span className="text-sm">
+            Supervisor / SME sign-off by labelled signature
+            <span className="block text-[12px] text-text-tertiary">
+              On, an assessor can apply a supervisor&rsquo;s or SME&rsquo;s signature on a part on
+              their behalf — the case never waits for a third person to log in. Off, that signature
+              must be the named person&rsquo;s own login (coming soon).
+            </span>
+          </span>
+          <Switch
+            checked={settings.allowLabelledSignoff}
+            aria-label="Supervisor / SME sign-off by labelled signature"
+            onChange={(e) => update.mutate({ allowLabelledSignoff: e.target.checked }, { onError })}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-4">
+          <span className="text-sm">
+            Candidates can self-start recommended training
+            <span className="block text-[12px] text-text-tertiary">
+              Adds a request button beside a Role&rsquo;s recommendations (R14). Off, the
+              recommendation is still visible — assessors and admins can always assign it, and a
+              required gap can always be requested.
+            </span>
+          </span>
+          <Switch
+            checked={settings.candidateSelfStartRecommended}
+            aria-label="Candidates can self-start recommended training"
+            onChange={(e) =>
+              update.mutate({ candidateSelfStartRecommended: e.target.checked }, { onError })
+            }
           />
         </label>
         <label className="flex items-center justify-between gap-4">
@@ -488,9 +572,12 @@ function SettingsPanel({
 // ── Locations ────────────────────────────────────────────────────────────────
 
 function LocationsPanel({
+  taxonomy,
   locations,
   onError,
 }: {
+  /** Threaded to each row's requirements editor (lens options, names). */
+  taxonomy: Taxonomy;
   locations: TaxLocation[];
   onError: (e: unknown) => void;
 }) {
@@ -512,18 +599,32 @@ function LocationsPanel({
           <p className="text-[13px] text-text-tertiary">No Locations yet.</p>
         )}
         {locations.map((loc) => (
-          <ValueRow
-            key={loc.id}
-            name={loc.name}
-            status={loc.status}
-            onRename={(next) => updateLoc.mutate({ id: loc.id, name: next }, { onError })}
-            onToggleStatus={() =>
-              updateLoc.mutate(
-                { id: loc.id, status: loc.status === 'active' ? 'retired' : 'active' },
-                { onError },
-              )
-            }
-          />
+          // The wrapper exists so each Location row carries its own
+          // requirements editor beneath it (U6): a site induction is defined
+          // ONCE here and reaches everyone placed at the Location (R1, R3).
+          <div key={loc.id}>
+            <ValueRow
+              name={loc.name}
+              status={loc.status}
+              onRename={(next) => updateLoc.mutate({ id: loc.id, name: next }, { onError })}
+              onToggleStatus={() =>
+                updateLoc.mutate(
+                  { id: loc.id, status: loc.status === 'active' ? 'retired' : 'active' },
+                  { onError },
+                )
+              }
+            />
+            <ScopeRequirements
+              target={{
+                scope: 'location',
+                scopeId: loc.id,
+                name: loc.name,
+                retired: loc.status === 'retired',
+              }}
+              taxonomy={taxonomy}
+              onError={onError}
+            />
+          </div>
         ))}
       </div>
       <div className="mt-3 flex gap-2">
@@ -545,9 +646,12 @@ function LocationsPanel({
 // ── Departments (each carries its Roles — R5) ─────────────────────────────────
 
 function DepartmentsPanel({
+  taxonomy,
   departments,
   onError,
 }: {
+  /** Threaded to the department/role requirements editors (lens options, names). */
+  taxonomy: Taxonomy;
   departments: TaxDepartment[];
   onError: (e: unknown) => void;
 }) {
@@ -571,7 +675,7 @@ function DepartmentsPanel({
           <p className="text-[13px] text-text-tertiary">No Departments yet.</p>
         )}
         {departments.map((dep) => (
-          <DepartmentCard key={dep.id} dep={dep} onError={onError} />
+          <DepartmentCard key={dep.id} dep={dep} taxonomy={taxonomy} onError={onError} />
         ))}
       </div>
       <div className="mt-3 flex gap-2">
@@ -590,7 +694,15 @@ function DepartmentsPanel({
   );
 }
 
-function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unknown) => void }) {
+function DepartmentCard({
+  dep,
+  taxonomy,
+  onError,
+}: {
+  dep: TaxDepartment;
+  taxonomy: Taxonomy;
+  onError: (e: unknown) => void;
+}) {
   const updateDep = useUpdateDepartment();
   const createRole = useCreateRole();
   const updateRole = useUpdateRole();
@@ -631,6 +743,20 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
         </div>
       </div>
 
+      {/* The Department's OWN requirements, above the Roles it offers (U6):
+          placement in the Department carries these before any role is held
+          (R3) — a department induction reaches its admin staff too. */}
+      <ScopeRequirements
+        target={{
+          scope: 'department',
+          scopeId: dep.id,
+          name: dep.name,
+          retired: dep.status === 'retired',
+        }}
+        taxonomy={taxonomy}
+        onError={onError}
+      />
+
       <div className="mt-3 flex flex-col gap-1 pl-3">
         {dep.roles.length === 0 && (
           <p className="text-[12px] text-text-tertiary">No Roles offered yet.</p>
@@ -656,7 +782,20 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
                 onClick: () => stopOffering.mutate(role.id, { onError }),
               }}
             />
-            <RoleRequirements role={role} onError={onError} />
+            {/* departmentId names the inherited-population premise: the role
+                editor's locked context models a holder placed in THIS
+                Department (R3, R9). */}
+            <ScopeRequirements
+              target={{
+                scope: 'role',
+                scopeId: role.id,
+                name: role.name,
+                retired: role.status === 'retired',
+                departmentId: dep.id,
+              }}
+              taxonomy={taxonomy}
+              onError={onError}
+            />
           </div>
         ))}
       </div>
@@ -752,178 +891,6 @@ function TighteningRow({
         Keep
       </Button>
     </li>
-  );
-}
-
-// ── A Role's required assessments (U10) ───────────────────────────────────────
-
-/**
- * The assessments a Role requires (R43). Collapsed by default — a Department can
- * offer many Roles and each carries its own list. `configured` is read straight
- * from the server so "nobody has set this up" and "set up, requires nothing" read
- * apart (R50); both still oblige nobody until a tool is added. A retired Role is
- * shown read-only, because it takes on no new requirements (R121) — the server
- * enforces the same, this just does not offer the action.
- */
-function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unknown) => void }) {
-  const { toast } = useToast();
-  const [open, setOpen] = useState(false);
-  const { data: tools } = useAssessmentTools();
-  const { data: current } = useRoleRequiredAssessments(open ? role.id : undefined);
-  const preview = usePreviewRoleRequiredAssessments(role.id);
-  const save = useSetRoleRequiredAssessments(role.id);
-  const [draft, setDraft] = useState<Set<string> | null>(null);
-  // The blast radius of the pending change, once previewed — the confirmation
-  // gate (U12, R84–R86). Null means nothing is awaiting confirmation.
-  const [pending, setPending] = useState<RequiredAssessmentsChangeEffects | null>(null);
-
-  const selected = draft ?? new Set(current?.toolIds ?? []);
-  const dirty = draft !== null;
-  const retired = role.status === 'retired';
-
-  function toggle(toolId: string) {
-    // Changing the selection abandons any preview shown for the old selection.
-    setPending(null);
-    setDraft((prev) => {
-      const next = new Set(prev ?? current?.toolIds ?? []);
-      if (next.has(toolId)) next.delete(toolId);
-      else next.add(toolId);
-      return next;
-    });
-  }
-
-  function onReview() {
-    // Show the blast radius before committing (R84, R85); the change is not
-    // written until confirmed.
-    preview.mutate([...selected], { onSuccess: (r) => setPending(r.effects), onError });
-  }
-
-  function onConfirm() {
-    save.mutate([...selected], {
-      onSuccess: () => {
-        setDraft(null);
-        setPending(null);
-        toast({ variant: 'success', message: 'Requirements updated.' });
-      },
-      onError,
-    });
-  }
-
-  const summary = !current
-    ? ''
-    : !current.configured
-      ? 'not set up'
-      : current.toolIds.length === 0
-        ? 'requires nothing'
-        : `${current.toolIds.length} required`;
-
-  return (
-    <div className="pl-3">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        aria-label={`Required assessments for ${role.name}`}
-        className="flex items-center gap-1.5 py-0.5 text-[11.5px] text-text-tertiary hover:text-text-secondary"
-      >
-        <Icon name={open ? 'chevron-down' : 'chevron-right'} size={11} />
-        Required assessments{summary ? ` · ${summary}` : ''}
-      </button>
-
-      {open && (
-        <div className="mb-1 mt-1 rounded-md border border-border bg-surface-sunken p-2.5">
-          {retired && (
-            <p className="mb-1.5 text-[11px] text-text-tertiary">
-              A retired Role takes on no new requirements.
-            </p>
-          )}
-          {(tools ?? []).length === 0 ? (
-            <p className="text-[11.5px] text-text-tertiary">No assessment tools to require yet.</p>
-          ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {(tools ?? []).map((tool) => {
-                const on = selected.has(tool.id);
-                return (
-                  <button
-                    key={tool.id}
-                    type="button"
-                    aria-pressed={on}
-                    disabled={retired}
-                    onClick={() => toggle(tool.id)}
-                    className={`rounded-sm border px-2 py-1 text-[11px] font-medium transition-colors ${
-                      on
-                        ? 'border-success bg-success-soft text-success-text'
-                        : 'border-border bg-surface-card text-text-tertiary'
-                    } ${retired ? 'cursor-default opacity-60' : 'cursor-pointer'}`}
-                  >
-                    {tool.name}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {!retired && (
-            <div className="mt-2 flex flex-col gap-2">
-              {pending ? (
-                <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[9px_11px] text-[11.5px] text-text-secondary">
-                  <EffectsSummary effects={pending} />
-                  <div className="mt-2 flex justify-end gap-2">
-                    <Button size="sm" variant="ghost" onClick={() => setPending(null)} disabled={save.isPending}>
-                      Cancel
-                    </Button>
-                    <Button size="sm" onClick={onConfirm} disabled={save.isPending}>
-                      Confirm change
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex justify-end">
-                  <Button size="sm" onClick={onReview} disabled={!dirty || preview.isPending}>
-                    {dirty ? 'Review change' : 'Saved'}
-                  </Button>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * The blast radius of a pending requirement change, in words (U12). An addition
- * says who it affects and how many cases it creates (R84); a removal says who it
- * affects, how many cases already in progress will run to completion, and how
- * many competencies become optional (R85) — never a creation count. A save that
- * both adds and removes shows both.
- */
-function EffectsSummary({ effects }: { effects: RequiredAssessmentsChangeEffects }) {
-  const people = (n: number) => `${n} ${n === 1 ? 'person' : 'people'}`;
-  const cases = (n: number) => `${n} ${n === 1 ? 'case' : 'cases'}`;
-  const lines: string[] = [];
-  if (effects.addedToolIds.length > 0) {
-    const n = effects.addedToolIds.length;
-    lines.push(
-      `Adds ${n} assessment${n === 1 ? '' : 's'}: affects ${people(effects.affected)}, creating ${cases(effects.created)}.`,
-    );
-  }
-  if (effects.removedToolIds.length > 0) {
-    const n = effects.removedToolIds.length;
-    const demoting = effects.competenciesDemoting;
-    lines.push(
-      `Removes ${n} assessment${n === 1 ? '' : 's'}: affects ${people(effects.affected)}. ` +
-        `${cases(effects.inFlightContinuing)} already in progress will run to completion, and ` +
-        `${demoting} competency standing${demoting === 1 ? '' : 's'} become optional.`,
-    );
-  }
-  if (lines.length === 0) lines.push('This changes nothing.');
-  return (
-    <div className="flex flex-col gap-1">
-      {lines.map((line) => (
-        <p key={line}>{line}</p>
-      ))}
-    </div>
   );
 }
 

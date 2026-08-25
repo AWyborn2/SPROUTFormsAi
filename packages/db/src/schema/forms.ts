@@ -1,6 +1,6 @@
 import { relations } from 'drizzle-orm';
 import { boolean, index, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
-import type { FormContainer, FormField, ThemeTokens } from '@formai/shared';
+import type { FormContainer, FormField, RevisionIdentity, ThemeTokens } from '@formai/shared';
 import { formSourceTypeEnum, templateStatusEnum, versionStateEnum } from './enums.ts';
 import { organizations, users } from './organizations.ts';
 import { formBrands } from './form-brands.ts';
@@ -95,6 +95,15 @@ export const formTemplateVersions = pgTable(
     container: jsonb().$type<FormContainer>().notNull().default(DEFAULT_CONTAINER),
     /** For pdf_import templates — Supabase Storage id of the original PDF. */
     sourcePdfAssetId: text(),
+    /**
+     * The paper document's own revision identity — code, review date, change
+     * note — for versions produced by an assessment-tool revision. Null on
+     * every version that predates revisions and on plain forms, which never
+     * set it. Written only by the republish path; surfaces in version history
+     * and on printed evidence, where auditors read the document's identity,
+     * not the internal version label.
+     */
+    revisionIdentity: jsonb('revision_identity').$type<RevisionIdentity>(),
     publishedAt: timestamp({ withTimezone: true }),
     publishedBy: uuid().references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),

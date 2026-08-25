@@ -22,7 +22,7 @@
 
 import { retypeField } from '../../../lib/field-editor/reducer.js';
 import { isSelfAnswering } from '@formai/shared';
-import type { BuilderStructure, DraftAnswerKey, FormField, FormFieldType } from '@formai/shared';
+import type { BuilderStructure, DraftAnswerKey, FormField, FormFieldType, StructureSection } from '@formai/shared';
 
 /** Everything a field edit touches. */
 export interface FieldEditState {
@@ -266,4 +266,139 @@ function unchanged(state: FieldEditState): FieldEditResult {
     keys: [...state.keys],
     excluded: new Set(state.excluded),
   };
+}
+
+/**
+ * Duplicate a whole section — its header, every field, and their GEOMETRY.
+ *
+ * The multi-stage paper this exists for: the Scraper prints ONE practical
+ * checklist with a column per stage (Part 2 / Part 4 / Part 6), where the
+ * Dozer printed three copies. The webform still wants three parts — separate
+ * pages, separate attempts, separate gating — so the section is duplicated
+ * per stage and each copy's tables are trimmed to that stage's column.
+ *
+ * GEOMETRY COPIES VERBATIM, deliberately: every copy maps the SAME printed
+ * grid on the same page, which is the entire point — three parts, one
+ * printed table, each writing its own column. The author re-bands each
+ * copy's column in PDF mapping.
+ *
+ * `outcomeTarget`s pointing INSIDE the section are remapped to the copied
+ * twin; one pointing outside is DROPPED rather than shared — two questions
+ * writing one printed cell would overdraw each other's verdicts.
+ */
+export function duplicateSection(
+  state: FieldEditState,
+  sectionKey: string,
+): FieldEditResult {
+  const at = state.structure.findIndex((s) => s.key === sectionKey);
+  if (at < 0) return unchanged(state);
+  const section = state.structure[at]!;
+
+  const originalIds = [
+    ...(section.headerFieldId ? [section.headerFieldId] : []),
+    ...section.fields.map((f) => f.id),
+  ];
+  const byId = new Map(state.fields.map((f) => [f.id, f]));
+
+  // One counter walk, then sequential ids — nextAddedId scans the array, and
+  // cloning N fields one scan at a time would mint the same id N times.
+  let counter = Number(/^added-(\d+)$/.exec(nextAddedId(state.fields))?.[1] ?? 1);
+  const idMap = new Map<string, string>();
+  for (const id of originalIds) {
+    if (byId.has(id)) idMap.set(id, `added-${counter++}`);
+  }
+
+  const clones: FormField[] = [];
+  for (const id of originalIds) {
+    const original = byId.get(id);
+    if (!original) continue;
+    const clone: FormField = {
+      ...structuredClone(original),
+      id: idMap.get(id)!,
+      source: 'built',
+    };
+    if (clone.outcomeTarget) {
+      const mapped = idMap.get(clone.outcomeTarget.fieldId);
+      if (mapped) clone.outcomeTarget = { ...clone.outcomeTarget, fieldId: mapped };
+      else delete clone.outcomeTarget;
+    }
+    clones.push(clone);
+  }
+  if (clones.length === 0) return unchanged(state);
+
+  const copyKey = `${section.key}_copy_${counter}`;
+  const copy: StructureSection = {
+    ...section,
+    key: copyKey,
+    label: `${section.label} (copy)`,
+    ...(section.headerFieldId ? { headerFieldId: idMap.get(section.headerFieldId)! } : {}),
+    fields: section.fields
+      .filter((f) => idMap.has(f.id))
+      .map((f) => ({ ...f, id: idMap.get(f.id)! })),
+  };
+
+  const nextStructure = [...state.structure];
+  nextStructure.splice(at + 1, 0, copy);
+
+  /*
+    Keys are NOT cloned — a `verifiedAt` is a person's attestation on one
+    field, and duplicating it would publish a verification nobody made. The
+    clones start unkeyed. Exclusions mirror, so a turned-off original does
+    not come back on as its copy.
+  */
+  const excluded = new Set(state.excluded);
+  for (const [oldId, newId] of idMap) {
+    if (state.excluded.has(oldId)) excluded.add(newId);
+  }
+
+  return {
+    fields: [...state.fields, ...clones],
+    structure: nextStructure,
+    keys: [...state.keys],
+    excluded,
+  };
+}
+
+/**
+ * Merge one checklist table's rows into another, then delete the source.
+ *
+ * The shape this exists for: extraction splits ONE printed checklist across a
+ * page or batch boundary into two `repeating_group` tables — the same columns,
+ * the rest of the rows — or files a handful of rows under a stray second table.
+ * The author needs those rows back in the first table AS FIXED ROWS: pre-printed
+ * and locked, exactly like the rows already there. Re-adding them by hand on a
+ * fill surface makes AD-HOC rows instead — editable, deletable, and no part of
+ * the checklist — which is the opposite of what a printed item is.
+ *
+ * Only the LABELS move. `fixedRows` are the pre-printed item text in column 0;
+ * the target keeps its own columns and answer set, so every moved row adopts the
+ * target's cells. The source's columns are irrelevant — a template carries no
+ * row values yet — so the merge is robust whatever keys extraction gave the two
+ * tables, which is the norm since each was read as its own table.
+ *
+ * Both sides must be checklists (a `repeating_group` WITH `fixedRows`): the
+ * source has the rows to move, the target the pre-printed label column they join.
+ * Deletion goes through `deleteField`, so the source's keys, outcome targets and
+ * exclusion are cleaned up by the one implementation that knows them all.
+ */
+export function mergeRepeatingTable(
+  state: FieldEditState,
+  sourceId: string,
+  targetId: string,
+): FieldEditResult {
+  if (sourceId === targetId) return unchanged(state);
+  const source = state.fields.find((f) => f.id === sourceId);
+  const target = state.fields.find((f) => f.id === targetId);
+  if (!source || !target) return unchanged(state);
+  if (source.type !== 'repeating_group' || target.type !== 'repeating_group') {
+    return unchanged(state);
+  }
+  const moving = source.fixedRows ?? [];
+  const targetRows = target.fixedRows ?? [];
+  if (moving.length === 0 || targetRows.length === 0) return unchanged(state);
+
+  const withMerged = state.fields.map((f) =>
+    f.id === targetId ? { ...f, fixedRows: [...targetRows, ...moving] } : f,
+  );
+  return deleteField({ ...state, fields: withMerged }, sourceId);
 }

@@ -25,7 +25,10 @@ export const extractFormFieldsTool = {
             type: {
               type: 'string',
               enum: [...FORM_FIELD_TYPES],
-              description: 'The field type. Use repeating_group for tables, boolean_yes_no for single yes/no.',
+              description:
+                'The field type. Use repeating_group for tables, boolean_yes_no for single yes/no. ' +
+                'A numbered question that prints no lettered choices is a single textarea (or text ' +
+                'for a one-line answer), never a radio with invented options.',
             },
             confidence: {
               type: 'number',
@@ -47,7 +50,12 @@ export const extractFormFieldsTool = {
             selectionType: {
               type: 'string',
               enum: ['single', 'multiple'],
-              description: 'For checkbox_group only.',
+              description:
+                'For checkbox_group only. Default a lettered question to a single-answer radio; use ' +
+                'checkbox_group with "multiple" ONLY when the stem prints an explicit plural ' +
+                'instruction ("more than one answer", "select all that apply", "select correct ' +
+                'answers"). Tick boxes beside the choices, or a singular "circle/select the correct ' +
+                'answer", do not make it multiple.',
             },
             columns: {
               type: 'array',
@@ -101,7 +109,7 @@ export const extractFormFieldsTool = {
             questionRef: {
               type: 'string',
               description:
-                'A reference that identifies exactly ONE question in the pages you were given. Numbering restarts in every question set, so a bare printed number is not a reference on its own: build it from the set heading plus the printed number where that heading is in view ("General Q7", "BBM Q3", "RM Q10"), and prefix with the printed page number where it is not ("p.5 Q7"). Set the SAME string on the question and on its tick/cross outcome box — that string is what links the two, so the pair must match character for character. Omit on anything that is neither.',
+                'A reference that identifies exactly ONE question in the pages you were given. Numbering restarts in every question set, so a bare printed number is not a reference on its own: build it from the set heading plus the printed number where that heading is in view ("General Q7", "BBM Q3", "RM Q10"), and prefix with the printed page number where it is not ("p.5 Q7"). Where the set heading repeats verbatim across several runs (e.g. "Verbal Questions" restarting numbering each time), the heading cannot be the prefix — take it from the nearest distinctive heading (the numbered section the run falls under) or the printed page number, so the reference identifies exactly one question. Set the SAME string on the question and on its tick/cross outcome box — that string is what links the two, so the pair must match character for character. Omit on anything that is neither.',
             },
             coverSection: {
               type: 'string',
@@ -137,5 +145,56 @@ export const extractFormFieldsTool = {
       },
     },
     required: ['fields'],
+  },
+} as const;
+
+export const AUDIT_TOOL_NAME = 'report_missed_fields';
+
+/**
+ * The secondary-pass tool. The model is handed the PDF plus the labels the
+ * first pass ALREADY captured, and asked for the printed input areas that pass
+ * missed — nothing already in the list. Deliberately narrow: this is a review
+ * safety net, not a second extraction, so it returns a flat list of boxes to
+ * consider, never the full field structure.
+ */
+export const reportMissedFieldsTool = {
+  name: AUDIT_TOOL_NAME,
+  description:
+    'Report printed input areas a person is meant to FILL that are NOT already in the provided list of captured fields. A "missed" area is a blank line to write on, a tick or check box, a signature block, a date box, an initials box, or a table cell awaiting entry — anything the printed page leaves for a human to complete. Do NOT report anything that matches a captured field (compare by meaning, not exact wording). Do NOT report static printed text, headings, instructions, logos, or page furniture. Do NOT re-report the individual rows of a table already captured as one repeating group. When nothing was missed, return an empty list — that is the expected result on a clean extraction.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      missedInputs: {
+        type: 'array',
+        description: 'Printed fill-in areas not already captured. Empty when none were missed.',
+        items: {
+          type: 'object',
+          properties: {
+            label: {
+              type: 'string',
+              description:
+                'What the box is for, read off the page — the printed label beside it, or a short description of where it sits ("Assessor signature", "Date completed", "Second witness initials").',
+            },
+            type: {
+              type: 'string',
+              enum: [...FORM_FIELD_TYPES],
+              description: 'Best-guess field type for the box.',
+            },
+            page: {
+              type: 'integer',
+              minimum: 1,
+              description: 'The 1-based printed page the box is on, when you can tell.',
+            },
+            note: {
+              type: 'string',
+              description:
+                'Short reviewer context — where on the page it sits and why it looks fillable ("blank line under the declaration, no label").',
+            },
+          },
+          required: ['label', 'type'],
+        },
+      },
+    },
+    required: ['missedInputs'],
   },
 } as const;

@@ -33,8 +33,11 @@ import { noticesRouter } from './routes/notices.js';
 import { workforceImportRouter } from './routes/workforce-import.js';
 import { workingListRouter } from './routes/working-list.js';
 import { complianceRouter } from './routes/compliance.js';
+import { trainingMatrixRouter } from './routes/training-matrix.js';
+import { trainingSummaryRouter } from './routes/training-summary.js';
 import { profilesRouter } from './routes/profiles.js';
 import { competencyDocumentsRouter } from './routes/competency-documents.js';
+import { coursesRouter } from './routes/courses.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { voiceRouter } from './routes/voice.js';
 
@@ -101,6 +104,14 @@ export function createApp(): Express {
     routes/form-brands.ts.
   */
   app.use('/form-brands/scan', express.json({ limit: '40mb' }));
+
+  /*
+    Same registration-order reason: a course package is a whole zipped manual
+    (deck pages, images, fonts) arriving as base64 — MAX_COURSE_ZIP_BYTES of
+    30 MB is ~40 MB encoded, far past the global parser. The content-serving
+    route under the same prefix has no body, so the parser is a no-op there.
+  */
+  app.use('/courses', express.json({ limit: '42mb' }), coursesRouter);
 
   app.use(express.json({ limit: '2mb' }));
 
@@ -184,6 +195,8 @@ export function createApp(): Express {
   app.use('/workforce-import', workforceImportRouter);
   app.use('/working-list', workingListRouter);
   app.use('/compliance', complianceRouter);
+  app.use('/training-matrix', trainingMatrixRouter);
+  app.use('/training-summary', trainingSummaryRouter);
   app.use('/profiles', profilesRouter);
   app.use('/competency-documents', attachmentJson, competencyDocumentsRouter);
   // The only routes not behind a session or API key — guarded by a shared secret.

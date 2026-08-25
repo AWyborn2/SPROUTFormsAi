@@ -6,6 +6,7 @@ import { BUILDER_STEPS, RETIRED_BUILDER_STEPS, resolveBuilderStep } from '@forma
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
+import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 
 /**
@@ -17,9 +18,11 @@ import { recordAudit } from '../audit/record.js';
  * by somebody other than whoever mapped the pages.
  *
  * THE STATE CARRIES ANSWER KEYS, which is why the org filter is in every WHERE
- * clause rather than checked after loading. A draft read across a tenant
- * boundary would hand over the complete key to another organisation's
- * safety-critical assessment.
+ * clause rather than checked after loading, and why every route — the reads
+ * included — sits behind `forms.edit`, the same gate the fork and publish
+ * paths use. A draft read across a tenant boundary, or by a member whose role
+ * cannot author forms, would hand over the complete key to a safety-critical
+ * assessment.
  */
 export const builderDraftsRouter: Router = Router();
 
@@ -47,6 +50,8 @@ const draftBody = z.object({
   state: z.record(z.string(), z.unknown()),
   formId: z.string().uuid().nullish(),
   versionId: z.string().uuid().nullish(),
+  /** Set when this draft REVISES a published tool — at most one per tool. */
+  revisionOfToolId: z.string().uuid().nullish(),
 });
 
 /** Everything but the state — enough to list and choose from. */
@@ -58,6 +63,7 @@ function summarise(row: typeof schema.assessmentToolDrafts.$inferSelect) {
     step: row.step,
     formId: row.formId,
     versionId: row.versionId,
+    revisionOfToolId: row.revisionOfToolId,
     savedByUserId: row.savedByUserId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -79,16 +85,70 @@ builderDraftsRouter.post(
       res.status(503).json({ error: 'db_unavailable' });
       return;
     }
+    const tenant = req.tenant!;
+    if (!(await hasPermission(tenant, 'forms', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const parsed = draftBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
       return;
     }
-    const tenant = req.tenant!;
     const name = parsed.data.name.trim();
     if (!name) {
       res.status(400).json({ error: 'invalid_request', detail: 'A draft needs a name.' });
       return;
+    }
+
+    const revisionOfToolId = parsed.data.revisionOfToolId ?? null;
+    if (revisionOfToolId) {
+      /*
+        The tool must resolve INSIDE the caller's org before anything is
+        written or revealed — the id must never act as a cross-tenant oracle,
+        so a foreign or unknown tool id reads exactly like a missing one.
+      */
+      const tool = await db.query.assessmentTools.findFirst({
+        where: and(
+          eq(schema.assessmentTools.id, revisionOfToolId),
+          eq(schema.assessmentTools.orgId, tenant.orgId),
+        ),
+      });
+      if (!tool) {
+        res.status(404).json({ error: 'not_found' });
+        return;
+      }
+      /*
+        One revision draft per tool, refused HERE by name rather than left to
+        the partial unique index: the upsert arbiter is (org, name), so a
+        second "start revision" under a different name would insert a second
+        row and trip the index as a 500, while the same name would silently
+        overwrite a colleague's work. The index remains as the race backstop.
+        Autosaves pass because they carry the existing draft's own name.
+      */
+      const existing = await db.query.assessmentToolDrafts.findFirst({
+        where: and(
+          eq(schema.assessmentToolDrafts.revisionOfToolId, revisionOfToolId),
+          eq(schema.assessmentToolDrafts.orgId, tenant.orgId),
+        ),
+      });
+      if (existing && existing.name !== name) {
+        const savedBy = existing.savedByUserId
+          ? await db.query.users.findFirst({
+              where: eq(schema.users.id, existing.savedByUserId),
+            })
+          : undefined;
+        res.status(409).json({
+          error: 'revision_draft_exists',
+          existing: {
+            id: existing.id,
+            name: existing.name,
+            updatedAt: existing.updatedAt.toISOString(),
+            savedByName: savedBy?.name ?? null,
+          },
+        });
+        return;
+      }
     }
 
     const [row] = await db
@@ -101,6 +161,7 @@ builderDraftsRouter.post(
         state: parsed.data.state,
         formId: parsed.data.formId ?? null,
         versionId: parsed.data.versionId ?? null,
+        revisionOfToolId,
         savedByUserId: tenant.userId,
       })
       .onConflictDoUpdate({
@@ -111,6 +172,7 @@ builderDraftsRouter.post(
           state: parsed.data.state,
           formId: parsed.data.formId ?? null,
           versionId: parsed.data.versionId ?? null,
+          revisionOfToolId,
           savedByUserId: tenant.userId,
           updatedAt: new Date(),
         },
@@ -149,6 +211,10 @@ builderDraftsRouter.get(
       return;
     }
     const tenant = req.tenant!;
+    if (!(await hasPermission(tenant, 'forms', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const rows = await db.query.assessmentToolDrafts.findMany({
       where: eq(schema.assessmentToolDrafts.orgId, tenant.orgId),
       orderBy: [desc(schema.assessmentToolDrafts.updatedAt)],
@@ -172,6 +238,11 @@ builderDraftsRouter.get(
       return;
     }
     const tenant = req.tenant!;
+    // The read is the sensitive door — the state carries the answer key.
+    if (!(await hasPermission(tenant, 'forms', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const row = await db.query.assessmentToolDrafts.findFirst({
       // Org in the WHERE, not checked after loading: the state carries the
       // answer key, so a read across the tenant boundary hands another
@@ -199,6 +270,10 @@ builderDraftsRouter.delete(
       return;
     }
     const tenant = req.tenant!;
+    if (!(await hasPermission(tenant, 'forms', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const row = await db.query.assessmentToolDrafts.findFirst({
       where: and(
         eq(schema.assessmentToolDrafts.id, req.params.id!),

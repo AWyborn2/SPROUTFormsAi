@@ -1,22 +1,22 @@
-/**
+﻿/**
  * What Step 1 reports about a document it has just read.
  *
  * The counts are the first thing an author checks and the last thing anybody
  * questions, so each one has to mean what its label says:
  *
- *  · "Fields" is what somebody fills in. Section headers are structure — the
- *    assessment profile asks for them precisely so parts can be anchored — and
+ *  Â· "Fields" is what somebody fills in. Section headers are structure â€” the
+ *    assessment profile asks for them precisely so parts can be anchored â€” and
  *    counting them inflates the number the placement step is measured against,
  *    which then reads as boxes nobody placed;
- *  · "Parts detected" counts PART headings, not headings generally. A count
+ *  Â· "Parts detected" counts PART headings, not headings generally. A count
  *    including every sub-heading promises structure the manifest step cannot
  *    anchor a part to;
- *  · a matching question read one-sided is counted SEPARATELY, because it is
+ *  Â· a matching question read one-sided is counted SEPARATELY, because it is
  *    the one shape that cannot be keyed without somebody typing the rest of it.
  */
 import { describe, expect, it } from 'vitest';
 import type { ExtractedField, ExtractionResult } from '@formai/shared';
-import { statsFor } from './use-builder-draft.js';
+import { seedFields, statsFor } from './use-builder-draft.js';
 
 function field(over: Partial<ExtractedField> & { id: string }): ExtractedField {
   return { label: over.id, type: 'text', confidence: 0.9, ...over };
@@ -37,9 +37,9 @@ describe('statsFor', () => {
   it('counts only the headings a part can be anchored to', () => {
     const stats = statsFor(
       extraction([
-        field({ id: 'h1', type: 'section_header', label: 'PART 1 — THEORY ASSESSMENT' }),
+        field({ id: 'h1', type: 'section_header', label: 'PART 1 â€” THEORY ASSESSMENT' }),
         field({ id: 'h2', type: 'section_header', label: 'Written or Verbal Questions (General)' }),
-        field({ id: 'h3', type: 'section_header', label: 'PART 2 — PRACTICAL DEMONSTRATION' }),
+        field({ id: 'h3', type: 'section_header', label: 'PART 2 â€” PRACTICAL DEMONSTRATION' }),
         field({ id: 'h4', type: 'section_header', label: 'BBM Mining Only' }),
       ]),
     );
@@ -81,7 +81,7 @@ describe('statsFor', () => {
 
   it('does not count a choice field that has no options as a question', () => {
     // A choice field with nothing to choose from is a mis-read, not a
-    // question — reporting it as one hides the mis-read behind a plausible
+    // question â€” reporting it as one hides the mis-read behind a plausible
     // total.
     const stats = statsFor(extraction([field({ id: 'q1', type: 'radio' })]));
 
@@ -103,7 +103,7 @@ describe('statsFor', () => {
 
     expect(stats.matchesComplete).toBe(1);
     expect(stats.matchesIncomplete).toBe(1);
-    // Both are still questions — one simply cannot be keyed yet.
+    // Both are still questions â€” one simply cannot be keyed yet.
     expect(stats.questions).toBe(2);
   });
 
@@ -113,7 +113,7 @@ describe('statsFor', () => {
         field({
           id: 'p1',
           type: 'check_cross',
-          label: 'Q50001782 Driver’s Licence C or higher class',
+          label: 'Q50001782 Driverâ€™s Licence C or higher class',
           coverSection: 'pathway_prerequisites',
         }),
         field({ id: 'p2', type: 'check_cross', coverSection: 'pathway_prerequisites' }),
@@ -136,5 +136,29 @@ describe('statsFor', () => {
     const stats = statsFor(extraction([], 18));
 
     expect(stats.pages).toBe(18);
+  });
+});
+
+/**
+ * The extraction-batch window must survive seeding (R1) — this exact mapping
+ * is where `questionRef` silently died, so the copy is asserted, not assumed.
+ * The placement step scopes detection by it; a dropped window is not an error
+ * anywhere, just detection that quietly stops telling repeated parts apart.
+ */
+describe('seedFields — sourcePages threading', () => {
+  it('copies a stamped window onto the builder field', () => {
+    const [seeded] = seedFields(
+      extraction([field({ id: 'f1', label: 'Wearing correct PPE', sourcePages: { from: 5, to: 8 } })]),
+    );
+
+    expect(seeded!.sourcePages).toEqual({ from: 5, to: 8 });
+  });
+
+  it('omits the key entirely when the extraction carried no window', () => {
+    // Absent, not undefined-valued: an AcroForm or legacy field must publish
+    // without the property so the engine takes its unscoped path (R6).
+    const [seeded] = seedFields(extraction([field({ id: 'f1' })]));
+
+    expect('sourcePages' in seeded!).toBe(false);
   });
 });

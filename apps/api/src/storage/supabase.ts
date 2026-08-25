@@ -116,6 +116,30 @@ export async function uploadAttachment(
 }
 
 /**
+ * Stores one file of a course package at `{orgId}/course-{courseId}/{path}`.
+ *
+ * The only namespace here whose tail is caller-supplied — the import route
+ * has already validated the path shape, and the `course-` infix keeps these
+ * objects out of both the public `logo-` door and the attachment route's
+ * `upload-` regex, exactly as those two are kept out of each other.
+ */
+export async function uploadCourseFile(
+  client: SupabaseStorageClient,
+  orgId: string,
+  courseId: string,
+  path: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<string> {
+  const key = `${orgId}/course-${courseId}/${path}`;
+  const { error } = await client.storage
+    .from(env.SUPABASE_STORAGE_BUCKET_PDFS)
+    .upload(key, bytes, { contentType });
+  if (error) throw new Error(`storage_upload_failed: ${describeStorageError(error)}`, { cause: error });
+  return key;
+}
+
+/**
  * Deletes a single object, scoped to `orgId` — used to reap a superseded
  * logo when branding changes. A key outside the org's prefix is ignored
  * rather than acted on, matching `downloadPdf`'s tenant check.

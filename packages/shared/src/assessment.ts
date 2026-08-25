@@ -26,8 +26,11 @@
  * decision.
  */
 
+import type { CompetencyStatus } from './competency-expiry.js';
 import type { FormField, FormFieldType } from './form-field.js';
+import { geometrySegments } from './geometry.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
+import { visibleFields, type VisibilityAnswers } from './visibility.js';
 import type { AssessmentWorkflow } from './workflow.js';
 
 /**
@@ -42,11 +45,41 @@ export const ASSESSMENT_PATHWAYS = ['experienced', 'new', 'rpl'] as const;
 export type AssessmentPathway = (typeof ASSESSMENT_PATHWAYS)[number];
 
 /**
+ * The pathway a candidate's competency history suggests, to prefill the new-case
+ * form: `experienced` when they already hold — or have held — any competency this
+ * tool awards, `new` otherwise. An experienced candidate has operated the plant
+ * before, so the shorter path fits; a first-timer takes the full assessment.
+ *
+ * Never `rpl`: recognition of prior learning waives the logged-hours parts and
+ * carries a justification, so it is a deliberate assessor decision that history
+ * alone cannot make. And only a SUGGESTION — the assessor sees it and overrides
+ * when they know better, which is the whole point of leaving the box editable.
+ *
+ * Pass the candidate's held competency ids as they come from `/held/:userId`,
+ * which already excludes revoked grants; an expired-but-not-revoked ticket still
+ * counts as experience, because they did operate the machine.
+ */
+export function pathwayFromHistory(
+  awardedCompetencyIds: readonly string[],
+  heldCompetencyIds: Iterable<string>,
+): AssessmentPathway {
+  const held = heldCompetencyIds instanceof Set ? heldCompetencyIds : new Set(heldCompetencyIds);
+  return awardedCompetencyIds.some((id) => held.has(id)) ? 'experienced' : 'new';
+}
+
+/**
  * What kind of evidence a part gathers. Drives which surface fills it and how
  * it completes — a logbook accumulates over weeks against an hours minimum, a
  * practical is marked in one sitting, theory is auto-marked.
+ *
+ * `declaration` is the one that is NOT an assessment: "I was told what this
+ * involves and I am ready" is an attestation, not evidence anyone judges.
+ * It completes the moment the candidate hands it in with every required box
+ * filled — no answer keys, no assessor verdict — and it still GATES: a
+ * pathway that requires it cannot reach sign-off unsigned, which is the whole
+ * reason it is a part rather than furniture.
  */
-export const PART_KINDS = ['theory', 'practical', 'logbook'] as const;
+export const PART_KINDS = ['theory', 'practical', 'logbook', 'declaration'] as const;
 export type PartKind = (typeof PART_KINDS)[number];
 
 /**
@@ -87,6 +120,35 @@ export function theoryRenderingOf(
   manifest: Pick<AssessmentToolManifest, 'theoryRendering'>,
 ): TheoryRendering {
   return manifest.theoryRendering ?? DEFAULT_THEORY_RENDERING;
+}
+
+/**
+ * When a candidate may retry a theory part they got wrong.
+ *
+ *  - `off` — one attempt; a wrong answer is final and a failed quiz does not
+ *    offer another go (the assessor reopens it if they choose to).
+ *  - `immediate` — one question per screen only: a wrong answer shows "Try
+ *    again" on the spot, and the candidate cannot move on until it is right.
+ *  - `end` — no per-question retry; a failed quiz offers a fresh attempt at the
+ *    whole thing from the results screen.
+ */
+export const THEORY_RETRY_MODES = ['off', 'immediate', 'end'] as const;
+export type TheoryRetryMode = (typeof THEORY_RETRY_MODES)[number];
+
+/**
+ * A tool's theory-retry mode, resolved — one rule the API and the builder both
+ * read, so a candidate's screen never disagrees with the author's preview.
+ *
+ * Honours the legacy boolean `theoryAllowRetry` for tools authored before the
+ * mode existed: `true` was the on-the-spot retry (`immediate`), and `false` was
+ * the state that still offered a whole-quiz re-attempt on failure (`end`) — so
+ * neither existing tool changes behaviour. A tool naming a `theoryRetry`
+ * outright uses it.
+ */
+export function theoryRetryOf(
+  manifest: Pick<AssessmentToolManifest, 'theoryRetry' | 'theoryAllowRetry'>,
+): TheoryRetryMode {
+  return manifest.theoryRetry ?? (manifest.theoryAllowRetry ? 'immediate' : 'end');
 }
 
 /** The two outcomes the printed paper offers. There is no third. */
@@ -272,8 +334,335 @@ export function validateProfilePrefill(
 export interface PrerequisiteCheck {
   /** The printed ✓/✗ box the verdict lands in. */
   fieldId: string;
-  /** The competency whose currency answers it. */
+  /**
+   * @deprecated Superseded by `competencyIds`; still read for checks authored
+   * before a box could accept more than one class. Resolve via
+   * `prerequisiteCompetencyIds`, never directly.
+   */
+  competencyId?: string;
+  /**
+   * The competencies ANY ONE of which answers the box — "Driver's Licence C
+   * or higher" is a claim about a FAMILY of classes, and the register keeps
+   * each class as its own competency. One id per qualifying class; the box
+   * ticks (and the sign-off gate passes) when any listed class is current.
+   * Listing the classes per tool rather than ranking them in the register is
+   * deliberate: which classes qualify is this paper's claim, and "or higher"
+   * orders differently for cars, trucks and bikes.
+   */
+  competencyIds?: string[];
+}
+
+/** The classes a prerequisite accepts, whichever spelling the check carries. */
+export function prerequisiteCompetencyIds(
+  check: Pick<PrerequisiteCheck, 'competencyId' | 'competencyIds'>,
+): string[] {
+  const ids = check.competencyIds ?? (check.competencyId ? [check.competencyId] : []);
+  return [...new Set(ids.filter((id) => id.length > 0))];
+}
+
+/** One accepted class, evaluated against the register. */
+export interface PrerequisiteClassState {
   competencyId: string;
+  competencyName: string;
+  /** Current — held, expiring, in grace, or undated. Expired, revoked and missing are not. */
+  satisfied: boolean;
+  status: CompetencyStatus | 'revoked' | 'missing';
+  expiresAt: string | null;
+}
+
+/**
+ * The one answer a multi-class prerequisite gives, from its classes' states.
+ *
+ * ANY current class satisfies the box, and the record leans on the one that
+ * LASTS LONGEST — an undated grant outlasts every dated one, so a licence
+ * expiring next week is not the class the certificate cites when a permanent
+ * one exists. When nothing is current, the most ACTIONABLE failure surfaces:
+ * an expired class renews, a revoked one at least explains itself, missing
+ * says the least — and the name lists every accepted class, so the sign-off
+ * refusal reads "C / LR / HR: missing" rather than blaming one class the
+ * candidate never needed to hold.
+ */
+export function reducePrerequisiteClasses(
+  classes: readonly PrerequisiteClassState[],
+): PrerequisiteClassState {
+  if (classes.length === 0) {
+    // Only bad stored data reaches here — the validators refuse an empty
+    // check at save. Unsatisfied is the honest reading of a claim about
+    // nothing.
+    return {
+      competencyId: '',
+      competencyName: 'Unknown competency',
+      satisfied: false,
+      status: 'missing',
+      expiresAt: null,
+    };
+  }
+
+  const current = [...classes]
+    .filter((c) => c.satisfied)
+    .sort((a, b) => {
+      if (a.expiresAt === null) return -1;
+      if (b.expiresAt === null) return 1;
+      return b.expiresAt.localeCompare(a.expiresAt);
+    })[0];
+  if (current) return current;
+
+  const rank = (s: PrerequisiteClassState['status']) =>
+    s === 'expired' ? 0 : s === 'revoked' ? 1 : 2;
+  const best = [...classes].sort((a, b) => rank(a.status) - rank(b.status))[0]!;
+  return classes.length > 1
+    ? { ...best, competencyName: classes.map((c) => c.competencyName).join(' / ') }
+    : best;
+}
+
+/**
+ * One printed checklist row that ticks when its part completes — see
+ * `partCompletionMarks` on the manifest.
+ *
+ * Addressed by POSITION (a fixed-row index) rather than a row key, because
+ * fixed-row identity is positional everywhere: the fill surface seeds row i
+ * from `fixedRows[i]`, and the exporter maps value rows to printed bands the
+ * same way.
+ *
+ * Several marks may name the SAME row — one entry per part — and the row then
+ * ticks when every named part that applies to the case has passed; see
+ * `completionTickRows`.
+ */
+export interface PartCompletionMark {
+  /** The part whose SATISFACTORY final state ticks the row. */
+  partKey: string;
+  /** The printed checklist — a fixed-row repeating table. */
+  fieldId: string;
+  /** Which printed row, as an index into the field's `fixedRows`. */
+  rowIndex: number;
+  /** The column the tick lands in. */
+  columnKey: string;
+}
+
+/**
+ * The checklist rows a case's progress has earned, merged over what is stored.
+ *
+ * `marks` are the entries for ONE field. The result is POSITIONAL — row i is
+ * printed row i — with gaps filled by empty rows so a tick at row 5 cannot
+ * slide up through a hole at row 2 when the exporter consumes rows in order.
+ * Only SATISFACTORY parts write, and they write `true` into their own cell:
+ * a failed or unstarted part leaves its row exactly as stored, because
+ * un-ticked means "not completed", never "failed".
+ *
+ * SEVERAL MARKS MAY SHARE ONE ROW, and then the row ticks when EVERY mapped
+ * part THAT APPLIES TO THIS CASE has passed. The case that forced the rule:
+ * the Track Dozer's "Theory" method row covers three theory parts — General
+ * plus one of two location-specific papers — so "any passed" ticks after
+ * General alone, and "all passed" never ticks because no candidate sits both
+ * locations' papers. `applicablePartKeys` is the case's own required set
+ * (pathway ∩ location rule, see `casePartKeys`); a mapped part outside it
+ * simply does not count. Omitted means every mapped part applies, which is
+ * exact for single-mark rows and for tools with no location rule. A row none
+ * of whose mapped parts apply stays untouched — it is not this case's row to
+ * tick.
+ */
+export function completionTickRows(
+  marks: readonly PartCompletionMark[],
+  progress: readonly PartProgress[],
+  existing?: SubmissionValue,
+  applicablePartKeys?: ReadonlySet<string>,
+): RepeatingRowValue[] {
+  const rows: RepeatingRowValue[] = Array.isArray(existing)
+    ? (existing as RepeatingRowValue[]).map((r) =>
+        r && typeof r === 'object' && !Array.isArray(r) ? { ...r } : {},
+      )
+    : [];
+
+  const satisfied = new Set(
+    progress.filter((p) => p.state === 'satisfactory').map((p) => p.part.key),
+  );
+
+  const byRow = new Map<number, PartCompletionMark[]>();
+  for (const mark of marks) {
+    const group = byRow.get(mark.rowIndex);
+    if (group) group.push(mark);
+    else byRow.set(mark.rowIndex, [mark]);
+  }
+
+  for (const [rowIndex, group] of byRow) {
+    const applicable = applicablePartKeys
+      ? group.filter((m) => applicablePartKeys.has(m.partKey))
+      : group;
+    if (applicable.length === 0) continue;
+    if (!applicable.every((m) => satisfied.has(m.partKey))) continue;
+    while (rows.length <= rowIndex) rows.push({});
+    for (const mark of applicable) rows[rowIndex]![mark.columnKey] = true;
+  }
+
+  return rows;
+}
+
+/**
+ * The part keys THIS CASE actually requires: the pathway's parts, narrowed by
+ * the tool's per-Location rule when the case names a Location.
+ *
+ * The one derivation `completionTickRows` needs to judge a multi-part row,
+ * kept here so its answer can never drift from the planning engine's — both
+ * sides read `resolveLocationParts`, whose absence rule (an unlisted Location
+ * requires everything) errs toward the longer assessment.
+ */
+export function casePartKeys(
+  manifest: AssessmentToolManifest,
+  pathway: AssessmentPathway,
+  locationPartKeys: LocationPartKeys | undefined,
+  locationId: string | null | undefined,
+): Set<string> {
+  const pathwayKeys = requiredParts(manifest, pathway).map((p) => p.key);
+  return new Set(
+    resolveLocationParts(pathwayKeys, locationPartKeys ?? {}, locationId ? [locationId] : []),
+  );
+}
+
+/** Problems with completion-mark mappings — shared by publish and validation. */
+export function validatePartCompletionMarks(
+  marks: readonly PartCompletionMark[] | undefined,
+  manifest: Pick<AssessmentToolManifest, 'parts'>,
+  fields: readonly FormField[],
+): string[] {
+  const problems: string[] = [];
+  const partKeys = new Set(manifest.parts.map((p) => p.key));
+  const byId = new Map(fields.map((f) => [f.id, f]));
+
+  for (const mark of marks ?? []) {
+    if (!partKeys.has(mark.partKey)) {
+      problems.push(`Completion mark names part "${mark.partKey}", which this tool has no part for.`);
+      continue;
+    }
+    const field = byId.get(mark.fieldId);
+    if (!field) {
+      problems.push(`Completion mark names field "${mark.fieldId}", which is not in this version.`);
+      continue;
+    }
+    if (field.type !== 'repeating_group') {
+      problems.push(
+        `Completion mark for part "${mark.partKey}" targets "${mark.fieldId}", a ${field.type} — only a fixed-row table has rows to tick.`,
+      );
+      continue;
+    }
+    const rowCount = field.fixedRows?.length ?? 0;
+    if (!Number.isInteger(mark.rowIndex) || mark.rowIndex < 0 || mark.rowIndex >= rowCount) {
+      problems.push(
+        `Completion mark for part "${mark.partKey}" names row ${mark.rowIndex}, but "${mark.fieldId}" prints ${rowCount} row${rowCount === 1 ? '' : 's'}.`,
+      );
+    }
+    if (!(field.columns ?? []).some((c) => c.key === mark.columnKey)) {
+      problems.push(
+        `Completion mark for part "${mark.partKey}" names column "${mark.columnKey}", which "${mark.fieldId}" does not have.`,
+      );
+    }
+  }
+
+  return problems;
+}
+
+/**
+ * One declared mark's destination, checked the same way everywhere: the field
+ * must exist, and a cell address must name a real column of a real table.
+ * `what` prefixes each problem so the caller's context survives into the
+ * message ("The 'new' pathway box names field …").
+ */
+function declaredMarkProblems(
+  mark: DeclaredMark,
+  what: string,
+  byId: ReadonlyMap<string, FormField>,
+): string[] {
+  const field = byId.get(mark.fieldId);
+  if (!field) return [`${what} names field "${mark.fieldId}", which is not in this version.`];
+  if (mark.columnKey !== undefined) {
+    if (field.type !== 'repeating_group') {
+      return [`${what} addresses a cell of "${mark.fieldId}", a ${field.type} — only a table has cells.`];
+    }
+    if (!(field.columns ?? []).some((c) => c.key === mark.columnKey)) {
+      return [`${what} names column "${mark.columnKey}", which "${mark.fieldId}" does not have.`];
+    }
+  }
+  return [];
+}
+
+/** Problems with the pathway → printed-box mapping — shared by publish and the tool PATCH. */
+export function validatePathwayMarks(
+  marks: AssessmentToolManifest['pathwayMarks'],
+  fields: readonly FormField[],
+): string[] {
+  const problems: string[] = [];
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  for (const [pathway, mark] of Object.entries(marks ?? {})) {
+    if (!mark) continue;
+    problems.push(...declaredMarkProblems(mark, `The "${pathway}" pathway box`, byId));
+  }
+  return problems;
+}
+
+/**
+ * Problems with the sign-off block's destinations — used by the tool PATCH,
+ * where an editor actively points these at fields and a ghost id is a bug in
+ * the picker rather than history. (Publish-time manifests may carry pointers
+ * from older versions; there the exporter's silent skip remains the contract.)
+ */
+export function validateSignOffMarks(
+  signOff: AssessmentToolManifest['signOff'],
+  fields: readonly FormField[],
+): string[] {
+  if (!signOff) return [];
+  const problems: string[] = [];
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  const pointers: Array<[string | undefined, string]> = [
+    [signOff.assessorNameFieldId, 'The sign-off assessor-name box'],
+    [signOff.assessorSignatureFieldId, 'The sign-off signature box'],
+    [signOff.signedDateFieldId, 'The sign-off date box'],
+  ];
+  for (const [id, what] of pointers) {
+    if (id && !byId.has(id)) problems.push(`${what} names field "${id}", which is not in this version.`);
+  }
+  const marks: Array<[DeclaredMark | undefined, string]> = [
+    [signOff.overallSatisfactory, 'The "Candidate Competent" box'],
+    [signOff.overallNotSatisfactory, 'The "not yet Competent" box'],
+    [signOff.moreCoachingRequiredYes, 'The "more coaching — Yes" box'],
+    [signOff.moreCoachingRequiredNo, 'The "more coaching — No" box'],
+  ];
+  for (const [mark, what] of marks) {
+    if (mark) problems.push(...declaredMarkProblems(mark, what, byId));
+  }
+  return problems;
+}
+
+/**
+ * Problems with the parts' printed verdict pairs — used by the tool PATCH,
+ * where an editor actively points them at fields and a ghost id is a bug in
+ * the picker rather than history.
+ */
+export function validatePartOutcomeMarks(
+  manifest: Pick<AssessmentToolManifest, 'parts'>,
+  fields: readonly FormField[],
+): string[] {
+  const problems: string[] = [];
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  for (const part of manifest.parts) {
+    if (part.outcomeSatisfactory) {
+      problems.push(
+        ...declaredMarkProblems(
+          part.outcomeSatisfactory,
+          `Part "${part.label}" — the Satisfactory verdict box`,
+          byId,
+        ),
+      );
+    }
+    if (part.outcomeNotSatisfactory) {
+      problems.push(
+        ...declaredMarkProblems(
+          part.outcomeNotSatisfactory,
+          `Part "${part.label}" — the Not Satisfactory verdict box`,
+          byId,
+        ),
+      );
+    }
+  }
+  return problems;
 }
 
 /** Problems with prerequisite mappings — shared by publish and the tool PATCH. */
@@ -299,7 +688,7 @@ export function validatePrerequisiteChecks(
       problems.push(`Field "${field.label}" carries two prerequisite checks; one box answers one claim.`);
     }
     seen.add(check.fieldId);
-    if (!check.competencyId) {
+    if (prerequisiteCompetencyIds(check).length === 0) {
       problems.push(`Prerequisite on "${field.label}" names no competency.`);
     }
   }
@@ -326,8 +715,24 @@ export interface AssessmentPart {
    * next part's start field, which needs no furniture in the document.
    */
   startFieldId: string;
-  /** Logbook parts only — hours before the next demonstration is prompted. */
+  /**
+   * Logbook parts only — the target amount, in the part's {@link durationUnit}.
+   * Named `minimumHours` for history; it holds minutes when the part's unit is
+   * minutes. Compared as a plain number against the logged Duration total, so
+   * the unit is a label, not a conversion.
+   */
   minimumHours?: number;
+  /**
+   * Logbook parts only — the unit the minimums and the logged Duration column
+   * are read in. Omitted means `hours`, which every existing tool uses and which
+   * keeps prior behaviour exactly. `minutes` changes only how the numbers are
+   * LABELLED and entered: the engine compares the logged Duration total to the
+   * minimums as plain numbers, so a part whose rows and minimums are both in
+   * minutes gates and progresses identically — only "hrs"/"min" differs. It is
+   * per part because one paper mixes them: the Scraper logs five task types in
+   * hours and its General Items coached exercises at ~15 minutes apiece.
+   */
+  durationUnit?: 'hours' | 'minutes';
   /**
    * Logbook parts only — the column of the part's table that carries each
    * entry's hours. Declared rather than assumed: an imported PDF may extract
@@ -341,6 +746,44 @@ export interface AssessmentPart {
    * the column is entered directly. That is the declared-per-tool flexibility.
    */
   durationColumnKey?: string;
+  /**
+   * Logbook parts only — per-task-type hour minimums WITHIN the one table.
+   *
+   * The multi-stage logbook (the Scraper's Part 5): one printed checklist, a
+   * task-type dropdown column, and a minimum number of hours per task type on
+   * top of the part's overall `minimumHours`. The candidate logs against any
+   * task in any order — exposure to a task type is driven by operations, not a
+   * training sequence — so this NEVER gates progression. It is a target the
+   * fill surface shows the candidate, the assessor reads before signing, and
+   * the save route notifies on, exactly as the overall minimum already is: a
+   * soft target, not a lock.
+   */
+  taskMinimums?: {
+    /** The table column whose value names the task type — a dropdown column. */
+    columnKey: string;
+    /** Minimum hours required for each task-type value. */
+    targets: Array<{ value: string; minimumHours: number }>;
+  };
+  /**
+   * Logbook parts only — where each task type's rows PRINT on the evidence PDF.
+   *
+   * The multi-stage logbook fills ONE table (the source, carrying the task-type
+   * column), but the paper prints a separate grid per task type. At export the
+   * source's rows are partitioned by task value and written into the print-only
+   * table field each task maps to — so the renderer, which draws every field
+   * against its own geometry, needs no notion of tasks at all, and the export
+   * path stays untouched. A task whose rows exceed its printed grid's row count
+   * prints what fits; the hours still count, and the full record lives in the
+   * system.
+   */
+  logbookRouting?: {
+    /** The filled source table — the one carrying the task-type column. */
+    sourceFieldId: string;
+    /** That table's task-type column. */
+    columnKey: string;
+    /** Each task value → the print-only table field its rows render into. */
+    routes: Array<{ value: string; fieldId: string }>;
+  };
   /**
    * The page-one assessment-method entry this part ticks once it passes.
    *
@@ -476,6 +919,23 @@ export interface AssessmentToolManifest {
   prerequisiteChecks?: PrerequisiteCheck[];
 
   /**
+   * Printed checklist rows ticked as parts COMPLETE — the live record of what
+   * a candidate has finished, derived on every read and never stored.
+   *
+   * "Assessment Methods used" prints one row per part, and the paper practice
+   * is that the assessor ticks a row when that part of the training is done.
+   * Mapping each part to its printed row makes the document keep itself: the
+   * moment a part's final outcome is SATISFACTORY, its row ticks on the fill
+   * surface and the export — computed from the attempt rows exactly like part
+   * state itself, so it can never disagree with the progress it reports.
+   *
+   * A part that is failed, in progress, or not in this case's pathway leaves
+   * its row untouched: un-ticked means "not completed", never "failed", and
+   * writing false would print a finding nobody made.
+   */
+  partCompletionMarks?: PartCompletionMark[];
+
+  /**
    * Tool-declared DEFAULT answers, by field id — applied wherever no answer
    * exists yet, and only there.
    *
@@ -502,6 +962,30 @@ export interface AssessmentToolManifest {
    * this existed, so no stored tool changes meaning by gaining the property.
    */
   theoryRendering?: TheoryRendering;
+  /**
+   * The percentage of questions that must be correct for a theory part to be
+   * satisfactory, when the author chose `overall_percentage` as the pass rule.
+   *
+   * 100 = every question correct (the default). 80 = 80% required, etc.
+   * Absent means mandatory-all-correct, which is the pre-existing rule and
+   * what every tool authored before this existed still uses.
+   */
+  theoryPassPercent?: number;
+  /**
+   * @deprecated Superseded by `theoryRetry`; still read by `theoryRetryOf` for
+   * tools authored before the mode existed. `true` meant on-the-spot retry.
+   *
+   * Whether a candidate may retry individual questions after seeing feedback
+   * in interactive theory mode.
+   */
+  theoryAllowRetry?: boolean;
+  /**
+   * When a candidate may retry a theory part they got wrong — off, on the spot
+   * (`immediate`), or a whole-quiz re-attempt at the end (`end`). Resolved by
+   * `theoryRetryOf`, which falls back to the legacy `theoryAllowRetry`. Absent
+   * on tools authored before the mode existed.
+   */
+  theoryRetry?: TheoryRetryMode;
   /**
    * The front page's certification block.
    *
@@ -553,6 +1037,55 @@ export interface AssessmentToolManifest {
     moreCoachingRequiredYes?: DeclaredMark;
     moreCoachingRequiredNo?: DeclaredMark;
   };
+  /**
+   * The printed pathway tick — "New and inexperienced candidates" /
+   * "Experienced candidates or Re-assessments" — written from the CASE.
+   *
+   * The pathway is decided when the case is created (suggested from the
+   * candidate's competency history, adjustable by the assessor) and it is what
+   * chose which parts the candidate sat. The printed box saying so is
+   * therefore a case fact, not an answer: seeded at export exactly like the
+   * location stream, so the ticked pathway can never disagree with the parts
+   * the document actually shows filled.
+   *
+   * Keyed by pathway so two pathways may share one printed box (RPL papers
+   * often tick the experienced line). A pathway with no entry prints nothing,
+   * which is the exporter's safe failure everywhere.
+   */
+  pathwayMarks?: Partial<Record<AssessmentPathway, DeclaredMark>>;
+  /**
+   * The course material a candidate reads BEFORE the assessment — an uploaded
+   * package (interactive deck, SCORM zip or plain HTML) hosted by the API and
+   * tracked per case.
+   *
+   * A link, not the content: the package lives in the `courses` table and
+   * object storage, so several tools can share one manual and re-uploading a
+   * revised deck never touches the tools pointing at it. `required` is what
+   * the runtime gates on — while true, no part attempt can be opened on a
+   * case until that case's reading record is complete. A link whose course
+   * has since been archived or deleted degrades to unenforced (the case
+   * surfaces the dangling link rather than locking the assessment shut).
+   */
+  course?: AssessmentCourseLink;
+}
+
+/** The manifest's pointer at a hosted course package. */
+export interface AssessmentCourseLink {
+  courseId: string;
+  /** Gate part attempts on the case's reading record being complete. */
+  required: boolean;
+}
+
+/**
+ * One file inside an uploaded course package, as stored alongside the course
+ * row. The list is the serving allowlist: a request for any path not on it is
+ * a 404 before storage is ever consulted.
+ */
+export interface CourseFileEntry {
+  /** Zip-relative path, forward slashes, no leading slash. */
+  path: string;
+  size: number;
+  contentType: string;
 }
 
 /**
@@ -716,13 +1249,24 @@ export function resolveLocationParts(
 }
 
 /**
- * The fields belonging to the section opened by `headerFieldId` — everything
- * after that header up to the next `section_header`, header excluded.
+ * The fields belonging to the section anchored by `headerFieldId` — from the
+ * anchor up to the next `section_header`.
  *
- * This is the same header-to-next-header rule `visibility.ts` applies to
- * section scope. It lives here too because part membership and mandatory-section
+ * THE ANCHOR IS INCLUDED WHEN IT IS A REAL FIELD, EXCLUDED WHEN IT IS THE
+ * SECTION'S HEADING. A part anchors on its `section_header` where the section
+ * has one, and on its FIRST FILLABLE FIELD where it does not — a section an
+ * author built by grouping has no printed heading to point at. Slicing
+ * unconditionally from after the anchor was correct only for the header case:
+ * on a header-less logbook section the anchor IS the table, so skipping it left
+ * the table out of its own section — the column picker then offered a
+ * neighbour's fields and the validator reported the declared duration column
+ * "is not a column of its table". Keeping a non-header anchor puts the section's
+ * own first field back where it belongs.
+ *
+ * This mirrors the header-to-next-header rule `visibility.ts` applies to section
+ * scope. It lives here too because part membership and mandatory-section
  * membership are structural questions asked outside visibility evaluation, and
- * an unknown header returns nothing rather than the whole form: a manifest
+ * an unknown anchor returns nothing rather than the whole form: a manifest
  * pointing at a field that no longer exists must yield an empty section, never
  * silently claim every field in the document.
  */
@@ -733,10 +1277,12 @@ export function fieldsInSection(
   const start = fields.findIndex((f) => f.id === headerFieldId);
   if (start < 0) return [];
 
+  const anchorIsHeader = fields[start]!.type === 'section_header';
   const out: FormField[] = [];
-  for (let i = start + 1; i < fields.length; i++) {
+  for (let i = anchorIsHeader ? start + 1 : start; i < fields.length; i++) {
     const field = fields[i]!;
-    if (field.type === 'section_header') break;
+    // The anchor never terminates its own section; only a LATER header does.
+    if (i !== start && field.type === 'section_header') break;
     out.push(field);
   }
   return out;
@@ -827,28 +1373,128 @@ export function validateManifest(
     }
 
     if (part.kind === 'logbook') {
+      // Resolved once: both the duration column and the per-task targets check
+      // against the part's own table.
+      const table = fieldsInSection(fields, part.startFieldId).find(
+        (f) => f.type === 'repeating_group',
+      );
+
       if (!(part.minimumHours && part.minimumHours > 0)) {
         problems.push(`Logbook part "${part.key}" has no positive minimumHours.`);
       }
       if (!part.durationColumnKey) {
         problems.push(`Logbook part "${part.key}" declares no durationColumnKey.`);
-      } else {
+      } else if (!table) {
         // The declared column must exist in the part's own table. Totalling a
         // column that is not there silently reports zero hours against a
         // safety threshold, so the mismatch is an authoring error — caught
         // here, where an author can fix it.
-        const table = fieldsInSection(fields, part.startFieldId).find(
-          (f) => f.type === 'repeating_group',
+        problems.push(`Logbook part "${part.key}" has no repeating table in its section.`);
+      } else if (table.columns && !table.columns.some((c) => c.key === part.durationColumnKey)) {
+        problems.push(
+          `Logbook part "${part.key}" names duration column "${part.durationColumnKey}", which is not a column of its table.`,
         );
-        if (!table) {
-          problems.push(`Logbook part "${part.key}" has no repeating table in its section.`);
-        } else if (
-          table.columns &&
-          !table.columns.some((c) => c.key === part.durationColumnKey)
-        ) {
+      }
+
+      /*
+        Per-task-type hour targets. Every pointer validated where an author can
+        still fix it: a target on a column that is not there, or a task value
+        the dropdown never offers, would silently never accrue and never be met
+        — the hours would land nowhere and the target read as unreachable on a
+        candidate who did the work.
+      */
+      if (part.taskMinimums) {
+        const tm = part.taskMinimums;
+        const col = table?.columns?.find((c) => c.key === tm.columnKey);
+        if (table?.columns && !col) {
           problems.push(
-            `Logbook part "${part.key}" names duration column "${part.durationColumnKey}", which is not a column of its table.`,
+            `Logbook part "${part.key}" names task column "${tm.columnKey}", which is not a column of its table.`,
           );
+        }
+        if (col && (col.options?.length ?? 0) === 0) {
+          problems.push(
+            `Logbook part "${part.key}" task column "${tm.columnKey}" has no options for a filler to choose from.`,
+          );
+        }
+        if (tm.targets.length === 0) {
+          problems.push(`Logbook part "${part.key}" declares task minimums with no targets.`);
+        }
+        const seen = new Set<string>();
+        for (const t of tm.targets) {
+          if (!(t.minimumHours > 0)) {
+            problems.push(`Logbook part "${part.key}" task "${t.value}" has no positive minimumHours.`);
+          }
+          if (seen.has(t.value)) {
+            problems.push(`Logbook part "${part.key}" lists task target "${t.value}" more than once.`);
+          }
+          seen.add(t.value);
+          if (col?.options && col.options.length > 0 && !col.options.includes(t.value)) {
+            problems.push(
+              `Logbook part "${part.key}" task target "${t.value}" is not one of task column "${tm.columnKey}" options.`,
+            );
+          }
+        }
+      }
+
+      /*
+        Row routing to the printed task grids. Every pointer checked here, at
+        authoring time: a route to a field that is not a table, or to the same
+        table as another task, would silently drop or overwrite a task's rows on
+        the evidence document — and a route onto the source itself would replace
+        the candidate's own logbook with one task's slice of it.
+      */
+      if (part.logbookRouting) {
+        const r = part.logbookRouting;
+        const source = byFieldId.get(r.sourceFieldId);
+        if (!source || source.type !== 'repeating_group') {
+          problems.push(
+            `Logbook part "${part.key}" routing source "${r.sourceFieldId}" is not a table in this version.`,
+          );
+        }
+        const col = source?.columns?.find((c) => c.key === r.columnKey);
+        if (source?.columns && !col) {
+          problems.push(
+            `Logbook part "${part.key}" routing column "${r.columnKey}" is not a column of its source table.`,
+          );
+        }
+        if (col && (col.options?.length ?? 0) === 0) {
+          problems.push(
+            `Logbook part "${part.key}" routing column "${r.columnKey}" has no options to route on.`,
+          );
+        }
+        if (r.routes.length === 0) {
+          problems.push(`Logbook part "${part.key}" declares routing with no routes.`);
+        }
+        const seenValues = new Set<string>();
+        const seenTargets = new Set<string>();
+        for (const route of r.routes) {
+          if (col?.options && col.options.length > 0 && !col.options.includes(route.value)) {
+            problems.push(
+              `Logbook part "${part.key}" routes task "${route.value}", which is not an option of column "${r.columnKey}".`,
+            );
+          }
+          if (seenValues.has(route.value)) {
+            problems.push(`Logbook part "${part.key}" routes task "${route.value}" more than once.`);
+          }
+          seenValues.add(route.value);
+
+          const target = byFieldId.get(route.fieldId);
+          if (!target || target.type !== 'repeating_group') {
+            problems.push(
+              `Logbook part "${part.key}" routes task "${route.value}" to "${route.fieldId}", which is not a table in this version.`,
+            );
+          }
+          if (route.fieldId === r.sourceFieldId) {
+            problems.push(
+              `Logbook part "${part.key}" routes task "${route.value}" onto its own source table, which would overwrite the candidate's log.`,
+            );
+          }
+          if (seenTargets.has(route.fieldId)) {
+            problems.push(
+              `Logbook part "${part.key}" routes two tasks to the same table "${route.fieldId}" — their rows would overwrite each other.`,
+            );
+          }
+          seenTargets.add(route.fieldId);
         }
       }
     }
@@ -1034,6 +1680,8 @@ export function validateManifest(
   */
   problems.push(...validateProfilePrefill(manifest.profilePrefill, fields));
   problems.push(...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields));
+  problems.push(...validatePartCompletionMarks(manifest.partCompletionMarks, manifest, fields));
+  problems.push(...validatePathwayMarks(manifest.pathwayMarks, fields));
   for (const id of Object.keys(manifest.fieldDefaults ?? {})) {
     if (!fieldIds.has(id)) {
       problems.push(`Default answer names field "${id}", which is not in this version.`);
@@ -1114,13 +1762,25 @@ function attemptsForPart(attempts: readonly AttemptFact[], partKey: string): Att
  * A dependency that cannot bite is waived rather than deadlocked: a required
  * section with no part, or whose part this pathway does not include (RPL
  * waives the logbooks), never blocks anything.
+ *
+ * `applicablePartKeys` narrows further to what THIS CASE requires — the
+ * pathway's parts intersected with the tool's per-Location rule for the
+ * case's Location (`casePartKeys`). A part the rule excludes behaves exactly
+ * like one the pathway excludes: it is not listed, it never blocks the
+ * sequential unlock, and the case completes without it. Before this the rule
+ * was stored and edited but never enforced, so a Boddington dozer case still
+ * demanded the Worsley theory paper. Omitted means pathway-only, which is
+ * what every caller without a case in hand (the builder, validation) wants.
  */
 export function caseProgress(
   manifest: AssessmentToolManifest,
   pathway: AssessmentPathway,
   attempts: readonly AttemptFact[],
+  applicablePartKeys?: ReadonlySet<string>,
 ): PartProgress[] {
-  const required = requiredParts(manifest, pathway);
+  const required = requiredParts(manifest, pathway).filter(
+    (p) => !applicablePartKeys || applicablePartKeys.has(p.key),
+  );
 
   // Pass/fail per part first: dependencies may point FORWARD in document
   // order (the cover-page declaration depending on the theory printed after
@@ -1202,6 +1862,65 @@ export function moreCoachingRequired(progress: readonly PartProgress[]): boolean
 }
 
 /**
+ * What comes after the part just finished, from the point of view of whoever
+ * finished it — the "continue, or wait for someone else" step.
+ *
+ * Whether a part is the viewer's to fill is decided by workflow access
+ * (`partFieldAccess`), the same authority the open-attempt route enforces, so
+ * this only ever OFFERS a step the server would then allow. A part carries two
+ * booleans: whether the candidate may fill it, and whether any staff role
+ * (assessor / supervisor / SME) may — computed by the caller so this stays a
+ * pure decision.
+ */
+export interface NextStepPart {
+  key: string;
+  label: string;
+  state: PartState;
+  /** The candidate has `fill` access to a field in this part. */
+  candidateFills: boolean;
+  /** A staff role (assessor / supervisor / SME) has `fill` access to one. */
+  staffFills: boolean;
+}
+
+export type CaseNextStep =
+  /** The viewer can start the next part themselves. */
+  | { kind: 'continue'; partKey: string; label: string }
+  /** The next part belongs to someone else (or is not yet unlocked). */
+  | { kind: 'awaiting_other'; label: string; filledBy: string }
+  /** Nothing left for the viewer — every later part is already satisfactory. */
+  | { kind: 'done' };
+
+/**
+ * The next step after `currentKey` for the party that just completed it.
+ *
+ * The next part is the first one AFTER the current in document order that is not
+ * yet satisfactory — the next thing anyone has to do. A `locked` next part (its
+ * dependencies unmet) is never offered as "continue"; it reads as waiting on the
+ * other party, because from here that is what unblocks it. `viewerIsCandidate`
+ * rather than a role, so this needs no `WorkflowRole` import and cannot go stale
+ * against the role list.
+ */
+export function nextStepAfter(
+  parts: readonly NextStepPart[],
+  currentKey: string,
+  viewerIsCandidate: boolean,
+): CaseNextStep {
+  const index = parts.findIndex((p) => p.key === currentKey);
+  const next = (index === -1 ? [] : parts.slice(index + 1)).find((p) => p.state !== 'satisfactory');
+  if (!next) return { kind: 'done' };
+
+  const viewerFills = viewerIsCandidate ? next.candidateFills : next.staffFills;
+  if (viewerFills && next.state !== 'locked') {
+    return { kind: 'continue', partKey: next.key, label: next.label };
+  }
+  return {
+    kind: 'awaiting_other',
+    label: next.label,
+    filledBy: viewerIsCandidate ? 'your assessor' : 'the candidate',
+  };
+}
+
+/**
  * WHICH rows a logbook part's hours are counted from — the one rule, shared.
  *
  * There were three, and they disagreed. The threshold notification counted the
@@ -1248,11 +1967,82 @@ export function logbookRows(
 }
 
 /**
+ * EVERY logged row a logbook part totals its hours from — across ALL of the
+ * part's tables, not just the first.
+ *
+ * `logbookRows` answers "the part's DECLARED table": one table, because the
+ * retry carry-forward re-keys each table on its own and must not merge them.
+ * The HOURS total is a different question. A part can hold more than one
+ * repeating table — Part 5's supervised and minimal-supervision logs both
+ * accrue against the same minimum — and the total is the sum over every one of
+ * them. Reading only the first table under-reports a candidate's experience,
+ * which for a figure measured against a safety threshold is the wrong error
+ * direction.
+ *
+ * Value-based on purpose. An attempt's values hold only its own part's fields —
+ * the save route writes nothing else — so "every row list carrying this
+ * column" is exactly this part's logs, and it needs neither the field list nor
+ * the manifest. That is what lets the client progress meter and the server
+ * threshold compute the identical figure, and what lets it span tables the
+ * section-scoped `logbookRows` never reaches when each table sits in its own
+ * sub-section.
+ */
+export function logbookDurationRows(
+  part: Pick<AssessmentPart, 'durationColumnKey'>,
+  values: Record<string, SubmissionValue> | null | undefined,
+): RepeatingRowValue[] {
+  const key = part.durationColumnKey;
+  if (!key) return [];
+  const all = values ?? {};
+  const isRowList = (v: unknown): v is RepeatingRowValue[] =>
+    Array.isArray(v) && v.length > 0 && v.every((r) => typeof r === 'object' && r !== null);
+  const out: RepeatingRowValue[] = [];
+  for (const v of Object.values(all)) {
+    // A row list is one of this part's logs if ANY of its rows carries the
+    // duration column — not merely the first. A logbook filled a shift at a
+    // time often leads with a blank row left ready for the next entry, and a
+    // table whose duration is typed rather than calculated has no cell there
+    // until someone fills one; keying off the first row alone would drop the
+    // whole table's hours in both cases.
+    if (isRowList(v) && v.some((r) => key in r)) out.push(...v);
+  }
+  return out;
+}
+
+/** A logbook part's duration unit, defaulting the omitted case to hours. */
+export type DurationUnit = 'hours' | 'minutes';
+
+/** Short unit label for a logged/target figure — "hrs" or "min". */
+export function durationUnitShort(unit: DurationUnit | undefined): string {
+  return unit === 'minutes' ? 'min' : 'hrs';
+}
+
+/** Long unit label, for prose like "Minimum 15 minutes". */
+export function durationUnitLong(unit: DurationUnit | undefined): string {
+  return unit === 'minutes' ? 'minutes' : 'hours';
+}
+
+/**
+ * Convert a duration figure between units, rounded to 2dp to keep float noise
+ * out of authored minimums (0.1h → 6min, 15min → 0.25h). Same unit is a no-op.
+ * Used when an author flips a part's unit so the meaning is preserved rather
+ * than the digits — the minimums and the logged column share one unit, so both
+ * move together.
+ */
+export function convertDurationValue(value: number, from: DurationUnit, to: DurationUnit): number {
+  if (from === to || !Number.isFinite(value)) return value;
+  const raw = to === 'minutes' ? value * 60 : value / 60;
+  return Math.round(raw * 100) / 100;
+}
+
+/**
  * Hours logged in a logbook part, summed from a duration column.
  *
- * Non-numeric cells contribute nothing rather than throwing: a logbook is
- * filled over weeks by someone in a cab, and one malformed row must not make
- * the whole total unreadable.
+ * "Hours" by name and by the default unit; a minutes part sums minutes the same
+ * way — the figure is in the part's own unit, compared to a minimum in that
+ * same unit. Non-numeric cells contribute nothing rather than throwing: a
+ * logbook is filled over weeks by someone in a cab, and one malformed row must
+ * not make the whole total unreadable.
  */
 export function totalLoggedHours(
   rows: readonly Record<string, unknown>[],
@@ -1268,6 +2058,88 @@ export function totalLoggedHours(
 }
 
 /**
+ * Logbook rows grouped by task type, each group in first-seen order.
+ *
+ * The partition behind BOTH per-task hours and the evidence PDF's row routing:
+ * export sends each task's rows to its own printed grid, and the same grouping
+ * underlies the per-task totals. A row with a blank task is left out of every
+ * group — an unclassified entry belongs to no task table. Generic over the row
+ * type so the caller keeps its own row shape (the exporter needs
+ * `RepeatingRowValue[]` back, not `Record`s).
+ */
+export function rowsByTask<T extends Record<string, unknown>>(
+  rows: readonly T[],
+  taskColumnKey: string,
+): Map<string, T[]> {
+  const out = new Map<string, T[]>();
+  for (const row of rows) {
+    const task = row?.[taskColumnKey];
+    if (typeof task !== 'string' || task.trim() === '') continue;
+    const list = out.get(task);
+    if (list) list.push(row);
+    else out.set(task, [row]);
+  }
+  return out;
+}
+
+/**
+ * Hours logged PER TASK TYPE — the multi-stage logbook's totals, summed from
+ * the duration column and grouped by the task column.
+ *
+ * A row with a blank task, or a non-positive / non-numeric duration, contributes
+ * nothing: the same tolerance `totalLoggedHours` has, because the same
+ * cab-filled data reaches here and one malformed row must not distort a task's
+ * total. Each task's running sum is rounded the same way the overall total is,
+ * so per-task and overall figures reconcile.
+ */
+export function hoursByTask(
+  rows: readonly Record<string, unknown>[],
+  taskColumnKey: string,
+  durationKey: string,
+): Map<string, number> {
+  const totals = new Map<string, number>();
+  for (const row of rows) {
+    const task = row?.[taskColumnKey];
+    if (typeof task !== 'string' || task.trim() === '') continue;
+    const raw = row?.[durationKey];
+    const value = typeof raw === 'number' ? raw : Number.parseFloat(String(raw ?? ''));
+    if (!Number.isFinite(value) || value <= 0) continue;
+    totals.set(task, Math.round(((totals.get(task) ?? 0) + value) * 100) / 100);
+  }
+  return totals;
+}
+
+/** One task type's progress toward its logbook hour minimum. */
+export interface TaskHourProgress {
+  value: string;
+  minimumHours: number;
+  loggedHours: number;
+  /** Hours logged have reached the minimum. A SOFT target — never a gate. */
+  met: boolean;
+}
+
+/**
+ * Per-task progress for a logbook part, in the order the targets are declared.
+ *
+ * The one read behind the candidate's progress chips, the assessor's pre-sign
+ * readout, and the per-task "minimum reached" notice — so those three can never
+ * disagree about a task's hours. A target with no matching rows still appears,
+ * at zero: a task never started is exactly what the candidate and assessor most
+ * need to see.
+ */
+export function logbookTaskProgress(
+  rows: readonly Record<string, unknown>[],
+  taskMinimums: NonNullable<AssessmentPart['taskMinimums']>,
+  durationKey: string,
+): TaskHourProgress[] {
+  const totals = hoursByTask(rows, taskMinimums.columnKey, durationKey);
+  return taskMinimums.targets.map((t) => {
+    const loggedHours = totals.get(t.value) ?? 0;
+    return { value: t.value, minimumHours: t.minimumHours, loggedHours, met: loggedHours >= t.minimumHours };
+  });
+}
+
+/**
  * Problems with auto-marking configuration on a field set. Empty means valid.
  *
  * A field with neither an answer key nor an outcome target is ordinary and
@@ -1278,6 +2150,23 @@ export function validateAnswerKeys(fields: readonly FormField[]): string[] {
   const byId = new Map(fields.map((f) => [f.id, f]));
 
   for (const field of fields) {
+    /*
+      A MODEL ANSWER ON A CHOICE QUESTION IS AUTHOR CONFUSION, not a richer
+      configuration. A question that offers options is marked by exact-set
+      `answerKey`; a written question is judged by an assessor reading prose
+      against `modelAnswer`. An options-bearing field carrying a model answer
+      means the author reached for the wrong instrument — the guide would sit
+      beside a question the machine already marks, and nobody would ever read
+      it. Written questions (no options) pass with or without an
+      `outcomeTarget`: the target is where the ASSESSOR'S tick lands, and a
+      guide with no declared cell is still a legitimate marking aid.
+    */
+    if (field.modelAnswer && (field.options?.length ?? 0) > 0) {
+      problems.push(
+        `Field "${field.id}" has a model answer but offers options — a choice question takes an answer key, not a written marking guide.`,
+      );
+    }
+
     if (!field.answerKey) continue;
 
     if (field.answerKey.length === 0) {
@@ -1311,4 +2200,133 @@ export function validateAnswerKeys(fields: readonly FormField[]): string[] {
   }
 
   return problems;
+}
+
+/**
+ * Every mark destination the export writes that has NO BOX to draw into.
+ *
+ * The exporter's rule is "silence is the safe failure": a field with no
+ * geometry is skipped without an error, because a confident mark in a guessed
+ * position asserts a finding nobody made. The cost of that rule is that a
+ * whole class of authoring gap is invisible — the ✓/✗ column beside thirty
+ * questions can compute thirty verdicts that print NOWHERE, and nothing
+ * anywhere says so. The values exist, the marking ran, the document simply
+ * never shows it.
+ *
+ * This names those silences, using the SAME resolver the exporter draws with
+ * (`geometrySegments`, legacy `sourcePosition` bridge included) so the two can
+ * never disagree about what "placed" means. A ghost id — a destination naming
+ * a field the version lacks — is NOT reported here; that is `validateManifest`'s
+ * problem and a harder one.
+ *
+ * WARNINGS, NEVER GATES. A tool with unplaced marks still assesses, marks and
+ * certifies correctly — only the printed record is incomplete — and blocking
+ * publish on it would strand an author mid-build over boxes they may be about
+ * to place.
+ */
+export function unplacedMarkDestinations(
+  manifest: AssessmentToolManifest,
+  fields: readonly FormField[],
+): string[] {
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  const short = (label: string) =>
+    label.length > 48 ? `${label.slice(0, 48).trimEnd()}…` : label;
+
+  const check = (id: string | undefined, what: string) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    const field = byId.get(id);
+    if (!field) return;
+    if (geometrySegments(field).length > 0) return;
+    out.push(`${what} has no box on the document — its mark computes but prints nowhere.`);
+  };
+
+  for (const field of fields) {
+    if ((field.answerKey?.length ?? 0) > 0 && field.outcomeTarget) {
+      check(field.outcomeTarget.fieldId, `The ✓/✗ box for "${short(field.label)}"`);
+    }
+  }
+
+  for (const part of manifest.parts) {
+    check(part.outcomeSatisfactory?.fieldId, `Part "${part.label}" — the Satisfactory verdict box`);
+    check(
+      part.outcomeNotSatisfactory?.fieldId,
+      `Part "${part.label}" — the Not Satisfactory verdict box`,
+    );
+    check(part.furtherActionFieldId, `Part "${part.label}" — the further-action box`);
+    check(part.assessorNameFieldId, `Part "${part.label}" — the assessor-name box`);
+    check(part.signedDateFieldId, `Part "${part.label}" — the signed-date box`);
+    check(part.checklistMark?.fieldId, `Part "${part.label}" — its checklist mark`);
+  }
+
+  const signOff = manifest.signOff;
+  if (signOff) {
+    check(signOff.assessorNameFieldId, 'The sign-off assessor-name box');
+    check(signOff.assessorSignatureFieldId, 'The sign-off signature box');
+    check(signOff.signedDateFieldId, 'The sign-off date box');
+    check(signOff.overallSatisfactory?.fieldId, 'The "Candidate Competent" box');
+    check(signOff.overallNotSatisfactory?.fieldId, 'The "not yet Competent" box');
+    check(signOff.moreCoachingRequiredYes?.fieldId, 'The "more coaching — Yes" box');
+    check(signOff.moreCoachingRequiredNo?.fieldId, 'The "more coaching — No" box');
+  }
+
+  for (const [pathway, mark] of Object.entries(manifest.pathwayMarks ?? {})) {
+    check(mark?.fieldId, `The "${pathway}" pathway box`);
+  }
+
+  for (const prereq of manifest.prerequisiteChecks ?? []) {
+    check(prereq.fieldId, 'A prerequisite ✓/✗ box');
+  }
+  for (const fieldId of Object.keys(manifest.profilePrefill ?? {})) {
+    const label = byId.get(fieldId)?.label;
+    check(fieldId, `The profile-prefilled box${label ? ` "${short(label)}"` : ''}`);
+  }
+  check(manifest.candidateNameFieldId, "The candidate's-name box");
+  for (const mark of manifest.partCompletionMarks ?? []) {
+    check(mark.fieldId, 'The assessment-methods checklist');
+  }
+
+  return out;
+}
+
+/**
+ * The required boxes a declaration hand-in has not filled.
+ *
+ * A declaration completes at submit with nobody judging it, so submit is the
+ * only gate there is — and "signed" has to mean the required boxes actually
+ * hold something. Without this an empty tap on Submit would auto-complete the
+ * attestation, and the printed record would carry a satisfied declaration
+ * with a blank signature box: an attestation nobody made.
+ *
+ * VISIBILITY IS RESPECTED, over the full field list — a section the
+ * candidate's stream hides is not theirs to sign. Structural furniture
+ * (headers) can hold no value and is skipped by type.
+ */
+export function missingDeclarationFields(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+  partKey: string,
+  values: Record<string, SubmissionValue> | null | undefined,
+): { id: string; label: string }[] {
+  const answers = values ?? {};
+  const visible = new Set(visibleFields(fields, answers as VisibilityAnswers).map((f) => f.id));
+  const empty = (v: SubmissionValue | undefined): boolean => {
+    if (v === undefined || v === null) return true;
+    if (typeof v === 'string') return v.trim() === '';
+    if (Array.isArray(v)) return v.length === 0;
+    return false;
+  };
+
+  return fieldsInPart(fields, manifest, partKey)
+    .filter(
+      (f) =>
+        f.required &&
+        f.type !== 'section_header' &&
+        visible.has(f.id) &&
+        empty(answers[f.id]),
+    )
+    .map((f) => ({ id: f.id, label: f.label }));
 }

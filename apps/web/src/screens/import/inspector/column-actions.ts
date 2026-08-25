@@ -15,11 +15,13 @@ import {
   moveColumn,
   removeColumn,
   renameColumn,
+  setColumnAutoStamp,
   setColumnCalc,
   setColumnRequired,
   setColumnOptions,
   setColumnType,
   setFieldCondition,
+  setTableFixedRows,
   setTableLabelColumn,
   ungroupAnswerSet,
 } from '../../../lib/data/import-session.js';
@@ -37,10 +39,12 @@ export const importSessionColumnActions: ColumnActions = {
   acceptAnswerSet,
   answerSetAccepted,
   setLabelColumn: setTableLabelColumn,
+  setFixedRows: setTableFixedRows,
   addColumn,
   removeColumn,
   moveColumn,
   setColumnCalc,
+  setColumnAutoStamp,
 };
 
 /** Pre-publish: the condition is written into the reviewed field list. */
@@ -152,6 +156,10 @@ export function builderColumnActions(
           .filter((s) => s.columnKeys.length >= 2),
       });
     },
+    // Empty normalizes to undefined — the model never stores an empty
+    // `fixedRows`, and clearing every row turns a checklist back into an open
+    // table, the same end state `setLabelColumn(false)` reaches.
+    setFixedRows: (_id, rows) => update({ fixedRows: rows.length ? rows : undefined }),
     addColumn: () => {
       const columns = cols();
       const taken = new Set(columns.map((c) => c.key));
@@ -190,6 +198,20 @@ export function builderColumnActions(
           if (c.key !== columnKey) return c;
           const { calc: _dropped, ...rest } = c;
           return calc ? { ...rest, calc } : rest;
+        }),
+      });
+    },
+    setColumnAutoStamp: (_id, columnKey, autoStamp) => {
+      const columns = cols();
+      if (!columns.some((c) => c.key === columnKey)) return;
+      // Off removes the key rather than storing `false`, so an unused table
+      // carries no flag — matching how `setColumnCalc` clears.
+      update({
+        columns: columns.map((c) => {
+          if (c.key !== columnKey) return c;
+          if (autoStamp) return { ...c, autoStamp: true };
+          const { autoStamp: _dropped, ...rest } = c;
+          return rest;
         }),
       });
     },

@@ -3,6 +3,7 @@ import { render, screen, fireEvent, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import {
   RepeatingGroup,
+  todayISODate,
   type RepeatingGroupAnswerSet,
   type RepeatingGroupColumn,
   type RepeatingRow,
@@ -322,5 +323,96 @@ describe('check/cross cells', () => {
     // a single checkbox cannot say "assessed and failed".
     render(<Harness columns={columns} initialRows={[{}, {}]} />);
     expect(screen.getAllByRole('group', { name: 'Result' })).toHaveLength(2);
+  });
+});
+
+describe('auto-stamped date/time columns', () => {
+  const DATE_COL: RepeatingGroupColumn = { key: 'date', label: 'Date', type: 'date', autoStamp: true };
+  const PLAIN_DATE_COL: RepeatingGroupColumn = { key: 'date', label: 'Date', type: 'date' };
+
+  function addRow() {
+    fireEvent.click(screen.getByRole('button', { name: /Add row/ }));
+  }
+
+  it('seeds a new row with today when the date column auto-stamps', () => {
+    // The whole point: an operator adds an entry to log a task starting now, so
+    // the date is filled without a keystroke.
+    render(<Harness columns={[DATE_COL]} initialRows={[]} />);
+    addRow();
+
+    const input = screen.getByLabelText('Date') as HTMLInputElement;
+    expect(input.value).toBe(todayISODate());
+  });
+
+  it('leaves a new row blank when the date column does NOT auto-stamp', () => {
+    // Opt-in: a table that never asked for it keeps blank-on-add, so existing
+    // forms are unchanged.
+    render(<Harness columns={[PLAIN_DATE_COL]} initialRows={[]} />);
+    addRow();
+
+    expect((screen.getByLabelText('Date') as HTMLInputElement).value).toBe('');
+  });
+
+  it('re-stamps today with the Today button after a manual change', () => {
+    render(<Harness columns={[PLAIN_DATE_COL]} initialRows={[{ date: '2020-01-01' }]} />);
+    const input = () => screen.getByLabelText('Date') as HTMLInputElement;
+    expect(input().value).toBe('2020-01-01');
+
+    fireEvent.click(screen.getByRole('button', { name: /Stamp today's date/ }));
+    expect(input().value).toBe(todayISODate());
+  });
+
+  it('keeps the stamped date editable — it is a default, not a lock', () => {
+    // Honest back-dating of a prior shift must stay possible.
+    render(<Harness columns={[DATE_COL]} initialRows={[]} />);
+    addRow();
+    const input = screen.getByLabelText('Date') as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: '2026-08-01' } });
+    expect((screen.getByLabelText('Date') as HTMLInputElement).value).toBe('2026-08-01');
+  });
+
+  it('seeds the current time when a time column auto-stamps', () => {
+    render(
+      <Harness
+        columns={[{ key: 'started', label: 'Started', type: 'time', autoStamp: true }]}
+        initialRows={[]}
+      />,
+    );
+    addRow();
+
+    // Not compared to a re-read of the clock: a minute rollover between add and
+    // assertion would flake. The property is that it was seeded at all.
+    expect((screen.getByLabelText('Started') as HTMLInputElement).value).toMatch(/^\d{2}:\d{2}$/);
+  });
+});
+
+describe('signature cells', () => {
+  const columns: RepeatingGroupColumn[] = [
+    { key: 'name', label: 'Operator', type: 'text' },
+    { key: 'sig', label: 'Operator signature', type: 'signature' },
+  ];
+
+  it('renders a "Tap to sign" affordance, not a text box, for an empty signature', () => {
+    render(<Harness columns={columns} initialRows={[{ name: 'Ash', sig: '' }]} />);
+    expect(screen.getByRole('button', { name: /tap to sign/i })).toBeTruthy();
+    // Crucially NOT a plain text input, which is what a signature column used to
+    // fall through to.
+    expect(screen.queryByRole('textbox', { name: /Operator signature/ })).toBeNull();
+  });
+
+  it('opens a full drawing pad in a dialog when the cell is tapped', () => {
+    render(<Harness columns={columns} initialRows={[{ name: 'Ash', sig: '' }]} />);
+    fireEvent.click(screen.getByRole('button', { name: /tap to sign/i }));
+    const dialog = screen.getByRole('dialog');
+    // The pad is a canvas exposed as an image labelled by the column.
+    expect(within(dialog).getByRole('img', { name: /Operator signature/ })).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: /save signature/i })).toBeTruthy();
+  });
+
+  it('shows the captured signature as an image in read-only mode', () => {
+    const png = 'data:image/png;base64,AAAA';
+    render(<Harness columns={columns} initialRows={[{ name: 'Ash', sig: png }]} readOnly />);
+    expect((screen.getByAltText('Operator signature') as HTMLImageElement).src).toBe(png);
   });
 });

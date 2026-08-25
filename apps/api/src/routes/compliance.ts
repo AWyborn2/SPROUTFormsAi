@@ -1,17 +1,21 @@
 import { Router } from 'express';
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { competencyCurrency, countsAsHeld } from '@formai/shared';
+import { bestCurrency, competencyCurrency, countsAsHeld } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
-import { requiredCompetencyIdsByUser } from '../lib/standing.js';
+import { competencySourcesByUser, sourceRefs, type CompetencySourceRef } from '../lib/standing.js';
+import { awardingToolByCompetency } from '../lib/requirement-links.js';
 import { db } from '../db.js';
 
 /**
  * Compliance reporting (U20) — how the workforce stands, as the surface shown an
- * auditor. Three things and no more: a REQUIRED competency expired, a required
- * competency a holder has NEVER held, and a member no notification can reach.
+ * auditor: a REQUIRED competency expired, a required competency a holder has
+ * NEVER held, a required competency EXPIRING inside the assessor planning
+ * window or already IN GRACE (both still count, both need a booking — the
+ * number that lets an Admin act before anything stops counting), and a member
+ * no notification can reach.
  *
  * Only REQUIRED competencies count (R101): an optional lapse is not a compliance
  * failure (R102), so standing is read here, not currency alone. The two gaps are
@@ -32,6 +36,41 @@ export interface ComplianceGap {
   name: string;
   competencyId: string;
   competencyName: string;
+  /**
+   * Whether a BOOKABLE assessment awards this competency, from the KTD2
+   * resolver — the same resolution assignment plans cases with, so this flag
+   * and "an assignment exists for it" describe one situation from two sides
+   * (U8, R7, R9). False is the evidence-only case: a licence-type competency
+   * nothing awards (or whose only awarding tool has no published version) is
+   * cleared by RECORDING EVIDENCE — an imported or manual grant (R11) — never
+   * by booking an assessment that does not exist.
+   */
+  hasAwardingAssessment: boolean;
+  /**
+   * WHICH scopes require it of this person, by name (R5, U8) — org, location,
+   * department, role; every contributor on a cross-scope duplicate (AE4), the
+   * legacy role derivation included. Empty on an optional lapse: nothing
+   * requires those, which is exactly what the section says. No viewer gate
+   * here — this whole route is admin/owner-only (the isAdmin check below).
+   */
+  sources: CompetencySourceRef[];
+  /**
+   * The KTD4 visibility outcome: this member has NO location placement, so
+   * the assignment engine can plan no case for them anywhere — the gap is
+   * real but permanently unbookable until somebody places them.
+   *
+   * READ THE WAY THE ENGINE READS IT (review-corrected): raw
+   * `membership_locations`, ANY status. The scope EXPANSION drops retired
+   * locations because a retired site confers no requirements (the U4 split) —
+   * but `decideAssignments` never sees that filter: it takes the membership's
+   * placement rows as they stand, so a member placed only at a closed site
+   * still gets a case booked there. Deriving the marker from the expansion
+   * therefore told an admin "cannot be scheduled — no location placement"
+   * about somebody whose case already exists, which is the one claim this
+   * flag must never make. Retirement changes WHAT is required, not WHERE a
+   * booking can land.
+   */
+  noLocationPlacement: boolean;
 }
 
 /** A member no notification can reach: a flagged address AND no login (R98, R99). */
@@ -64,17 +103,60 @@ complianceRouter.get(
     });
     if (memberships.length === 0) {
       // An organisation with no active members has nobody to report on, and
-      // nobody unreachable. Returns the FULL shape (all four keys) so this path
+      // nobody unreachable. Returns the FULL shape (all five keys) so this path
       // never differs from the normal one — the web type has no optional keys
       // and reads `optionalLapses.length` unconditionally.
-      res.json({ expired: [], neverHeld: [], optionalLapses: [], unreachable: [] });
+      res.json({ expired: [], expiring: [], neverHeld: [], optionalLapses: [], unreachable: [] });
       return;
     }
     const userIds = [...new Set(memberships.map((m) => m.userId))];
 
-    // The obligation per person, from the SAME resolver the assignment engine
-    // reads (R103) — required competencies only (R101).
-    const requiredByUser = await requiredCompetencyIdsByUser(db, orgId, userIds);
+    /*
+      ONE ORG-WIDE EXPANSION SERVES THE OBLIGATION HALF OF THE REPORT
+      (review-verified). The batched provenance read answers two questions at
+      once, on one repeatable-read snapshot instead of the two split reads:
+        — WHY each obligation stands (R5, U8): the sources maps themselves,
+          one read for the whole workforce, never a per-member loop.
+        — The obligation per person (R103, required only, R101): the required
+          map's KEYS are exactly the resolver's set — same expansion, same
+          dual read, the legacy role derivation included — so the assignment
+          engine and this report still cannot disagree.
+      WHO CAN BE SCHEDULED is deliberately NOT one of them: it is a question
+      about placement rows, not about scopes. See the read below.
+    */
+    const sourcesByUser = await competencySourcesByUser(db, orgId, userIds);
+    const requiredByUser = new Map<string, Set<string>>();
+    for (const userId of userIds) {
+      requiredByUser.set(userId, new Set(sourcesByUser.get(userId)?.required.keys() ?? []));
+    }
+
+    /*
+      WHO CAN BE SCHEDULED (U8, KTD4) — read the way the ENGINE reads it: raw
+      `membership_locations` over this report's memberships, ANY location
+      status. A member with no placement keeps their gaps (the requirement is
+      real) but the engine can plan no case with nowhere to assess, so their
+      rows carry an explicit marker instead of silently never resolving.
+
+      NOT from the scope expansion (review-corrected). The expansion drops
+      RETIRED locations, because a retired site stops conferring requirements
+      (the U4 split) — but `decideAssignments` reads the membership's
+      placement rows unfiltered, so a member placed only at a retired site
+      still has a case booked there. Marking them "cannot be scheduled" while
+      their case sits open is the flag asserting the opposite of the truth.
+      Retirement governs WHAT is required, never WHERE it can be booked, and
+      this marker is a statement about the latter.
+    */
+    const placements = await db.query.membershipLocations.findMany({
+      where: inArray(
+        schema.membershipLocations.membershipId,
+        memberships.map((m) => m.id),
+      ),
+    });
+    const placedMembershipIds = new Set(placements.map((p) => p.membershipId));
+    const placedUserIds = new Set<string>();
+    for (const membership of memberships) {
+      if (placedMembershipIds.has(membership.id)) placedUserIds.add(membership.userId);
+    }
     const users = await db.query.users.findMany({ where: inArray(schema.users.id, userIds) });
     const nameByUser = new Map(users.map((u) => [u.id, u.name]));
 
@@ -101,14 +183,29 @@ complianceRouter.get(
       : [];
     const competencyById = new Map(competencies.map((c) => [c.id, c]));
 
+    /*
+      Bookability per competency, resolved ONCE for every competency the report
+      can name (U8, KTD2). Never read off raw awards: a tool whose template has
+      no published version cannot carry a case, and the resolver is the one
+      place that filter lives — so this flag cannot disagree with what the
+      assignment engine would actually book.
+    */
+    const awarding = await awardingToolByCompetency(db, orgId, [...relevantIds]);
+
     const gapOf = (userId: string, competencyId: string, competencyName: string): ComplianceGap => ({
       userId,
       name: nameByUser.get(userId) ?? 'Unknown user',
       competencyId,
       competencyName,
+      hasAwardingAssessment: awarding.has(competencyId),
+      // REQUIRED provenance only: gaps are required by definition, and an
+      // optional lapse's empty list is the true answer (nothing requires it).
+      sources: sourceRefs(sourcesByUser.get(userId)?.required.get(competencyId)),
+      noLocationPlacement: !placedUserIds.has(userId),
     });
 
     const expired: ComplianceGap[] = [];
+    const expiring: ComplianceGap[] = [];
     const neverHeld: ComplianceGap[] = [];
     const optionalLapses: ComplianceGap[] = [];
     for (const membership of memberships) {
@@ -127,6 +224,19 @@ complianceRouter.get(
         const currencies = (grantsByKey.get(`${membership.userId}|${competencyId}`) ?? []).map((g) =>
           competencyCurrency(g, competency, now, 'assessor'),
         );
+        /*
+          EXPIRING-OR-GRACE is captured before the compliant-continue swallows
+          it: `countsAsHeld` deliberately treats both as current, so without
+          this branch the person books nowhere until they tip into `expired` —
+          and somebody in grace is PAST their date, the last person this
+          surface may hide. Read off the BEST grant, not any grant: a renewal
+          leaves the superseded row in place, and flagging a renewed person on
+          the old row's date would book someone who already acted.
+        */
+        const best = bestCurrency(currencies);
+        if (best && (best.status === 'expiring' || best.status === 'grace')) {
+          expiring.push(gapOf(membership.userId, competencyId, competency.name));
+        }
         if (currencies.some((c) => countsAsHeld(c))) continue; // compliant
         const gap = gapOf(membership.userId, competencyId, competency.name);
         // Lapsed on its date (not revoked) → a refresher; otherwise (no grant, or
@@ -195,6 +305,6 @@ complianceRouter.get(
       }
     }
 
-    res.json({ expired, neverHeld, optionalLapses, unreachable });
+    res.json({ expired, expiring, neverHeld, optionalLapses, unreachable });
   }),
 );

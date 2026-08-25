@@ -236,6 +236,9 @@ describe('POST /auth/login', () => {
         orgName: 'Acme Inc',
         userName: 'Ash Wyborn',
         userEmail: 'ash@x.io',
+        // Null until the assessor draws one at a sign-off, which persists it.
+        signature: null,
+        hasPassword: true,
         accountKind: 'team',
         branding: null,
         teamSize: null,
@@ -305,6 +308,10 @@ describe('GET /auth/me', () => {
         orgName: 'Acme Inc',
         userName: 'Ash Wyborn',
         userEmail: 'ash@x.io',
+        // Null until the assessor draws one at a sign-off, which persists it.
+        signature: null,
+        // This fixture user row has no passwordHash, so the step-up can never succeed.
+        hasPassword: false,
         accountKind: 'team',
         branding: null,
         teamSize: null,
@@ -414,5 +421,343 @@ describe('GET /auth/me', () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe('POST /auth/confirm-password', () => {
+  const passwordHash = bcrypt.hashSync('correct horse battery', 4);
+
+  afterEach(async () => {
+    const { resetConfirmThrottle } = await import('../auth/confirm-throttle.js');
+    resetConfirmThrottle();
+  });
+  const tenant = { userId: 'u1', orgId: 'o1', role: 'assessor' as const };
+
+  function confirmDb(user: object | undefined, membershipStatus = 'active') {
+    return {
+      query: {
+        users: { findFirst: vi.fn().mockResolvedValue(user) },
+        memberships: { findFirst: vi.fn().mockResolvedValue({ status: membershipStatus, role: 'assessor' }) },
+      },
+      insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
+    };
+  }
+
+  async function postConfirm(base: string, body: unknown, sealed?: string) {
+    return fetch(`${base}/auth/confirm-password`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(sealed ? { cookie: `fai_session=${sealed}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('204s on the correct password and writes an audit row naming the context', async () => {
+    const dbMock = confirmDb({ id: 'u1', name: 'Ash', passwordHash });
+    mockDbValue = dbMock;
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(
+        base,
+        { password: 'correct horse battery', context: { caseId: 'c9', fieldId: 'f2' } },
+        sealSession(tenant),
+      );
+      expect(res.status).toBe(204);
+      expect(dbMock.insert).toHaveBeenCalledTimes(1);
+      const values = dbMock.insert.mock.results[0]!.value.values as ReturnType<typeof vi.fn>;
+      const row = values.mock.calls[0]![0] as { category: string; target: string };
+      expect(row.category).toBe('security');
+      expect(row.target).toBe('case c9, field f2');
+    } finally {
+      server.close();
+    }
+  });
+
+  it("401s with login's exact body on a wrong password, counting the attempt", async () => {
+    mockDbValue = confirmDb({ id: 'u1', name: 'Ash', passwordHash });
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(base, { password: 'wrong' }, sealSession(tenant));
+      expect(res.status).toBe(401);
+      expect((await res.json()) as object).toEqual({
+        error: 'invalid_credentials',
+        message: 'Invalid username or password.',
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s identically for an account with no password — no oracle for its absence (R6)', async () => {
+    mockDbValue = confirmDb({ id: 'u1', name: 'Ash', passwordHash: null });
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(base, { password: 'anything at all' }, sealSession(tenant));
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('locks after repeated failures and refuses before any compare runs (AE5)', async () => {
+    const dbMock = confirmDb({ id: 'u1', name: 'Ash', passwordHash });
+    mockDbValue = dbMock;
+    const { server, base } = startApp();
+    try {
+      for (let i = 0; i < 5; i++) {
+        await postConfirm(base, { password: 'wrong' }, sealSession(tenant));
+      }
+      const findFirst = dbMock.query.users.findFirst;
+      const callsBefore = findFirst.mock.calls.length;
+      const res = await postConfirm(base, { password: 'correct horse battery' }, sealSession(tenant));
+      expect(res.status).toBe(429);
+      expect(((await res.json()) as { error: string }).error).toBe('too_many_attempts');
+      // Refused at the gate: no user lookup, so no bcrypt work either.
+      expect(findFirst.mock.calls.length).toBe(callsBefore);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s unauthenticated with no cookie', async () => {
+    mockDbValue = confirmDb({ id: 'u1', name: 'Ash', passwordHash });
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(base, { password: 'whatever' });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('unauthenticated');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s a deactivated member holding a still-valid cookie (revalidateTenant)', async () => {
+    // The manual-unseal routes must run the same membership revalidation
+    // requireTenant does — a suspended member's 7-day cookie cannot confirm.
+    mockDbValue = confirmDb({ id: 'u1', name: 'Ash', passwordHash }, 'suspended');
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(base, { password: 'correct horse battery' }, sealSession(tenant));
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('unauthenticated');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a context id over the 64-char cap, so the audit log cannot be flooded', async () => {
+    mockDbValue = confirmDb({ id: 'u1', name: 'Ash', passwordHash });
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(
+        base,
+        { password: 'correct horse battery', context: { caseId: 'x'.repeat(65) } },
+        sealSession(tenant),
+      );
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('validation_error');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('PUT /auth/signature', () => {
+  const tenant = { userId: 'u1', orgId: 'o1', role: 'assessor' as const };
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAA=';
+
+  function signatureDb(
+    user: Record<string, unknown> = { signature: PNG, passwordHash: 'h' },
+  ) {
+    const where = vi.fn().mockResolvedValue(undefined);
+    const set = vi.fn((_patch: Record<string, unknown>) => ({ where }));
+    return {
+      db: {
+        query: {
+          users: {
+            findFirst: vi
+              .fn()
+              .mockResolvedValue({ id: 'u1', name: 'Ash', email: 'a@x.io', ...user }),
+          },
+          organizations: {
+            findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme', planTier: 'business' }),
+          },
+          memberships: {
+            findFirst: vi.fn().mockResolvedValue({ status: 'active', role: 'assessor' }),
+          },
+        },
+        update: vi.fn(() => ({ set })),
+      },
+      set,
+    };
+  }
+
+  async function putSignature(base: string, body: unknown, sealed?: string) {
+    return fetch(`${base}/auth/signature`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        ...(sealed ? { cookie: `fai_session=${sealSession(tenant)}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('saves a valid PNG, stamping the deliberate-save marker, and returns the session', async () => {
+    const { db, set } = signatureDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await putSignature(base, { signature: PNG }, 'yes');
+      expect(res.status).toBe(200);
+      const patch = set.mock.calls[0]![0] as unknown as { signature: string; signatureSavedAt: Date };
+      expect(patch.signature).toBe(PNG);
+      expect(patch.signatureSavedAt).toBeInstanceOf(Date);
+      expect(((await res.json()) as { signature: string }).signature).toBe(PNG);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('clearing nulls both the signature and the marker', async () => {
+    const { db, set } = signatureDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await putSignature(base, { signature: null }, 'yes');
+      expect(res.status).toBe(200);
+      expect(set.mock.calls[0]![0]).toEqual({ signature: null, signatureSavedAt: null });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a JPEG data URL — the exporter would render it as a silent blank (R9)', async () => {
+    const { db, set } = signatureDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await putSignature(base, { signature: 'data:image/jpeg;base64,/9j/AAA=' }, 'yes');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('not_png_data_url');
+      expect(set).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s an oversized signature without writing', async () => {
+    const { db, set } = signatureDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const big = `data:image/png;base64,iVBORw0K${'A'.repeat(280 * 1024)}`;
+      const res = await putSignature(base, { signature: big }, 'yes');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('too_large');
+      expect(set).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s with no session', async () => {
+    mockDbValue = signatureDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await putSignature(base, { signature: PNG });
+      expect(res.status).toBe(401);
+    } finally {
+      server.close();
+    }
+  });
+
+  describe('changing an already-saved mark is password-gated (the disarm defence)', () => {
+    const pwHash = bcrypt.hashSync('correct horse battery', 4);
+    const savedUser = {
+      signature: PNG,
+      passwordHash: pwHash,
+      signatureSavedAt: new Date('2026-08-01T00:00:00Z'),
+    };
+
+    afterEach(async () => {
+      const { resetConfirmThrottle } = await import('../auth/confirm-throttle.js');
+      resetConfirmThrottle();
+    });
+
+    it('401s password_required when replacing without a password', async () => {
+      const { db, set } = signatureDb(savedUser);
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await putSignature(base, { signature: PNG }, 'yes');
+        expect(res.status).toBe(401);
+        expect(((await res.json()) as { error: string }).error).toBe('password_required');
+        expect(set).not.toHaveBeenCalled();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('401s password_required when REMOVING (null) without a password', async () => {
+      const { db, set } = signatureDb(savedUser);
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await putSignature(base, { signature: null }, 'yes');
+        expect(res.status).toBe(401);
+        expect(((await res.json()) as { error: string }).error).toBe('password_required');
+        expect(set).not.toHaveBeenCalled();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('saves with the correct password', async () => {
+      const { db, set } = signatureDb(savedUser);
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await putSignature(
+          base,
+          { signature: PNG, password: 'correct horse battery' },
+          'yes',
+        );
+        expect(res.status).toBe(200);
+        expect(set).toHaveBeenCalledTimes(1);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('401s invalid_credentials on a wrong password, writing nothing', async () => {
+      const { db, set } = signatureDb(savedUser);
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await putSignature(base, { signature: PNG, password: 'wrong' }, 'yes');
+        expect(res.status).toBe(401);
+        expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+        expect(set).not.toHaveBeenCalled();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('leaves a no-password (invite) account ungated even with a saved mark', async () => {
+      const { db, set } = signatureDb({ ...savedUser, passwordHash: null });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await putSignature(base, { signature: null }, 'yes');
+        expect(res.status).toBe(200);
+        expect(set).toHaveBeenCalledTimes(1);
+      } finally {
+        server.close();
+      }
+    });
   });
 });

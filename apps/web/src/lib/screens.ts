@@ -117,6 +117,10 @@ export const SCREENS: ScreenDef[] = [
   { key: 'roles', path: '/app/roles', group: 'Enterprise & org', label: 'Access levels', icon: 'shield', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
   { key: 'working-list', path: '/app/working-list', group: 'Enterprise & org', label: 'Working list', icon: 'list-checks', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' , requiresFeature: 'assessments' },
   { key: 'compliance', path: '/app/compliance', group: 'Enterprise & org', label: 'Compliance', icon: 'shield-check', shell: 'app', inNav: true, navGroup: 'training', minAccessLevel: 'admin' , requiresFeature: 'assessments' },
+  // The workforce × competency grid (U5) — who holds what, at a glance.
+  { key: 'training-matrix', path: '/app/training-matrix', group: 'Enterprise & org', label: 'Training matrix', icon: 'grid-3x3', shell: 'app', inNav: true, navGroup: 'training', minAccessLevel: 'admin' , requiresFeature: 'assessments' },
+  // The one-page KPI roll-up of the same standing data (U6) — printable for the toolbox meeting.
+  { key: 'training-summary', path: '/app/training-summary', group: 'Enterprise & org', label: 'Training summary', icon: 'bar-chart-3', shell: 'app', inNav: true, navGroup: 'training', minAccessLevel: 'admin' , requiresFeature: 'assessments' },
   // The member record (U38). SERVES EVERY MEMBER, not only candidates — an
   // assessor's and an administrator's record is this same screen. No
   // `minAccessLevel`: the `profiles` matrix category is the real gate, and a
@@ -129,6 +133,12 @@ export const SCREENS: ScreenDef[] = [
   // does not carry.
   { key: 'workforce-import', path: '/app/workforce-import', group: 'Enterprise & org', label: 'Import workforce', icon: 'upload', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin', requiresFeature: 'assessments' },
   { key: 'audit', path: '/app/audit', group: 'Enterprise & org', label: 'Audit log', icon: 'scroll-text', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' , requiresFeature: 'auditExport' },
+  // The learning loop's candidate-rules surface (2c). Admin-only nav hygiene;
+  // the API endpoint is the real boundary. A read-only view — promotion happens
+  // in code, never here.
+  // Label generalised to cover the placement loop too; key and path stay
+  // stable so bookmarks and the route survive.
+  { key: 'extraction-insights', path: '/app/settings/extraction-insights', group: 'Enterprise & org', label: 'Import insights', icon: 'flask-conical', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
   { key: 'billing', path: '/app/billing', group: 'Enterprise & org', label: 'Billing', icon: 'credit-card', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
   { key: 'competency', path: '/app/competency', group: 'Competency gating', label: 'Competency gating', icon: 'graduation-cap', shell: 'app', inNav: true, navGroup: 'training', minAccessLevel: 'assessor' , requiresFeature: 'competencyGating' },
 
@@ -153,6 +163,9 @@ export const SCREENS: ScreenDef[] = [
   { key: 'assessment-builder', path: '/app/assessments/builder', group: 'Assessments', label: 'Assessment builder', icon: 'sparkles', shell: 'app' },
   { key: 'assessment-builder-draft', path: '/app/assessments/builder/:draftId', group: 'Assessments', label: 'Assessment builder', icon: 'sparkles', shell: 'app' },
   { key: 'assessment-case', path: '/app/assessments/:id', group: 'Assessments', label: 'Assessment case', icon: 'clipboard-list', shell: 'app' },
+  // The case's course material, read in place before the parts can start. A
+  // static segment, so it can never be mistaken for a case id by the route above.
+  { key: 'assessment-case-course', path: '/app/assessments/:id/course', group: 'Assessments', label: 'Course material', icon: 'book-open', shell: 'app' },
   // Filling one part of a case. Addressed by ATTEMPT id, not part key: a retry
   // is a distinct attempt row, and the URL has to say which one is being
   // answered or a resumed link would reopen the wrong one.

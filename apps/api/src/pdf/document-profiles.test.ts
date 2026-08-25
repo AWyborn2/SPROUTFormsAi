@@ -10,7 +10,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import { DOCUMENT_TYPES } from '@formai/shared';
-import { hasProfile, profileFor } from './document-profiles.js';
+import {
+  appendLearnedExamples,
+  hasProfile,
+  learnedExamplesFor,
+  profileFor,
+} from './document-profiles.js';
 
 describe('profileFor', () => {
   it('gives generic no profile, so its behaviour is unchanged', () => {
@@ -252,6 +257,66 @@ describe('the assessment profile', () => {
     expect(p).toContain('WRAPS onto a second printed line is ONE');
   });
 
+  it('defaults a lettered question to a single answer, so an over-eager multiple cannot creep in', () => {
+    /*
+      Failure mode (b): the corpus marks multi-answer questions with an explicit
+      "(more than one answer)" / "select correct answers" and everything else is
+      one answer — but a lettered list drawn with tick boxes reads as multiple
+      unless the default is pinned. A single-answer question read as multiple
+      lets a candidate select every choice and still mark correct.
+    */
+    expect(p).toContain('DEFAULT SINGLE');
+    expect(p).toContain('do NOT make it multiple');
+  });
+
+  it('names the short-answer question as its own free-text field, not a choice field', () => {
+    /*
+      The dominant question type across the theory and familiarisation papers is
+      open-answer with no printed choices. Rule 1 speaks only of lettered
+      questions, so without rule 18 an open question is either given invented
+      options or read as the shape of the multiple-choice question above it.
+    */
+    expect(p).toContain('A NUMBERED QUESTION THAT PRINTS NO CHOICES IS ONE FREE-TEXT ANSWER');
+    expect(p).toContain('textarea');
+    expect(p).toContain('NEVER invent');
+    expect(p).toContain('read each on its own printed shape');
+  });
+
+  it('treats a bare orphaned lettered choice as a batch-boundary fragment, not a field', () => {
+    /*
+      Failure mode (a): a question straddling a page-batch boundary drops its
+      later choices into the next call with no stem above them. Emitted as a
+      field they manufacture a question the paper never asked and mis-number
+      everything after — the commonest way batching corrupts this class.
+    */
+    expect(p).toContain('A BARE LETTERED CHOICE WITH NO QUESTION ABOVE IT');
+    expect(p).toContain('EMIT NOTHING FOR IT');
+    expect(p).toContain('designNotes');
+  });
+
+  it('disambiguates a questionRef when the set heading repeats verbatim', () => {
+    /*
+      The familiarisation papers title every question run identically ("Verbal
+      Questions") and restart numbering under each, so a heading-plus-number
+      reference collides. The reference must single out one question in the pages
+      given — anchored to the nearest distinctive heading or the page number.
+    */
+    expect(p).toContain('WHERE THE SET HEADING REPEATS VERBATIM IT CANNOT BE THE PREFIX');
+    expect(p).toContain('single out ONE');
+  });
+
+  it('keeps the printed question as the label, never the bare reference', () => {
+    /*
+      The real failure: theory questions inside parts came back with `label`
+      "Part 1 Q1" and the question's words nowhere. The label is the only text
+      the builder's question bank shows, and it is what placement matches
+      against the page's own text — a label printed nowhere can never be found
+      on the page, so the field is unreadable AND unplaceable at once.
+    */
+    expect(p).toContain('A QUESTION’S `label` IS THE PRINTED QUESTION, NEVER ITS NUMBER');
+    expect(p).toContain('never substitute the reference for the words');
+  });
+
   it('names no employer, site or ticket code as a requirement', () => {
     /*
       Every example in this profile is illustrative of a printed SHAPE. A rule
@@ -261,6 +326,53 @@ describe('the assessment profile', () => {
     */
     for (const shouted of ['MUST BE BBM', 'always Q50001782', 'Worsley']) {
       expect(p).not.toContain(shouted);
+    }
+  });
+});
+
+/**
+ * The learned-examples promotion path (Phase F / U11) — the ONLY route from the
+ * loop's evidence to the prompt, and a human-gated one. These pin that the seam
+ * is byte-exact when nothing is promoted, that a promoted example actually
+ * reaches the prompt, and that the anti-forms discipline holds over promoted
+ * examples too — so a future promotion cannot smuggle a paper-specific rule in.
+ */
+describe('learned examples', () => {
+  it('leaves the base profile byte-identical when nothing is promoted', () => {
+    // The whole safety claim: adding this seam changed no existing prompt.
+    expect(appendLearnedExamples('BASE PROFILE TEXT', [])).toBe('BASE PROFILE TEXT');
+  });
+
+  it('appends one clearly-headed block carrying each promoted example', () => {
+    const out = appendLearnedExamples('BASE', ['first shape → reading', 'second shape → reading']);
+    expect(out.startsWith('BASE\n')).toBe(true);
+    expect(out).toContain('LEARNED EXAMPLES');
+    expect(out).toContain('1. first shape → reading');
+    expect(out).toContain('2. second shape → reading');
+  });
+
+  it('emits only the block when the base is empty (an untuned type given examples)', () => {
+    const out = appendLearnedExamples('', ['a shape → its reading']);
+    expect(out.startsWith('LEARNED EXAMPLES')).toBe(true);
+    expect(out).toContain('1. a shape → its reading');
+  });
+
+  it('promotes nothing yet, so every profile reads as its base', () => {
+    for (const t of DOCUMENT_TYPES) {
+      expect(learnedExamplesFor(t)).toEqual([]);
+      expect(profileFor(t)).not.toContain('LEARNED EXAMPLES');
+    }
+  });
+
+  it('holds the anti-forms guard over every promoted example, of every type', () => {
+    // Trivially true while nothing is promoted; the point is that it runs, so a
+    // future promotion naming an employer, site or ticket code fails CI here.
+    for (const t of DOCUMENT_TYPES) {
+      for (const example of learnedExamplesFor(t)) {
+        for (const shouted of ['MUST BE BBM', 'always Q50001782', 'Worsley']) {
+          expect(example).not.toContain(shouted);
+        }
+      }
     }
   });
 });

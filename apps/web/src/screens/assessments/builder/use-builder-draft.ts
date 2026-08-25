@@ -11,10 +11,13 @@ import {
   type BuiltMatchingQuestion,
   type BuilderStructure,
   type DraftAnswerKey,
+  type AssessmentToolManifest as ToolManifest,
   type ExtractionResult,
+  type FieldGeometry,
   type FormField,
   type FormFieldType,
   type KeySource,
+  type RevisionIdentity,
   type MatchPresentation,
   type SectionColumns,
   type SetupAnswers,
@@ -26,7 +29,9 @@ import * as Structure from './builder-structure.js';
 import {
   addField,
   deleteField,
+  duplicateSection,
   mergeIntoDescription,
+  mergeRepeatingTable,
   renameField,
   setOutcomeTarget,
 } from './builder-fields.js';
@@ -39,7 +44,7 @@ import {
   type DerivedPart,
 } from './builder-manifest.js';
 import { structureFromExtraction } from './builder-structure.js';
-import { resolvePublishFields } from './builder-publish.js';
+import { extractionQuestionRefs, resolvePublishFields } from './builder-publish.js';
 import type { BuilderSnapshot } from './builder-draft-state.js';
 
 /**
@@ -166,8 +171,39 @@ export interface BuilderDraftState {
   versionId?: string;
   /** The uploaded PDF's storage handle, for the version to carry. */
   assetId?: string;
+  /** Set when this draft REVISES a published tool. Gates every revision branch. */
+  revisionOfToolId?: string;
+  /** The version the revision was seeded from — republish refuses if the tool moved on. */
+  seededFromVersionId?: string;
+  /** The tool's manifest at seed time; republish overlays the builder's onto it. */
+  revisionToolManifest?: ToolManifest;
+  /** The paper revision identity the publish step captures. */
+  revisionIdentity?: RevisionIdentity;
+  /** Geometry carried off the fields when the PDF was replaced — proposals only. */
+  carriedGeometry: Record<string, FieldGeometry>;
+  /** Whether a replacement PDF is in force (revert is offered). */
+  pdfReplaced: boolean;
+  /**
+   * Replace the source PDF in a revision: swap the asset handle and move every
+   * field's geometry into the carried stash — a box confirmed against the old
+   * layout is a PROPOSAL against the new one, never confirmed geometry.
+   */
+  replacePdf: (assetId: string, fileName: string) => void;
+  /** Undo a mis-upload: original PDF back, carried geometry back on as confirmed. */
+  revertPdf: () => void;
+  /** Record the rev code / review date / change note the publish step captures. */
+  setRevisionIdentity: (patch: Partial<RevisionIdentity>) => void;
+  /** Confirm carried boxes onto the fields (placement's apply path). */
+  confirmCarried: (fieldIds: readonly string[]) => void;
   /** Record the draft version the placement step created. */
   setVersionIds: (formId: string, versionId: string) => void;
+  /**
+   * Forget a version that no longer exists — the placement step's recovery
+   * path when the form the snapshot remembered was deleted server-side.
+   * Clearing the ids hands control back to that step's create-on-arrival
+   * effect, which re-materialises a version from the draft's OWN fields.
+   */
+  clearVersionIds: () => void;
   /**
    * Take the geometry back from the placement step.
    *
@@ -241,6 +277,16 @@ export interface FieldOps {
    * step like any other field edit.
    */
   patch: (fieldId: string, patch: Partial<FormField>) => void;
+  /**
+   * Merge one checklist table's rows into another, removing the source.
+   *
+   * Extraction splits ONE printed checklist across a page or batch boundary
+   * into two `repeating_group` tables; this puts the stray table's rows back
+   * where they belong AS FIXED ROWS — pre-printed and locked, like the rows
+   * already there — rather than the ad-hoc, candidate-editable rows that
+   * re-adding them by hand on a fill surface would create.
+   */
+  mergeTable: (sourceFieldId: string, targetFieldId: string) => void;
 }
 
 export interface PartOps {
@@ -263,6 +309,21 @@ export interface KeyOps {
    * as keyed that contributes no mark.
    */
   setKey: (fieldId: string, answerKey: string[], source?: KeySource) => void;
+  /**
+   * Set a WRITTEN question's model answer — the assessor's marking guide.
+   *
+   * The row it writes carries `answerKey: []`: a text/textarea question has no
+   * options, so the key row exists purely to hold the prose and the attestation
+   * (`DraftAnswerKey` documents the shape). Empty or whitespace text REMOVES
+   * the row — a model answer is opt-in, and an empty guide row would let the
+   * step report a written question as guided that guides nothing, exactly the
+   * empty-key case `setKey` refuses.
+   *
+   * Editing the text drops the attestation for the same reason changing a key
+   * does: "the training authority confirmed THIS answer" does not survive the
+   * answer changing.
+   */
+  setModelAnswer: (fieldId: string, text: string) => void;
   /** Toggle one option in a key, for a question that takes a set. */
   toggleOption: (fieldId: string, option: string, multiple: boolean) => void;
   /** Record or withdraw the attestation, with who made it. */
@@ -298,6 +359,16 @@ export interface StructureOps {
   renameSection: (key: string, label: string) => void;
   setColumns: (key: string, cols: SectionColumns) => void;
   toggleOwnPage: (key: string) => void;
+  /**
+   * Remove a section from the arrangement. Its fields move to the section
+   * before it (never deleted — a field that vanishes is one nobody notices is
+   * missing), so on an EMPTY section this is a plain delete. The section's
+   * header field simply stops publishing: `resolveStructure` emits headers
+   * from sections, and its orphan report deliberately ignores headers.
+   */
+  dissolve: (key: string) => void;
+  /** Clone a section — fields, geometry and all — for multi-stage papers. */
+  duplicate: (key: string) => void;
   moveField: (
     fieldId: string,
     toSectionKey: string,
@@ -345,7 +416,7 @@ function messageForError(err: unknown): string {
  * "what did the document actually say", which an edited copy can no longer
  * answer.
  */
-function seedFields(extraction: ExtractionResult): FormField[] {
+export function seedFields(extraction: ExtractionResult): FormField[] {
   return extraction.fields.map((f) => ({
     id: f.id,
     type: f.type,
@@ -359,6 +430,10 @@ function seedFields(extraction: ExtractionResult): FormField[] {
     ...(f.answerSets ? { answerSets: f.answerSets } : {}),
     ...(f.fixedRows ? { fixedRows: f.fixedRows } : {}),
     ...(f.sourcePosition ? { sourcePosition: f.sourcePosition } : {}),
+    // The extraction-batch window, for the placement engine's soft prior.
+    // Dropping it here is exactly how `questionRef` silently died before this
+    // mapping learned to carry review-relevant extraction metadata forward.
+    ...(f.sourcePages ? { sourcePages: f.sourcePages } : {}),
     confidence: f.confidence,
   }));
 }
@@ -422,6 +497,25 @@ export function useBuilderDraftState({
   */
   const [formId, setFormId] = useState<string | undefined>(undefined);
   const [versionId, setVersionId] = useState<string | undefined>(undefined);
+  /*
+    ── Revision mode ───────────────────────────────────────────────────────
+
+    Set only by hydrating a seeded revision draft (`revision-seed.ts`); a
+    fresh build never touches these. `carriedGeometry` is the KTD2 stash:
+    stored geometry means CONFIRMED everywhere it is read — the exporter above
+    all — so boxes carried across a PDF replacement live here as proposals
+    until a reviewer confirms them back onto the fields.
+  */
+  const [revisionOfToolId, setRevisionOfToolId] = useState<string | undefined>(undefined);
+  const [seededFromVersionId, setSeededFromVersionId] = useState<string | undefined>(undefined);
+  const [revisionToolManifest, setRevisionToolManifest] = useState<ToolManifest | undefined>(
+    undefined,
+  );
+  const [seedAssetId, setSeedAssetId] = useState<string | undefined>(undefined);
+  const [revisionIdentity, setRevisionIdentityState] = useState<RevisionIdentity | undefined>(
+    undefined,
+  );
+  const [carriedGeometry, setCarriedGeometry] = useState<Record<string, FieldGeometry>>({});
   /*
     PARTS ARE DERIVED, WITH THE AUTHOR'S EDITS LAYERED ON TOP.
 
@@ -506,6 +600,12 @@ export function useBuilderDraftState({
     setAssetId(hydrateFrom.assetId);
     setFormId(hydrateFrom.formId);
     setVersionId(hydrateFrom.versionId);
+    setRevisionOfToolId(hydrateFrom.revisionOfToolId);
+    setSeededFromVersionId(hydrateFrom.seededFromVersionId);
+    setRevisionToolManifest(hydrateFrom.revisionToolManifest);
+    setSeedAssetId(hydrateFrom.seedAssetId);
+    setRevisionIdentityState(hydrateFrom.revisionIdentity);
+    setCarriedGeometry(hydrateFrom.carriedGeometry ?? {});
     /*
       `ready` SPECIFICALLY, because `hasDocument` is
       `phase === 'ready' && extraction !== null` and every step past upload is
@@ -514,9 +614,15 @@ export function useBuilderDraftState({
       are there, and nothing can be opened.
 
       A draft with no extraction never got past upload, so it stays idle and
-      the author lands on the dropzone, which is correct.
+      the author lands on the dropzone, which is correct — EXCEPT a revision
+      draft, which never has an extraction: it was seeded from a published
+      version, its fields ARE the document, and it must open ready (KTD7).
     */
-    setPhase(hydrateFrom.extraction ? 'ready' : 'idle');
+    setPhase(
+      hydrateFrom.extraction || (hydrateFrom.revisionOfToolId && hydrateFrom.fields.length > 0)
+        ? 'ready'
+        : 'idle',
+    );
   }, [hydrateFrom]);
 
   /** Everything worth saving, for the persistence hook to write. */
@@ -535,6 +641,12 @@ export function useBuilderDraftState({
       ...(assetId ? { assetId } : {}),
       ...(formId ? { formId } : {}),
       ...(versionId ? { versionId } : {}),
+      ...(revisionOfToolId ? { revisionOfToolId } : {}),
+      ...(seededFromVersionId ? { seededFromVersionId } : {}),
+      ...(revisionToolManifest ? { revisionToolManifest } : {}),
+      ...(seedAssetId ? { seedAssetId } : {}),
+      ...(revisionIdentity ? { revisionIdentity } : {}),
+      ...(Object.keys(carriedGeometry).length > 0 ? { carriedGeometry } : {}),
     }),
     [
       fileName,
@@ -550,6 +662,12 @@ export function useBuilderDraftState({
       assetId,
       formId,
       versionId,
+      revisionOfToolId,
+      seededFromVersionId,
+      revisionToolManifest,
+      seedAssetId,
+      revisionIdentity,
+      carriedGeometry,
     ],
   );
 
@@ -733,6 +851,38 @@ export function useBuilderDraftState({
   }, []);
 
   /*
+    ONE ATOMIC APPLY, because a field id is referenced from four pieces of state.
+
+    Each operation is computed once from the CURRENT values and then written to
+    all four. Four independent functional updates would each see the others
+    stale — and a delete that removed the field but not its answer key produces a
+    manifest that fails at publish, naming a field the author can no longer see.
+    `builder-fields.ts` makes the half-done version unexpressible; this keeps it
+    that way through React state.
+
+    ITS IDENTITY CHANGES WITH THE DRAFT, deliberately — it reads the slices
+    from closure — so every memo that calls it MUST list it as a dependency.
+    `structureOps.duplicate` shipped without that and ran against the draft as
+    it stood at mount: the second duplicate minted the same added-N ids and
+    section key as the first and silently reverted every edit in between.
+  */
+  const applyFieldEdit = useCallback(
+    (edit: (state: {
+      fields: FormField[];
+      structure: BuilderStructure;
+      keys: DraftAnswerKey[];
+      excluded: Set<string>;
+    }) => ReturnType<typeof deleteField>) => {
+      const next = edit({ fields, structure, keys, excluded });
+      setFields(next.fields);
+      setStructure(next.structure);
+      setKeys(next.keys);
+      setExcluded(next.excluded);
+    },
+    [fields, structure, keys, excluded],
+  );
+
+  /*
     Every structure edit is a pure function applied to current state.
 
     Each operation returns the SAME array when it changes nothing, so a
@@ -750,6 +900,8 @@ export function useBuilderDraftState({
           const section = s.find((x) => x.key === key);
           return section ? Structure.setOwnPage(s, key, !section.ownPage) : s;
         }),
+      dissolve: (key) => setStructure((s) => Structure.dissolveSection(s, key)),
+      duplicate: (key) => applyFieldEdit((st) => duplicateSection(st, key)),
       moveField: (fieldId, toSectionKey, beforeFieldId, after) =>
         setStructure((s) => Structure.moveField(s, fieldId, toSectionKey, beforeFieldId, after)),
       cycleSpan: (sectionKey, fieldId) =>
@@ -774,7 +926,9 @@ export function useBuilderDraftState({
       setFieldType: setFieldTypeAndClearKey,
       reset: () => setStructure(extraction ? structureFromExtraction(extraction) : []),
     }),
-    [extraction, groupCount, setFieldTypeAndClearKey],
+    // applyFieldEdit is a real dependency: `duplicate` reads the whole draft
+    // through it. Omitting it froze `duplicate` on the state at mount.
+    [extraction, groupCount, setFieldTypeAndClearKey, applyFieldEdit],
   );
 
   const setAssessorVerdict = useCallback((fieldId: string, verdict: boolean) => {
@@ -786,8 +940,11 @@ export function useBuilderDraftState({
           return rest;
         }
         // The key goes with the flag. A verdict field that kept one would be
-        // graded by `markTheory`, which reads the key and nothing else.
-        const { answerKey: _key, ...rest } = f;
+        // graded by `markTheory`, which reads the key and nothing else. The
+        // model answer goes with it too: a revision-seeded field carries the
+        // published `modelAnswer` verbatim, and a verdict with a marking guide
+        // beside it would republish a guide for a judgement nobody marks.
+        const { answerKey: _key, modelAnswer: _model, ...rest } = f;
         return { ...rest, assessorVerdict: true };
       }),
     );
@@ -825,6 +982,39 @@ export function useBuilderDraftState({
           ];
         }),
 
+      setModelAnswer: (fieldId, text) =>
+        setKeys((prev) => {
+          const rest = prev.filter((k) => k.fieldId !== fieldId);
+          /*
+            Whitespace is removal, not a guide. An all-space model answer would
+            count as "guided" everywhere the row's presence is read — the step's
+            counter, the publish summary — while guiding nobody.
+          */
+          if (!text.trim()) return rest;
+          const existing = prev.find((k) => k.fieldId === fieldId);
+          /*
+            A CHANGED GUIDE LOSES ITS VERIFICATION — the same rule as `setKey`.
+            The attestation is "the training authority confirmed THIS answer";
+            carrying it across edited prose would let a guide nobody has checked
+            report itself as verified on a safety-critical assessment.
+          */
+          const same = existing?.modelAnswer === text;
+          return [
+            ...rest,
+            {
+              fieldId,
+              // Empty BY SHAPE: a written question has no options to key, and
+              // marking skips an empty key, so this row is invisible to
+              // `markTheory` — it exists for the assessor, never the machine.
+              answerKey: [],
+              modelAnswer: text,
+              source: same && existing ? existing.source : ('manual' as const),
+              ...(same && existing?.verifiedBy ? { verifiedBy: existing.verifiedBy } : {}),
+              ...(same && existing?.verifiedAt ? { verifiedAt: existing.verifiedAt } : {}),
+            },
+          ];
+        }),
+
       toggleOption: (fieldId, option, multiple) =>
         setKeys((prev) => {
           const existing = prev.find((k) => k.fieldId === fieldId);
@@ -847,15 +1037,19 @@ export function useBuilderDraftState({
 
       setVerified: (fieldId, verified, actor) =>
         setKeys((prev) =>
-          prev.map((k) =>
-            k.fieldId !== fieldId
-              ? k
-              : verified
-                ? { ...k, verifiedBy: actor, verifiedAt: new Date().toISOString() }
-                : // Withdrawing drops both halves: a `verifiedAt` with nobody
-                  // attached is a timestamp nobody stands behind.
-                  { fieldId: k.fieldId, answerKey: k.answerKey, source: k.source },
-          ),
+          prev.map((k) => {
+            if (k.fieldId !== fieldId) return k;
+            if (verified) return { ...k, verifiedBy: actor, verifiedAt: new Date().toISOString() };
+            /*
+              Withdrawing drops both attestation halves — a `verifiedAt` with
+              nobody attached is a timestamp nobody stands behind — and ONLY
+              those. Rebuilding the row as a literal predating `modelAnswer`
+              silently deleted a written question's authored guide the moment
+              its verification was unticked.
+            */
+            const { verifiedBy: _by, verifiedAt: _at, ...rest } = k;
+            return rest;
+          }),
         ),
 
       seedKeys: (seeded) =>
@@ -895,32 +1089,6 @@ export function useBuilderDraftState({
     [setAssessorVerdict],
   );
 
-  /*
-    ONE ATOMIC APPLY, because a field id is referenced from four pieces of state.
-
-    Each operation is computed once from the CURRENT values and then written to
-    all four. Four independent functional updates would each see the others
-    stale — and a delete that removed the field but not its answer key produces a
-    manifest that fails at publish, naming a field the author can no longer see.
-    `builder-fields.ts` makes the half-done version unexpressible; this keeps it
-    that way through React state.
-  */
-  const applyFieldEdit = useCallback(
-    (edit: (state: {
-      fields: FormField[];
-      structure: BuilderStructure;
-      keys: DraftAnswerKey[];
-      excluded: Set<string>;
-    }) => ReturnType<typeof deleteField>) => {
-      const next = edit({ fields, structure, keys, excluded });
-      setFields(next.fields);
-      setStructure(next.structure);
-      setKeys(next.keys);
-      setExcluded(next.excluded);
-    },
-    [fields, structure, keys, excluded],
-  );
-
   const fieldOps = useMemo<FieldOps>(
     () => ({
       add: (sectionKey, afterFieldId, type, label) =>
@@ -933,6 +1101,8 @@ export function useBuilderDraftState({
         applyFieldEdit((st) => setOutcomeTarget(st, questionId, outcomeFieldId)),
       patch: (fieldId, patchValue) =>
         setFields((fs) => fs.map((f) => (f.id === fieldId ? { ...f, ...patchValue } : f))),
+      mergeTable: (sourceId, targetId) =>
+        applyFieldEdit((st) => mergeRepeatingTable(st, sourceId, targetId)),
     }),
     [applyFieldEdit],
   );
@@ -972,12 +1142,14 @@ export function useBuilderDraftState({
     keyed the paper: keying is what proposes a question as mandatory, and the
     validator could not see the very keys that did it.
   */
+  const questionRefs = useMemo(() => extractionQuestionRefs(extraction), [extraction]);
+
   const manifestProblems = useMemo(
     () =>
       parts.length > 0
-        ? validateManifest(manifest, resolvePublishFields(fields, keys).fields)
+        ? validateManifest(manifest, resolvePublishFields(fields, keys, questionRefs).fields)
         : [],
-    [manifest, fields, keys, parts.length],
+    [manifest, fields, keys, parts.length, questionRefs],
   );
 
   const partOps = useMemo<PartOps>(
@@ -1024,6 +1196,11 @@ export function useBuilderDraftState({
     setVersionId(nextVersionId);
   }, []);
 
+  const clearVersionIds = useCallback(() => {
+    setFormId(undefined);
+    setVersionId(undefined);
+  }, []);
+
   /*
     Geometry comes back from the placement step by ID, not by replacing the
     list. The editor is handed the fields minus the excluded ones, so what it
@@ -1033,6 +1210,74 @@ export function useBuilderDraftState({
   const setPlacedFields = useCallback((placed: FormField[]) => {
     const byId = new Map(placed.map((f) => [f.id, f]));
     setFields((prev) => prev.map((f) => byId.get(f.id) ?? f));
+  }, []);
+
+  /*
+    ── Revision PDF swap (KTD2) ────────────────────────────────────────────
+
+    Replacing the document moves every field's geometry into the carried
+    stash and strips it from the fields: stored geometry means CONFIRMED, and
+    a box confirmed against the old layout was not confirmed against the new
+    one. The draft's NAME is deliberately untouched — it is the autosave
+    upsert key, and renaming mid-session would strand the revision row.
+  */
+  const replacePdf = useCallback(
+    (nextAssetId: string, _nextFileName: string) => {
+      setCarriedGeometry((prev) => {
+        // On a double swap the ORIGINAL carried set wins — the fields are
+        // already bare, and re-stashing from them would lose every box.
+        const next = { ...prev };
+        for (const f of fields) {
+          if (next[f.id]) continue;
+          if (f.geometry) next[f.id] = f.geometry;
+          else if (f.sourcePosition) next[f.id] = { segments: [{ ...f.sourcePosition }] };
+        }
+        return next;
+      });
+      setFields((prev) =>
+        prev.map((f) => {
+          if (!f.geometry && !f.sourcePosition) return f;
+          const { geometry: _g, sourcePosition: _s, ...rest } = f;
+          return rest;
+        }),
+      );
+      setAssetId(nextAssetId);
+    },
+    [fields],
+  );
+
+  /** A mis-upload never costs re-confirmation: original PDF and geometry back. */
+  const revertPdf = useCallback(() => {
+    if (!seedAssetId) return;
+    setFields((prev) =>
+      prev.map((f) => {
+        const carried = carriedGeometry[f.id];
+        return carried ? { ...f, geometry: carried } : f;
+      }),
+    );
+    setCarriedGeometry({});
+    setAssetId(seedAssetId);
+  }, [seedAssetId, carriedGeometry]);
+
+  /** Confirm carried boxes back onto the fields — placement's apply path. */
+  const confirmCarried = useCallback(
+    (fieldIds: readonly string[]) => {
+      const confirmable = fieldIds.filter((id) => carriedGeometry[id]);
+      if (confirmable.length === 0) return;
+      setFields((prev) =>
+        prev.map((f) => (confirmable.includes(f.id) ? { ...f, geometry: carriedGeometry[f.id]! } : f)),
+      );
+      setCarriedGeometry((prev) => {
+        const next = { ...prev };
+        for (const id of confirmable) delete next[id];
+        return next;
+      });
+    },
+    [carriedGeometry],
+  );
+
+  const setRevisionIdentity = useCallback((patch: Partial<RevisionIdentity>) => {
+    setRevisionIdentityState((prev) => ({ ...prev, ...patch }));
   }, []);
 
   const stats = useMemo(() => (extraction ? statsFor(extraction) : null), [extraction]);
@@ -1047,8 +1292,16 @@ export function useBuilderDraftState({
     setup,
     excluded,
     structure,
-    hasDocument: phase === 'ready' && extraction !== null,
-    title: extraction ? extraction.fileName.replace(/\.pdf$/i, '') : null,
+    // A revision draft has no extraction — its seeded fields ARE the document
+    // (KTD7), so the stepper opens on their strength alone.
+    hasDocument:
+      phase === 'ready' &&
+      (extraction !== null || (revisionOfToolId !== undefined && fields.length > 0)),
+    title: extraction
+      ? extraction.fileName.replace(/\.pdf$/i, '')
+      : revisionOfToolId
+        ? fileName
+        : null,
     pageCount: extraction?.pageCount ?? 0,
     ingest,
     setSetup,
@@ -1056,7 +1309,18 @@ export function useBuilderDraftState({
     ...(formId ? { formId } : {}),
     ...(versionId ? { versionId } : {}),
     ...(assetId ? { assetId } : {}),
+    ...(revisionOfToolId ? { revisionOfToolId } : {}),
+    ...(seededFromVersionId ? { seededFromVersionId } : {}),
+    ...(revisionToolManifest ? { revisionToolManifest } : {}),
+    ...(revisionIdentity ? { revisionIdentity } : {}),
+    carriedGeometry,
+    pdfReplaced: Boolean(revisionOfToolId && seedAssetId && assetId !== seedAssetId),
+    replacePdf,
+    revertPdf,
+    setRevisionIdentity,
+    confirmCarried,
     setVersionIds,
+    clearVersionIds,
     setPlacedFields,
     parts,
     manifest,

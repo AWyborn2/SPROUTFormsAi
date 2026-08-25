@@ -27,10 +27,13 @@ import { BillingScreen } from './screens/enterprise/BillingScreen.js';
 import { ClientBrandsScreen } from './screens/enterprise/ClientBrandsScreen.js';
 import { WhiteLabelScreen } from './screens/enterprise/WhiteLabelScreen.js';
 import { CompetencyScreen } from './screens/enterprise/CompetencyScreen.js';
+import { ExtractionInsightsScreen } from './screens/enterprise/ExtractionInsightsScreen.js';
 import { WorkingListScreen } from './screens/enterprise/WorkingListScreen.js';
 import { ProfileScreen } from './screens/enterprise/ProfileScreen.js';
 import { WorkforceImportScreen } from './screens/enterprise/WorkforceImportScreen.js';
 import { ComplianceScreen } from './screens/enterprise/ComplianceScreen.js';
+import { TrainingMatrixScreen } from './screens/enterprise/TrainingMatrixScreen.js';
+import { TrainingSummaryScreen } from './screens/enterprise/TrainingSummaryScreen.js';
 import { AssessmentCasesScreen } from './screens/assessments/AssessmentCasesScreen.js';
 import { AssessorQueueScreen } from './screens/assessments/AssessorQueueScreen.js';
 import { AssessmentCaseScreen } from './screens/assessments/AssessmentCaseScreen.js';
@@ -38,6 +41,7 @@ import { AssessmentDashboard } from './screens/assessments/AssessmentDashboard.j
 import { WorkflowBuilderScreen } from './screens/assessments/WorkflowBuilderScreen.js';
 import { BuilderScreen as AssessmentBuilderScreen } from './screens/assessments/builder/BuilderScreen.js';
 import { CasePartFillScreen } from './screens/assessments/CasePartFillScreen.js';
+import { CoursePlayerScreen } from './screens/assessments/CoursePlayerScreen.js';
 import { MobileScreen } from './screens/mobile/MobileScreen.js';
 import { ChcIntakeScreen } from './screens/chc/ChcIntakeScreen.js';
 import { SCREENS, type ScreenDef } from './lib/screens.js';
@@ -67,8 +71,11 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   whitelabel: <WhiteLabelScreen />,
   'client-brands': <ClientBrandsScreen />,
   competency: <CompetencyScreen />,
+  'extraction-insights': <ExtractionInsightsScreen />,
   'working-list': <WorkingListScreen />,
   compliance: <ComplianceScreen />,
+  'training-matrix': <TrainingMatrixScreen />,
+  'training-summary': <TrainingSummaryScreen />,
   profile: <ProfileScreen />,
   'workforce-import': <WorkforceImportScreen />,
   'my-profile': <ProfileScreen />,
@@ -79,6 +86,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   'assessment-builder': <AssessmentBuilderScreen />,
   'assessment-builder-draft': <AssessmentBuilderScreen />,
   'assessment-case': <AssessmentCaseScreen />,
+  'assessment-case-course': <CoursePlayerScreen />,
   'assessment-part-fill': <CasePartFillScreen />,
   'geometry-editor': <GeometryEditorScreen />,
   'chc-intake': <ChcIntakeScreen />,

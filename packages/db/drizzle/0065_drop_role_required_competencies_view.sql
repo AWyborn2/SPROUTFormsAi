@@ -1,0 +1,17 @@
+-- Drops the one-release compatibility bridge from the scoped-requirement-
+-- inheritance round (0060). That migration RENAMED `role_required_competencies`
+-- to `competency_requirements` and left an auto-updatable view under the old
+-- name so servers still running the pre-rename build could keep reading and
+-- writing role rows through the deploy window. That window is closed: 0060 is
+-- applied and that round's build is live, so no server reads the old name any
+-- more, and 0060's own header promised this drop would ride in the next
+-- round's first migration — which is this one. IF EXISTS
+-- because a fresh database built from the full chain has the view (0060
+-- creates it) but an environment where someone dropped it by hand must not
+-- fail the whole chain over a bridge that was always temporary.
+--
+-- Hand-authored: drizzle-kit never knew the view existed (it was created by
+-- raw SQL in 0060 and lives in no schema file), so `generate` can neither emit
+-- nor object to this — the 0065 snapshot is byte-for-byte 0064's tables with a
+-- fresh id, and `drizzle-kit generate` still reports no schema changes.
+DROP VIEW IF EXISTS "role_required_competencies";

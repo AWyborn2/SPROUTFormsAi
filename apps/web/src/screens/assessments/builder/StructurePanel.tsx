@@ -47,6 +47,10 @@ import { builderColumnActions } from '../../import/inspector/column-actions.js';
   one from a scalar.
 */
 
+const PANEL_WIDTH_KEY = 'fai.builder.structureWidth';
+const PANEL_MIN = 260;
+const PANEL_MAX = 640;
+
 const GRID_CLASS: Record<SectionColumns, string> = {
   1: 'grid-cols-1',
   2: 'grid-cols-2',
@@ -69,6 +73,15 @@ export interface StructurePanelProps {
   onRenameSection: (key: string, label: string) => void;
   onSetColumns: (key: string, cols: SectionColumns) => void;
   onToggleOwnPage: (key: string) => void;
+  /**
+   * Delete a section from the arrangement. An empty one — a duplicate heading
+   * the extraction read, a part title with its fields filed under sub-headings
+   * — just disappears; a populated one hands its fields to the section before
+   * it, because a field that vanishes is one nobody notices is missing.
+   */
+  onDissolve: (key: string) => void;
+  /** Clone the section — fields, geometry and all — for multi-stage papers. */
+  onDuplicate: (key: string) => void;
   onMoveField: (
     fieldId: string,
     toSectionKey: string,
@@ -109,6 +122,16 @@ export interface StructurePanelProps {
    * drives every host through exactly this patch shape.
    */
   onPatchField: (fieldId: string, patch: Partial<FormField>) => void;
+  /**
+   * Merge one checklist table's rows into another, removing the source.
+   *
+   * Extraction splits a printed checklist across a page or batch boundary into
+   * two tables — the same columns, the rest of the rows. This puts the stray
+   * table's rows back where they belong AS FIXED (locked) rows, which re-adding
+   * them by hand on the fill preview cannot: those become ad-hoc, editable rows
+   * a candidate can change, not the pre-printed checklist the paper shows.
+   */
+  onMergeTable: (sourceFieldId: string, targetFieldId: string) => void;
 }
 
 export function StructurePanel({
@@ -121,6 +144,8 @@ export function StructurePanel({
   onRenameSection,
   onSetColumns,
   onToggleOwnPage,
+  onDissolve,
+  onDuplicate,
   onMoveField,
   onCycleSpan,
   onSetFieldType,
@@ -130,12 +155,41 @@ export function StructurePanel({
   onDeleteField,
   onFoldField,
   onPatchField,
+  onMergeTable,
 }: StructurePanelProps) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<Record<string, boolean>>({});
+  /** Sections ticked for bulk actions — independent of the field selection. */
+  const [selectedSections, setSelectedSections] = useState<Record<string, boolean>>({});
+  /*
+    The panel's width is the author's, dragged at the right edge and kept
+    across sessions. 24 sections of long printed headings do not fit a fixed
+    340px, and the preview beside it is sometimes the thing that deserves the
+    room — one number cannot be right for both moments.
+  */
+  const [width, setWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+    return Number.isFinite(saved) && saved >= PANEL_MIN && saved <= PANEL_MAX ? saved : 340;
+  });
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = width;
+    const clamp = (w: number) => Math.min(PANEL_MAX, Math.max(PANEL_MIN, w));
+    const move = (ev: PointerEvent) => setWidth(clamp(startW + ev.clientX - startX));
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      localStorage.setItem(PANEL_WIDTH_KEY, String(clamp(startW + ev.clientX - startX)));
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
   const [typeMenuFor, setTypeMenuFor] = useState<string | null>(null);
   /** The repeating field whose column editor is expanded, if any. */
   const [columnsFor, setColumnsFor] = useState<string | null>(null);
+  /** The checklist table whose "merge into…" menu is open, if any. */
+  const [mergeFor, setMergeFor] = useState<string | null>(null);
   /**
    * The field being renamed, if any.
    *
@@ -156,7 +210,28 @@ export function StructurePanel({
   const [dragging, setDragging] = useState<string | null>(null);
 
   const byId = new Map(fields.map((f) => [f.id, f]));
-  const selectedIds = Object.keys(selected).filter((id) => selected[id]);
+  /*
+    Checklist tables — a `repeating_group` WITH fixed rows — are the only valid
+    merge targets: the rows moving in are pre-printed labels that need a table
+    with a pre-printed label column to join. Computed once so each row's merge
+    menu just filters itself out.
+  */
+  const checklistTables = fields.filter(
+    (f) => f.type === 'repeating_group' && (f.fixedRows?.length ?? 0) > 0,
+  );
+  /*
+    Selected ids in ARRANGEMENT order, not tick order. Bulk move appends to the
+    target section one by one, so iterating the author's tick order would
+    shuffle the fields into the order they happened to click — the same trap
+    `groupIntoSection` documents.
+  */
+  const selectedIds = structure.flatMap((s) => s.fields.filter((f) => selected[f.id]).map((f) => f.id));
+  const selectedSectionKeys = structure.filter((s) => selectedSections[s.key]).map((s) => s.key);
+  const anySelection = selectedIds.length > 0 || selectedSectionKeys.length > 0;
+  const clearSelection = () => {
+    setSelected({});
+    setSelectedSections({});
+  };
   const fieldCount = structure.reduce((n, s) => n + s.fields.length, 0);
 
   if (collapsed) {
@@ -165,7 +240,7 @@ export function StructurePanel({
         type="button"
         onClick={onToggleCollapsed}
         aria-label="Show structure"
-        className="sticky top-0 flex h-[calc(100vh-56px)] w-11 flex-none flex-col items-center gap-3 border-r border-border bg-surface-card py-4 hover:bg-surface-hover"
+        className="flex h-full w-11 flex-none flex-col items-center gap-3 border-r border-border bg-surface-card py-4 hover:bg-surface-hover"
       >
         <Icon name="panel-left-open" size={15} className="text-text-tertiary" />
         <span className="text-[11.5px] font-semibold text-text-secondary [writing-mode:vertical-rl]">
@@ -176,7 +251,33 @@ export function StructurePanel({
   }
 
   return (
-    <div className="sticky top-0 flex h-[calc(100vh-56px)] w-[340px] flex-none flex-col overflow-hidden border-r border-border bg-surface-card">
+    <div
+      style={{ width }}
+      className="relative flex h-full flex-none flex-col overflow-hidden border-r border-border bg-surface-card"
+    >
+      {/*
+        The resize grip. A separator the keyboard can also work — arrows nudge
+        by 20px — because a drag-only control is invisible to anyone not
+        pointing at it.
+      */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the structure panel"
+        tabIndex={0}
+        onPointerDown={startResize}
+        onKeyDown={(e) => {
+          if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+          e.preventDefault();
+          const next = Math.min(
+            PANEL_MAX,
+            Math.max(PANEL_MIN, width + (e.key === 'ArrowRight' ? 20 : -20)),
+          );
+          setWidth(next);
+          localStorage.setItem(PANEL_WIDTH_KEY, String(next));
+        }}
+        className="absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-accent/30 focus-visible:bg-accent/40 focus-visible:outline-none"
+      />
       <div className="flex items-start gap-2 border-b border-border-subtle p-[14px_12px_10px_16px]">
         <span className="min-w-0 flex-1">
           <span className="block text-[14.5px] font-semibold">Form structure</span>
@@ -204,25 +305,87 @@ export function StructurePanel({
         </button>
       </div>
 
-      {selectedIds.length > 0 && (
-        <div className="flex items-center gap-2 border-b border-border-subtle bg-surface-accent-soft p-[8px_12px]">
+      {anySelection && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border-subtle bg-surface-accent-soft p-[8px_12px]">
           <span className="min-w-0 flex-1 text-[11.5px] font-semibold text-text-accent">
-            {selectedIds.length} field{selectedIds.length === 1 ? '' : 's'} selected
+            {[
+              selectedIds.length > 0
+                ? `${selectedIds.length} field${selectedIds.length === 1 ? '' : 's'}`
+                : '',
+              selectedSectionKeys.length > 0
+                ? `${selectedSectionKeys.length} section${selectedSectionKeys.length === 1 ? '' : 's'}`
+                : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')}{' '}
+            selected
           </span>
+          {selectedIds.length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  onGroup(selectedIds);
+                  clearSelection();
+                }}
+                className="inline-flex h-[27px] items-center gap-1.5 rounded-lg bg-accent px-2.5 text-[11px] font-semibold text-accent-contrast"
+              >
+                <Icon name="group" size={12} />
+                Group into section
+              </button>
+              {/*
+                Appends in ARRANGEMENT order — see `selectedIds`. Value pinned
+                to '' so the same target can be chosen twice in a row.
+              */}
+              <select
+                value=""
+                onChange={(e) => {
+                  const target = e.target.value;
+                  if (!target) return;
+                  for (const id of selectedIds) onMoveField(id, target, null, false);
+                  clearSelection();
+                }}
+                aria-label="Move selected fields to section"
+                className="h-[27px] max-w-[150px] rounded-lg border border-border bg-surface-card px-1.5 text-[11px] font-semibold text-text-secondary"
+              >
+                <option value="">Move to…</option>
+                {structure.map((s) => (
+                  <option key={s.key} value={s.key}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => {
+                  for (const id of selectedIds) onDeleteField(id);
+                  clearSelection();
+                }}
+                title="Delete the selected fields and everything that references them"
+                className="inline-flex h-[27px] items-center gap-1 rounded-lg border border-border px-2 text-[11px] font-semibold text-text-secondary hover:border-danger hover:text-danger-text"
+              >
+                <Icon name="trash-2" size={11} />
+                Delete fields
+              </button>
+            </>
+          )}
+          {selectedSectionKeys.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                for (const key of selectedSectionKeys) onDissolve(key);
+                clearSelection();
+              }}
+              title="Delete the selected sections — any fields they hold move to the section before them"
+              className="inline-flex h-[27px] items-center gap-1 rounded-lg border border-border px-2 text-[11px] font-semibold text-text-secondary hover:border-danger hover:text-danger-text"
+            >
+              <Icon name="trash-2" size={11} />
+              Delete section{selectedSectionKeys.length === 1 ? '' : 's'}
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => {
-              onGroup(selectedIds);
-              setSelected({});
-            }}
-            className="inline-flex h-[27px] items-center gap-1.5 rounded-lg bg-accent px-2.5 text-[11px] font-semibold text-accent-contrast"
-          >
-            <Icon name="group" size={12} />
-            Group into section
-          </button>
-          <button
-            type="button"
-            onClick={() => setSelected({})}
+            onClick={clearSelection}
             className="px-1 py-1 text-[11px] text-text-secondary"
           >
             Clear
@@ -236,6 +399,21 @@ export function StructurePanel({
           return (
             <div key={section.key} className="rounded-[10px] border border-border-subtle">
               <div className="flex items-center gap-2 p-[8px_10px]">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSelectedSections((p) => ({ ...p, [section.key]: !p[section.key] }))
+                  }
+                  aria-label={`Select section ${section.label}`}
+                  aria-pressed={!!selectedSections[section.key]}
+                  className={`grid h-3.5 w-3.5 flex-none place-items-center rounded ${
+                    selectedSections[section.key]
+                      ? 'border border-accent bg-accent text-accent-contrast'
+                      : 'border-[1.5px] border-border text-transparent'
+                  }`}
+                >
+                  <Icon name="check" size={9} />
+                </button>
                 <span className="flex flex-none flex-col gap-0.5">
                   <button
                     type="button"
@@ -323,6 +501,38 @@ export function StructurePanel({
                     >
                       <Icon name="file" size={10} />
                       Own page
+                    </button>
+                    {/*
+                      A duplicate or empty heading the extraction read is the
+                      COMMON case here — a part title whose fields all sit
+                      under sub-headings. Populated sections are deletable too,
+                      but nothing is lost: their fields move to the section
+                      before, exactly as `dissolveSection` has always worked.
+                    */}
+                    <button
+                      type="button"
+                      onClick={() => onDuplicate(section.key)}
+                      title="Duplicate this section — every field is cloned onto the same printed boxes, ready to rename and trim per stage"
+                      aria-label={`Duplicate section ${section.label}`}
+                      className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-[3px] text-[9.5px] font-semibold text-text-tertiary hover:border-border-accent hover:text-text-accent"
+                    >
+                      <Icon name="copy" size={10} />
+                      Duplicate
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDissolve(section.key)}
+                      disabled={structure.length === 1}
+                      title={
+                        section.fields.length === 0
+                          ? 'Delete this empty section'
+                          : 'Delete this section — its fields move to the section before it'
+                      }
+                      aria-label={`Delete section ${section.label}`}
+                      className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-[3px] text-[9.5px] font-semibold text-text-tertiary hover:border-danger hover:text-danger-text disabled:opacity-30"
+                    >
+                      <Icon name="trash-2" size={10} />
+                      Delete
                     </button>
                   </div>
 
@@ -483,6 +693,34 @@ export function StructurePanel({
                                 <Icon name="table-2" size={10} />
                               </button>
                             )}
+                            {/*
+                              MERGE a mis-split checklist. Extraction breaks one
+                              printed checklist into two tables at a page or
+                              batch boundary; this sends THIS table's rows into
+                              another checklist as fixed (locked) rows and
+                              removes this one. Offered only on a checklist with
+                              somewhere to send its rows.
+                            */}
+                            {field?.type === 'repeating_group' &&
+                              (field.fixedRows?.length ?? 0) > 0 &&
+                              checklistTables.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setMergeFor((p) => (p === entry.id ? null : entry.id))
+                                  }
+                                  title="Merge this table's rows into another checklist"
+                                  aria-label={`Merge ${field?.label ?? entry.id} into another table`}
+                                  aria-expanded={mergeFor === entry.id}
+                                  className={`flex-none rounded border px-1 py-px ${
+                                    mergeFor === entry.id
+                                      ? 'border-border-accent bg-surface-accent-soft text-text-accent'
+                                      : 'border-border text-text-tertiary hover:bg-surface-hover'
+                                  }`}
+                                >
+                                  <Icon name="git-merge" size={10} />
+                                </button>
+                              )}
                             {section.cols > 1 && (
                               <button
                                 type="button"
@@ -571,6 +809,36 @@ export function StructurePanel({
                                   {opt.label}
                                 </button>
                               ))}
+                            </div>
+                          )}
+
+                          {mergeFor === entry.id && (
+                            <div className="mt-1 rounded-lg border border-border bg-surface-sunken p-1.5">
+                              <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
+                                Merge these rows into…
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                {checklistTables
+                                  .filter((t) => t.id !== entry.id)
+                                  .map((t) => (
+                                    <button
+                                      key={t.id}
+                                      type="button"
+                                      onClick={() => {
+                                        onMergeTable(entry.id, t.id);
+                                        setMergeFor(null);
+                                      }}
+                                      className="flex items-center gap-1.5 rounded-md border border-border bg-surface-card px-2 py-1 text-left text-[11px] text-text-secondary hover:bg-surface-hover"
+                                    >
+                                      <Icon
+                                        name="table-2"
+                                        size={11}
+                                        className="flex-none text-text-tertiary"
+                                      />
+                                      <span className="min-w-0 flex-1 truncate">{t.label}</span>
+                                    </button>
+                                  ))}
+                              </div>
                             </div>
                           )}
                         </div>

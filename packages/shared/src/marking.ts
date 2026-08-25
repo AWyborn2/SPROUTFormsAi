@@ -31,8 +31,10 @@ import type {
   DeclaredMark,
   PartOutcome,
 } from './assessment.js';
+import { SELF_ANSWERING_TYPES, isChoiceField } from './form-field.js';
 import type { FormField, FormFieldType, OutcomeTarget } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
+import { sectionForPart, workflowOf, type ValueSource } from './workflow.js';
 import { visibleFields, type VisibilityAnswers } from './visibility.js';
 
 /**
@@ -98,6 +100,20 @@ export function isSelfMarking(
   // The cover's boxes too, for the tools that print the certification block
   // inside a part's slice rather than only on the front page.
   for (const id of signOffMarkFieldIds(manifest)) furniture.add(id);
+  /*
+    AND EVERY FIELD THE AUTHOR LOCKED TO `auto`. An auto-sourced field is
+    written by marking, never answered by a person — the workflow editor's
+    whole meaning for the setting. The one that bit: a theory part's printed
+    verdict radio locked to `auto` (so `autoVerdictWrite` fills it at hand-in)
+    read here as an unkeyed question, and the part stopped self-marking — the
+    switch that turns the auto-verdict ON was the same switch turning the
+    quiz's marking OFF.
+  */
+  for (const s of manifest.workflow?.sections ?? []) {
+    for (const [id, source] of Object.entries(s.fieldSource ?? {})) {
+      if (source === 'auto') furniture.add(id);
+    }
+  }
 
   const questions = partFields.filter(
     (f) => !STRUCTURAL_FIELD_TYPES.has(f.type) && !furniture.has(f.id),
@@ -215,18 +231,34 @@ function applyMarks(
  *
  * `answerKey` is the complete answer key to the assessment; serving it to the
  * browser that renders the questions hands every candidate the answers in
- * devtools. Marking never runs client-side (the outcome route computes it from
- * the stored attempt), so no fill surface has any use for these properties —
- * only the builder, where keys are authored, may see them.
+ * devtools. `modelAnswer` is the same secret in prose — a written question's
+ * expected answer — so it strips on exactly the same rule, and the assessor's
+ * copy travels through a separate role-gated channel instead of un-stripping.
+ * Marking never runs client-side (the outcome route computes it from the
+ * stored attempt), so no fill surface has any use for these properties — only
+ * the builder, where keys are authored, may see them.
  *
  * Returns the same array when nothing carried a key, so callers can cheaply
  * skip no-op copies.
+ *
+ * Presence is `!== undefined`, NOT truthiness: `modelAnswer: ''` (or a null
+ * from hand-edited data) is falsy, so a truthy check let the property NAME
+ * itself survive into a candidate payload — and a leak test asserting "no
+ * `modelAnswer` anywhere in the JSON" is exactly what it would trip. Same
+ * rule for all four secrets, so one empty-string hint cannot behave
+ * differently from an empty-string guide.
  */
+const hasMarkingSecret = (f: FormField): boolean =>
+  f.answerKey !== undefined ||
+  f.outcomeTarget !== undefined ||
+  f.answerHint !== undefined ||
+  f.modelAnswer !== undefined;
+
 export function stripMarkingSecrets(fields: readonly FormField[]): FormField[] {
-  if (!fields.some((f) => f.answerKey || f.outcomeTarget)) return fields as FormField[];
+  if (!fields.some(hasMarkingSecret)) return fields as FormField[];
   return fields.map((f) => {
-    if (!f.answerKey && !f.outcomeTarget) return f;
-    const { answerKey: _key, outcomeTarget: _target, ...rest } = f;
+    if (!hasMarkingSecret(f)) return f;
+    const { answerKey: _key, outcomeTarget: _target, answerHint: _hint, modelAnswer: _model, ...rest } = f;
     return rest;
   });
 }
@@ -301,29 +333,74 @@ export interface MarkTheoryInput {
   part: Pick<
     AssessmentPart,
     'mandatoryFieldIds' | 'outcomeSatisfactory' | 'outcomeNotSatisfactory' | 'furtherActionFieldId'
-  >;
+  > &
+    Partial<Pick<AssessmentPart, 'key'>>;
+  /**
+   * The manifest, so marking can scope to THE PART'S OWN questions. Without
+   * it every visible keyed question in the version is marked — which on a
+   * paper with several theory parts wrote ✓/✗ into the OTHER parts' printed
+   * cells from this part's attempt, and let their unanswered questions poison
+   * this part's empty-mandatory gate. Optional for compatibility: a caller
+   * without the manifest (older tests, single-part tools) marks exactly as
+   * before.
+   */
+  manifest?: AssessmentToolManifest;
+  /**
+   * Pass threshold as a percentage (1–100). When set, the part is satisfactory
+   * if `correctCount / totalCount >= passPercent / 100`. Absent or undefined
+   * means the pre-existing mandatory-all-correct rule applies instead.
+   */
+  passPercent?: number;
 }
 
 /**
- * Mark every visible keyed question and decide the part's outcome.
+ * Mark the visible KEYED questions and nothing else — the arithmetic core of
+ * `markTheory`, without any of its part-level consequences.
  *
- * The outcome turns on the mandatory section alone: questions outside it are
- * marked and reported, but a wrong answer there does not by itself make the
- * part unsatisfactory. That mirrors the paper, where the must-pass section is
- * the gate and the location-specific sets are evidence.
+ * Returns each keyed question's verdict plus the value map with every ✓/✗
+ * written at its target. Deliberately NO part verdict, NO further-action note,
+ * NO outcome: those are claims about a whole part, and in a MIXED part — keyed
+ * choice questions alongside assessor-judged written ones — the machine holds
+ * only some of the evidence. The keyed marks are honest pre-marks the assessor
+ * builds on; letting this function tick "Satisfactory" would certify a part on
+ * the four questions it can read while ignoring the eleven it cannot.
+ *
+ * An unkeyed question — written or otherwise — is skipped entirely, even when
+ * it declares an `outcomeTarget`: that cell is the assessor's to tick.
+ *
+ * `mandatoryFieldIds` is optional so callers pre-marking a judged part need no
+ * part at hand; each mark's `mandatory` flag is then false, which is correct —
+ * the must-pass gate is `markTheory`'s concern, and this function draws none
+ * of the conclusions that read the flag.
+ *
+ * `scopeIds` restricts the marks to ONE PART'S OWN QUESTIONS. Visibility is
+ * still evaluated over the FULL field list — a rule may hang off a cover
+ * question — but the marks themselves stay inside the scope. Without it, a
+ * paper with three theory parts marked all of them from any one attempt: the
+ * other parts' cells got a ✗ for questions the candidate never saw, and their
+ * unanswered questions dragged the calling part's whole-part gate to fail.
+ * Null/undefined means unscoped — every visible keyed question is marked.
  */
-export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMarkingResult {
+export function markKeyedQuestions(
+  fields: readonly FormField[],
+  values: Record<string, SubmissionValue> | null | undefined,
+  mandatoryFieldIds?: readonly string[],
+  scopeIds?: ReadonlySet<string> | null,
+): { marks: QuestionMark[]; derivedValues: Record<string, SubmissionValue> } {
   // An untouched attempt has no map. Marking it is meaningful — every question
   // is unanswered — so normalize rather than refusing, which would have made an
   // assessor unable to fail a candidate who wrote nothing.
   const answers = values ?? {};
   const visible = visibleFields(fields, answers as VisibilityAnswers);
 
-  const mandatoryIds = new Set(part.mandatoryFieldIds ?? []);
+  const scope = scopeIds ?? null;
+
+  const mandatoryIds = new Set(mandatoryFieldIds ?? []);
 
   const marks: QuestionMark[] = [];
 
   for (const field of visible) {
+    if (scope && !scope.has(field.id)) continue;
     if (!field.answerKey || field.answerKey.length === 0) continue;
     if (!field.outcomeTarget) continue;
 
@@ -338,6 +415,40 @@ export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMar
       mandatory: mandatoryIds.has(field.id),
     });
   }
+
+  return { marks, derivedValues: applyMarks(marks, answers) };
+}
+
+/**
+ * Mark every visible keyed question and decide the part's outcome.
+ *
+ * The outcome turns on the mandatory section alone: questions outside it are
+ * marked and reported, but a wrong answer there does not by itself make the
+ * part unsatisfactory. That mirrors the paper, where the must-pass section is
+ * the gate and the location-specific sets are evidence.
+ */
+export function markTheory({
+  fields,
+  values,
+  part,
+  passPercent,
+  manifest,
+}: MarkTheoryInput): TheoryMarkingResult {
+  const answers = values ?? {};
+  /*
+    ONLY THIS PART'S QUESTIONS ARE THIS ATTEMPT'S TO MARK. With a manifest and
+    a part key, the marks are scoped to the part's own slice (visibility still
+    runs over the full list inside `markKeyedQuestions`). Without them —
+    older tests, single-part tools — marking is unscoped, exactly as before.
+  */
+  const scope =
+    manifest && part.key
+      ? new Set(fieldsInPart(fields, manifest, part.key).map((f) => f.id))
+      : null;
+  // The per-question arithmetic is shared with the mixed-marking pre-mark path
+  // (`markKeyedQuestions`); everything below it — verdict box, further-action
+  // note, outcome — is the part-level judgment only a fully-keyed part may make.
+  const { marks, derivedValues } = markKeyedQuestions(fields, answers, part.mandatoryFieldIds, scope);
 
   const correctCount = marks.filter((m) => m.correct).length;
   const mandatoryMarks = marks.filter((m) => m.mandatory);
@@ -374,9 +485,28 @@ export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMar
   */
   const gate = mandatoryMarks.length > 0 ? mandatoryMarks : marks;
   const mandatoryAllCorrect = gate.length > 0 && gate.every((m) => m.correct);
-  const outcome: PartOutcome = mandatoryAllCorrect ? 'satisfactory' : 'not_satisfactory';
 
-  const derivedValues = applyMarks(marks, answers);
+  /*
+    PERCENTAGE PASS RULE — when the author chose `overall_percentage`.
+
+    The percentage gate replaces mandatory-all-correct: the part passes when
+    `correctCount / totalCount >= passPercent / 100`. The mandatory set is
+    still marked and reported, but it is not the gate — the overall score is.
+
+    Absent passPercent means the pre-existing rule, so no stored tool changes.
+  */
+  const passedByPercent =
+    passPercent !== undefined && marks.length > 0
+      ? correctCount / marks.length >= passPercent / 100
+      : undefined;
+  const outcome: PartOutcome =
+    passedByPercent !== undefined
+      ? passedByPercent
+        ? 'satisfactory'
+        : 'not_satisfactory'
+      : mandatoryAllCorrect
+        ? 'satisfactory'
+        : 'not_satisfactory';
 
   /*
     THE PART'S OWN VERDICT BOX, written from the same arithmetic that produced
@@ -449,4 +579,218 @@ function writeDeclared(values: Record<string, SubmissionValue>, mark: DeclaredMa
     return;
   }
   values[mark.fieldId] = mark.value;
+}
+
+/*
+  ── The verdict vocabulary ─────────────────────────────────────────────────
+  Which printed option means "passed" and which means "not yet". Kept identical
+  to `markableValue` in `builder-manifest.ts`, which proposes the verdict pair at
+  build time, so the mark-time derivation below can never disagree with the
+  authoring layer about the single most consequential cell on a competency
+  record. If either moves, move both.
+*/
+const VERDICT_YES = /^(?:yes|satisfactory|competent|candidate competent|pass(?:ed)?)$/i;
+const VERDICT_NO = /^(?:no|not satisfactory|not yet competent|candidate not yet competent|fail(?:ed)?)$/i;
+
+/**
+ * The value that ticks a verdict field for a wanted outcome, or null if the
+ * field cannot carry it.
+ *
+ * A self-answering box (`check_cross` / `boolean_yes_no`) takes the boolean; a
+ * choice field takes the option whose printed words say so, and REQUIRES a hit
+ * — falling back to the first option would be a coin toss on the verdict.
+ */
+export function verdictValueFor(
+  field: Pick<FormField, 'type' | 'options'>,
+  want: boolean,
+): SubmissionValue | null {
+  if (SELF_ANSWERING_TYPES.includes(field.type)) return want;
+  const options = field.options ?? [];
+  if (options.length === 0) return null;
+  const wanted = options.find((o) => (want ? VERDICT_YES : VERDICT_NO).test(o.trim()));
+  return wanted ?? null;
+}
+
+/** Both halves of a verdict over one field, when the field can carry them both. */
+export function verdictPairOf(
+  field: Pick<FormField, 'type' | 'options'>,
+): { yes: SubmissionValue; no: SubmissionValue } | null {
+  const yes = verdictValueFor(field, true);
+  const no = verdictValueFor(field, false);
+  if (yes === null || no === null || yes === no) return null;
+  return { yes, no };
+}
+
+/** Whether a Yes/No (`boolean_yes_no`) or ✓/✗ (`check_cross`) box reads as passed. */
+export function isYesValue(value: SubmissionValue | undefined): boolean {
+  if (value === true) return true;
+  if (typeof value === 'string') return VERDICT_YES.test(value.trim());
+  return false;
+}
+
+/**
+ * Derive a practical part's outcome from its Yes/No checklist, when the author
+ * has LOCKED its verdict field to `auto`.
+ *
+ * The gap this fills: a practical demonstration is not keyed, so `markTheory`
+ * never runs, and setting the verdict field to `auto` locked it without ever
+ * filling it — the assessor was left with a blank, un-editable radio. Here every
+ * criterion ticked Yes makes the part satisfactory and writes the "Competent"
+ * value; any No, or a box left untouched, makes it not-satisfactory and writes
+ * "not yet Competent". A box left untouched fails on purpose — "satisfactory" on
+ * a criterion nobody judged is a finding nobody made.
+ *
+ * Returns null — leave the part to the assessor — unless BOTH hold: the part has
+ * a choice field whose options resolve to a competent / not-competent pair that
+ * the author set to `auto` (the deliberate "derive this" signal; an ordinary
+ * verdict the assessor still picks stays `entry`), and it has at least one Yes/No
+ * criterion to read. `verdictSource` is the part section's `fieldSource` map.
+ */
+/**
+ * The write a part's auto-locked verdict field takes for a KNOWN outcome —
+ * the theory-side twin of `deriveChecklistOutcome`'s final step, sharing its
+ * discovery rule exactly.
+ *
+ * A practical derives its outcome FROM the checklist, so the derivation above
+ * owns the whole journey. A theory part already knows its outcome — the quiz
+ * marking computed it — but its printed verdict radio ("The Candidate's
+ * responses were: Satisfactory / Not Satisfactory") was left blank: locking it
+ * to `auto` made it un-typable without anything ever filling it, the same gap
+ * the checklist derivation closed for practicals. Same signal, same field
+ * rule: a choice field in the part whose options resolve to a verdict pair,
+ * locked to `auto` by the author. Returns null when the part prints no such
+ * field, which is most theory papers.
+ */
+export function autoVerdictWrite(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+  part: AssessmentPart,
+  outcome: PartOutcome,
+  verdictSource: Record<string, ValueSource> | undefined,
+): { fieldId: string; value: SubmissionValue } | null {
+  const partFields = fieldsInPart(fields, manifest, part.key);
+  const verdictField = partFields.find(
+    (f) => isChoiceField(f.type) && verdictPairOf(f) !== null && verdictSource?.[f.id] === 'auto',
+  );
+  if (!verdictField) return null;
+  const pair = verdictPairOf(verdictField)!;
+  return {
+    fieldId: verdictField.id,
+    value: outcome === 'satisfactory' ? pair.yes : pair.no,
+  };
+}
+
+export function deriveChecklistOutcome(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+  part: AssessmentPart,
+  values: Record<string, SubmissionValue> | undefined,
+  verdictSource: Record<string, ValueSource> | undefined,
+): { outcome: PartOutcome; derivedValues: Record<string, SubmissionValue> } | null {
+  const answers = values ?? {};
+  const partFields = fieldsInPart(fields, manifest, part.key);
+
+  const verdictField = partFields.find(
+    (f) => isChoiceField(f.type) && verdictPairOf(f) !== null && verdictSource?.[f.id] === 'auto',
+  );
+  if (!verdictField) return null;
+  const pair = verdictPairOf(verdictField)!;
+
+  // The criteria: the part's Yes/No boxes, minus anything marking itself writes
+  // (a verdict pair, a question's own ✓/✗ cell) so nothing marks itself.
+  const written = new Set<string>(partMarkFieldIds(part));
+  for (const f of partFields) if (f.outcomeTarget) written.add(f.outcomeTarget.fieldId);
+  const criteria = partFields.filter(
+    (f) => SELF_ANSWERING_TYPES.includes(f.type) && !written.has(f.id),
+  );
+  if (criteria.length === 0) return null;
+
+  const allPass = criteria.every((c) => isYesValue(answers[c.id]));
+  const derivedValues: Record<string, SubmissionValue> = { ...answers };
+  writeDeclared(derivedValues, { fieldId: verdictField.id, value: allPass ? pair.yes : pair.no });
+  return { outcome: allPass ? 'satisfactory' : 'not_satisfactory', derivedValues };
+}
+
+/**
+ * Marking compositions that will behave badly at runtime, said at PUBLISH.
+ * Warnings, never gates — the tool still publishes; these name the trap.
+ *
+ * (a) A part with an AUTO-LOCKED VERDICT PAIR (the #269 opt-in) that also
+ *     carries an unkeyed self-answering box no question targets. That box is
+ *     exactly what `deriveChecklistOutcome` reads as a checklist criterion, so
+ *     the moment the part is handed in the derivation runs, finds the box
+ *     untouched (or reads a candidate's own yes/no answer as a verdict on
+ *     them), and records NOT SATISFACTORY before any marking happened. The
+ *     runtime fix — deciding whose box it really is — is deferred by design;
+ *     the author is the one who can say, so the warning names the boxes.
+ *
+ * (b) A WRITTEN question (unkeyed, so its ✓/✗ is the assessor's to tick)
+ *     whose `outcomeTarget` addresses a repeating-group cell. Mixed marking is
+ *     whole-key granular and the marking surface deliberately excludes tables
+ *     (a table id is shared with the candidate's own rows), so the assessor
+ *     has no way to tick that cell on the marking pass and the mark can only
+ *     ever print blank. Cell-granular marking is deferred; the warning is not.
+ *
+ * Same discovery rules as the runtime code it predicts (`deriveChecklistOutcome`
+ * for the verdict field and its criteria; `markingSurfaceIds`' type fence for
+ * the table exclusion), so the warning can never fire where the runtime would
+ * not.
+ */
+export function markingCompositionWarnings(
+  manifest: AssessmentToolManifest,
+  fields: readonly FormField[],
+): string[] {
+  const warnings: string[] = [];
+  const workflow = workflowOf(manifest, fields);
+  const byId = new Map(fields.map((f) => [f.id, f]));
+
+  for (const part of manifest.parts) {
+    const partFields = fieldsInPart(fields, manifest, part.key);
+    const verdictSource = sectionForPart(workflow, part.key)?.fieldSource;
+    const verdictField = partFields.find(
+      (f) => isChoiceField(f.type) && verdictPairOf(f) !== null && verdictSource?.[f.id] === 'auto',
+    );
+
+    if (verdictField) {
+      // Exactly `deriveChecklistOutcome`'s criteria set: self-answering boxes
+      // minus everything marking itself writes (verdict pair, questions'
+      // declared cells) and minus keyed questions, which the arithmetic owns.
+      const written = new Set<string>(partMarkFieldIds(part));
+      for (const f of partFields) if (f.outcomeTarget) written.add(f.outcomeTarget.fieldId);
+      const untargeted = partFields.filter(
+        (f) =>
+          SELF_ANSWERING_TYPES.includes(f.type) &&
+          !written.has(f.id) &&
+          (f.answerKey?.length ?? 0) === 0 &&
+          f.id !== verdictField.id,
+      );
+      if (untargeted.length > 0) {
+        warnings.push(
+          `Part "${part.label}" locks its verdict to automatic, but ${untargeted
+            .map((f) => `"${f.label}"`)
+            .join(', ')} ${untargeted.length === 1 ? 'is a Yes/No box' : 'are Yes/No boxes'} no ` +
+            'question targets — hand-in reads them as checklist criteria and will record Not ' +
+            'Satisfactory before anyone marks. Target each from a question, or let the assessor ' +
+            'pick the verdict.',
+        );
+      }
+    }
+
+    for (const f of partFields) {
+      if ((f.answerKey?.length ?? 0) > 0 || !f.outcomeTarget) continue;
+      const target = byId.get(f.outcomeTarget.fieldId);
+      const addressesCell =
+        target?.type === 'repeating_group' ||
+        (f.outcomeTarget.rowKey !== undefined && f.outcomeTarget.columnKey !== undefined);
+      if (addressesCell) {
+        warnings.push(
+          `"${f.label}" is a written question whose ✓/✗ lands in a table cell — the marking ` +
+            'pass cannot write tables, so the assessor will have no way to tick it. Point its ' +
+            'outcome at a standalone ✓/✗ box.',
+        );
+      }
+    }
+  }
+
+  return warnings;
 }

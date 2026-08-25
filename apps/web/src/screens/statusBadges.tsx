@@ -81,6 +81,55 @@ export function CaseStateBadge({ state, size }: { state: AssessmentCaseState; si
   );
 }
 
+/**
+ * The case list's Status cell: the state, plus what STAGE the case is at and
+ * whether it is waiting on an ASSESSOR.
+ *
+ * The badge alone answered "passed or not". An assessor scanning the list also
+ * needs "which part is it on" and "is it my turn":
+ *  · the stage line names the current part while the case is still moving
+ *    through them — a competent or discontinued case has no current part, and a
+ *    closed one stopped at a part the detail screen names;
+ *  · the flag calls out a case waiting on a person — a part handed in to mark.
+ *    `awaiting_sign_off` already says so in its own badge, so the flag is not
+ *    repeated there.
+ */
+export function CaseStatusCell({
+  state,
+  awaitingAssessor,
+  currentPartLabel,
+  currentPartIndex,
+  requiredPartCount,
+}: {
+  state: AssessmentCaseState;
+  awaitingAssessor: boolean;
+  currentPartLabel: string | null;
+  currentPartIndex: number | null;
+  requiredPartCount: number;
+}) {
+  const showStage = state === 'open' && !!currentPartLabel;
+  const showFlag = awaitingAssessor && state !== 'awaiting_sign_off';
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <CaseStateBadge state={state} />
+        {showFlag && (
+          <Badge variant="info" dot>
+            Needs assessor
+          </Badge>
+        )}
+      </div>
+      {showStage && (
+        <span className="text-[11.5px] text-text-tertiary">
+          {currentPartIndex && requiredPartCount
+            ? `Part ${currentPartIndex} of ${requiredPartCount} · ${currentPartLabel}`
+            : currentPartLabel}
+        </span>
+      )}
+    </div>
+  );
+}
+
 /** The status tabs shown above the submissions table. */
 export const SUBMISSION_TABS: Array<{ key: 'all' | SubmissionStatus; label: string }> = [
   { key: 'all', label: 'All' },

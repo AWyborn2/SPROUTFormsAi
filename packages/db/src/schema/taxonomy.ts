@@ -1,6 +1,7 @@
 import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
+  check,
   index,
   integer,
   pgTable,
@@ -9,8 +10,9 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { taxonomyStatusEnum } from './enums.ts';
+import { requirementTierEnum, taxonomyStatusEnum } from './enums.ts';
 import { memberships, organizations } from './organizations.ts';
+import { competencies } from './governance.ts';
 
 /**
  * The organisation's own taxonomy: Locations, Departments, and the Roles each
@@ -125,6 +127,118 @@ export const jobRoles = pgTable(
       .where(sql`${t.status} = 'active'`),
   ],
 );
+
+/**
+ * The competencies a SCOPE names — its required set and its never-enforced
+ * recommended set — at any of the four scopes: Organisation, Location,
+ * Department, Role (R1, KTD1). Renamed from `role_required_competencies` when
+ * `role_id` stopped being the only scope. This is the STORED requirement; the
+ * tool link stays derived (via each assessment's awarded competency), which is
+ * what makes a licence-type requirement — a competency no assessment awards —
+ * expressible at every scope (AE6).
+ *
+ * ONE TABLE, not four, because a person's obligation is the UNION over the
+ * scopes their placement expands to (R2), and a union over four tables is the
+ * same read four times. AT MOST ONE of the three scope columns is non-null
+ * (the CHECK below); ALL THREE NULL **is** the org scope — never a fifth kind
+ * of row, and never a sentinel id (KTD1).
+ *
+ * A REAL JOIN TABLE, not jsonb, for the same reason it always was: a
+ * requirement is the blast radius a requirement-change preview has to count,
+ * so rows must be queryable by scope and by competency. One row per (scope,
+ * competencyId) — the tier is a COLUMN and a tier change is an UPDATE within
+ * its scope, so required and recommended can never disagree about one link.
+ *
+ * The competency FK CASCADES on delete. The DELETE route's dependency check
+ * (the prior round's KTD8) 409s while any row here depends on it — now at ALL
+ * FOUR scopes — so the cascade is unreachable while depended-on and exists
+ * only to keep an orphaned link from surviving a forced cleanup.
+ */
+export const competencyRequirements = pgTable(
+  'competency_requirements',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /*
+      FK postures follow the taxonomy (KTD1): the Role keeps `cascade` as
+      shipped (a deleted Role takes its own requirements with it), while
+      Locations and Departments are retire-not-delete values, so `restrict` —
+      the same posture their placement rows take above.
+    */
+    roleId: uuid('role_id').references(() => jobRoles.id, { onDelete: 'cascade' }),
+    locationId: uuid('location_id').references(() => locations.id, { onDelete: 'restrict' }),
+    departmentId: uuid('department_id').references(() => departments.id, { onDelete: 'restrict' }),
+    competencyId: uuid('competency_id')
+      .notNull()
+      .references(() => competencies.id, { onDelete: 'cascade' }),
+    /** `required` or `recommended` — see `requirementTierEnum` for what each tier may do. */
+    tier: requirementTierEnum().notNull(),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // KTD1: a row belongs to exactly one scope. Two scope columns set is not
+    // a richer requirement, it is a corrupt one — the union would double it.
+    check(
+      'competency_requirements_one_scope_ck',
+      sql`num_nonnulls(${t.roleId}, ${t.locationId}, ${t.departmentId}) <= 1`,
+    ),
+    /*
+      Uniqueness is PER SCOPE, via four PARTIAL indexes (KTD1). Postgres treats
+      NULLs as distinct, so one composite unique over the scope columns would
+      quietly permit duplicates at every scope — partial indexes are the only
+      honest uniqueness here. Cross-scope duplicates are deliberately LEGAL
+      (KTD2): the same competency may be required org-wide AND on a role; the
+      resolution union dedupes, and every write stays scope-local. A scope
+      names a competency once; promoting recommended → required is an UPDATE
+      of `tier` on that row, never a second row.
+    */
+    uniqueIndex('competency_requirements_role_uq')
+      .on(t.roleId, t.competencyId)
+      .where(sql`${t.roleId} IS NOT NULL`),
+    uniqueIndex('competency_requirements_location_uq')
+      .on(t.locationId, t.competencyId)
+      .where(sql`${t.locationId} IS NOT NULL`),
+    uniqueIndex('competency_requirements_department_uq')
+      .on(t.departmentId, t.competencyId)
+      .where(sql`${t.departmentId} IS NOT NULL`),
+    // Org scope has no scope id of its own, so the org fk anchors uniqueness.
+    uniqueIndex('competency_requirements_org_uq')
+      .on(t.orgId, t.competencyId)
+      .where(
+        sql`${t.roleId} IS NULL AND ${t.locationId} IS NULL AND ${t.departmentId} IS NULL`,
+      ),
+    index('competency_requirements_org_idx').on(t.orgId),
+    index('competency_requirements_role_idx').on(t.roleId),
+    index('competency_requirements_location_idx').on(t.locationId),
+    index('competency_requirements_department_idx').on(t.departmentId),
+    index('competency_requirements_competency_idx').on(t.competencyId),
+  ],
+);
+
+export const competencyRequirementsRelations = relations(competencyRequirements, ({ one }) => ({
+  org: one(organizations, {
+    fields: [competencyRequirements.orgId],
+    references: [organizations.id],
+  }),
+  role: one(jobRoles, {
+    fields: [competencyRequirements.roleId],
+    references: [jobRoles.id],
+  }),
+  location: one(locations, {
+    fields: [competencyRequirements.locationId],
+    references: [locations.id],
+  }),
+  department: one(departments, {
+    fields: [competencyRequirements.departmentId],
+    references: [departments.id],
+  }),
+  competency: one(competencies, {
+    fields: [competencyRequirements.competencyId],
+    references: [competencies.id],
+  }),
+}));
 
 export const locationsRelations = relations(locations, ({ one }) => ({
   org: one(organizations, { fields: [locations.orgId], references: [organizations.id] }),

@@ -12,7 +12,9 @@ vi.mock('../email/resend.js', () => ({
   sendExpiryNoticeEmail: (...args: unknown[]) => sendExpiry(...args),
 }));
 
-const { sweepOrganization, sweepAllOrganizations } = await import('./sweep.js');
+const { captureComplianceSnapshots, sweepOrganization, sweepAllOrganizations } = await import(
+  './sweep.js'
+);
 
 const NOW = new Date('2026-08-06T00:00:00Z');
 const daysFromNow = (n: number) => new Date(NOW.getTime() + n * 86_400_000);
@@ -28,9 +30,15 @@ interface DbOpts {
   memberships?: Record<string, unknown>[];
   membershipRoles?: Record<string, unknown>[];
   roleReqs?: Record<string, unknown>[];
+  /** Direct scope→competency links (KTD2, four scopes since U2). */
+  roleLinks?: Record<string, unknown>[];
   tools?: Record<string, unknown>[];
   templates?: Record<string, unknown>[];
   heldLocations?: Record<string, unknown>[];
+  heldDepartments?: Record<string, unknown>[];
+  /** Taxonomy value rows — scope expansion joins their status (U4 semantics). */
+  locations?: Record<string, unknown>[];
+  departments?: Record<string, unknown>[];
   openCases?: Record<string, unknown>[];
   holders?: Record<string, unknown>[];
   comps?: Record<string, unknown>[];
@@ -40,13 +48,33 @@ interface DbOpts {
   holdersFindMany?: () => Promise<Record<string, unknown>[]>;
 }
 
+// Walk a drizzle WHERE for its bound string params (depth-limited; the column
+// nodes loop back through their table, so schema metadata keys are skipped).
+// Just enough for `memberships.findFirst` to pick the RIGHT member when the
+// sweep loads several contexts — everything else in this fake stays lean.
+const SKIP_KEYS = new Set(['table', 'config', 'encoder', 'decoder', 'session', 'dialect', 'default']);
+function stringValues(node: unknown, out: string[] = [], depth = 0): string[] {
+  if (!node || depth > 10 || typeof node !== 'object') return out;
+  const rec = node as Record<string, unknown>;
+  if (typeof rec.value === 'string') out.push(rec.value);
+  for (const [k, v] of Object.entries(rec)) {
+    if (SKIP_KEYS.has(k)) continue;
+    if (Array.isArray(v)) v.forEach((n) => stringValues(n, out, depth + 1));
+    else stringValues(v, out, depth + 1);
+  }
+  return out;
+}
+
 function makeDb(opts: DbOpts) {
   const notices: Record<string, unknown>[] = [];
   const cases: Record<string, unknown>[] = [];
+  const snapshots: Record<string, unknown>[] = [];
   const insert = vi.fn((table: unknown) => ({
-    values: (v: Record<string, unknown>) => {
-      if (table === schema.sentNotices) notices.push(v);
-      else if (table === schema.assessmentCases) cases.push(v);
+    values: (v: Record<string, unknown> | Record<string, unknown>[]) => {
+      // The snapshot capture inserts the whole day's rows in ONE call.
+      if (table === schema.complianceSnapshots) snapshots.push(...(Array.isArray(v) ? v : [v]));
+      else if (table === schema.sentNotices) notices.push(v as Record<string, unknown>);
+      else if (table === schema.assessmentCases) cases.push(v as Record<string, unknown>);
       const row = { id: `row-${notices.length + cases.length}` };
       return {
         returning: async () => [row],
@@ -60,9 +88,27 @@ function makeDb(opts: DbOpts) {
   const db = {
     query: {
       organizations: { findMany: async () => opts.orgs ?? [org()] },
-      memberships: { findMany: async () => opts.memberships ?? [] },
+      memberships: {
+        findMany: async () => opts.memberships ?? [],
+        // The assignment pass loads each membership's context BY ID, and the
+        // multi-member scenarios below need the right row back — so this one
+        // findFirst reads its WHERE's bound params instead of returning [0].
+        findFirst: async (args?: { where?: unknown }) => {
+          const wanted = new Set(stringValues(args?.where));
+          const all = opts.memberships ?? [];
+          return all.find((m) => wanted.has(m.id as string)) ?? all[0];
+        },
+      },
       membershipRoles: { findMany: async () => opts.membershipRoles ?? [] },
+      membershipDepartments: { findMany: async () => opts.heldDepartments ?? [] },
+      locations: { findMany: async () => opts.locations ?? [] },
+      departments: { findMany: async () => opts.departments ?? [] },
       roleRequiredAssessments: { findMany: async () => opts.roleReqs ?? [] },
+      // The resolver asks for tier 'required' only (R13); this lean fake does
+      // not parse WHEREs, so the load-bearing filter is honoured manually.
+      competencyRequirements: {
+        findMany: async () => (opts.roleLinks ?? []).filter((l) => l.tier === 'required'),
+      },
       assessmentTools: { findMany: async () => opts.tools ?? [] },
       formTemplates: { findMany: async () => opts.templates ?? [] },
       membershipLocations: { findMany: async () => opts.heldLocations ?? [] },
@@ -76,9 +122,27 @@ function makeDb(opts: DbOpts) {
       sentNotices: { findFirst: async () => notices[0] },
     },
     insert,
+    // The snapshot capture's delete-then-insert: the WHERE's bound values are
+    // the orgId and the capturedOn date string, so matching a row on BOTH is
+    // exactly the per-(org, day) delete the real query issues.
+    delete: (table: unknown) => ({
+      where: async (w: unknown) => {
+        if (table !== schema.complianceSnapshots) return;
+        const bound = new Set(stringValues(w));
+        for (let i = snapshots.length - 1; i >= 0; i--) {
+          const row = snapshots[i]!;
+          if (bound.has(row.orgId as string) && bound.has(row.capturedOn as string)) {
+            snapshots.splice(i, 1);
+          }
+        }
+      },
+    }),
+    // The capture wraps its expansion in one repeatable-read transaction and
+    // the standing loader nests inside it; this fake has no snapshot to isolate.
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
-  return { db, notices, cases };
+  return { db, notices, cases, snapshots };
 }
 
 afterEach(() => {
@@ -231,6 +295,242 @@ describe('sweepOrganization — notification pass', () => {
     await sweepOrganization(db, org() as never, NOW);
 
     expect(sendExpiry).toHaveBeenCalledWith(expect.objectContaining({ to: 'u2@example.com' }));
+  });
+});
+
+describe('sweepOrganization — assignment pass through the shared resolver (KTD2)', () => {
+  it('creates a case from a Role with ONLY a direct competency link — no legacy row anywhere', async () => {
+    /*
+      The end-to-end proof the resolver swap demands (U3): the sweep reaches
+      the engine through assignForMembership, and a Role whose requirement
+      exists solely as a competency_requirements row must still assign the
+      awarding tool to a holder who lacks the competency. Before the swap this
+      exact fixture created nothing — roleRequiredAssessments is empty.
+    */
+    const { db, cases } = makeDb({
+      memberships: [{ id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' }],
+      membershipRoles: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
+      roleReqs: [], // NO legacy rows — the direct link is the whole requirement
+      roleLinks: [{ id: 'l1', orgId: 'org-1', roleId: 'r1', competencyId: 'c1', tier: 'required' }],
+      tools: [
+        {
+          id: 't1',
+          orgId: 'org-1',
+          templateId: 'tpl1',
+          awardedCompetencyIds: ['c1'],
+          manifest: { parts: [{ key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'] }] },
+          locationPartKeys: {},
+          assessorStreamCompetencyIds: {},
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      templates: [{ id: 'tpl1', orgId: 'org-1', currentVersionId: 'v1' }],
+      heldLocations: [{ membershipId: 'm1', locationId: 'loc1', position: 0 }],
+      holders: [], // u1 holds nothing → the requirement is unmet
+      comps: [COMP],
+      users: [USER],
+    });
+
+    const result = await sweepOrganization(db, org() as never, NOW);
+
+    expect(result.casesCreated).toBe(1);
+    expect(cases).toHaveLength(1);
+    expect(cases[0]).toMatchObject({ toolId: 't1', candidateUserId: 'u1', locationId: 'loc1' });
+  });
+
+  it('creates a case for a ROLE-LESS member from a LOCATION-scope requirement (KTD4, R3)', async () => {
+    /*
+      The scope-inheritance mirror of the direct-link proof above (U3): the
+      sweep is the backstop for scope changes, and it only became effective for
+      role-less members when KTD4 removed the zero-roles early return. This
+      exact fixture — no membership_roles row anywhere, the requirement living
+      on the LOCATION the member is placed at — created nothing before U3.
+    */
+    const { db, cases } = makeDb({
+      memberships: [{ id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' }],
+      membershipRoles: [], // holds NOTHING — the placement is the whole reach
+      roleLinks: [
+        { id: 'l1', orgId: 'org-1', roleId: null, locationId: 'loc1', departmentId: null, competencyId: 'c1', tier: 'required' },
+      ],
+      locations: [{ id: 'loc1', orgId: 'org-1', status: 'active' }],
+      tools: [
+        {
+          id: 't1',
+          orgId: 'org-1',
+          templateId: 'tpl1',
+          awardedCompetencyIds: ['c1'],
+          manifest: { parts: [{ key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'] }] },
+          locationPartKeys: {},
+          assessorStreamCompetencyIds: {},
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      templates: [{ id: 'tpl1', orgId: 'org-1', currentVersionId: 'v1' }],
+      heldLocations: [{ membershipId: 'm1', locationId: 'loc1', position: 0 }],
+      holders: [],
+      comps: [COMP],
+      users: [USER],
+    });
+
+    const result = await sweepOrganization(db, org() as never, NOW);
+
+    expect(result.casesCreated).toBe(1);
+    expect(cases[0]).toMatchObject({ toolId: 't1', candidateUserId: 'u1', locationId: 'loc1' });
+  });
+
+  it('assigns an ORG-scope requirement to EVERY active member (R2 — AE3 reach, sweep side)', async () => {
+    // Two members, neither holding a role: the org row reaches them both, and
+    // each case lands on its own person.
+    const { db, cases } = makeDb({
+      memberships: [
+        { id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' },
+        { id: 'm2', orgId: 'org-1', userId: 'u2', status: 'active' },
+      ],
+      membershipRoles: [],
+      roleLinks: [
+        { id: 'l1', orgId: 'org-1', roleId: null, locationId: null, departmentId: null, competencyId: 'c1', tier: 'required' },
+      ],
+      locations: [{ id: 'loc1', orgId: 'org-1', status: 'active' }],
+      tools: [
+        {
+          id: 't1',
+          orgId: 'org-1',
+          templateId: 'tpl1',
+          awardedCompetencyIds: ['c1'],
+          manifest: { parts: [{ key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'] }] },
+          locationPartKeys: {},
+          assessorStreamCompetencyIds: {},
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      templates: [{ id: 'tpl1', orgId: 'org-1', currentVersionId: 'v1' }],
+      heldLocations: [
+        { membershipId: 'm1', locationId: 'loc1', position: 0 },
+        { membershipId: 'm2', locationId: 'loc1', position: 0 },
+      ],
+      holders: [],
+      comps: [COMP],
+      users: [USER, { id: 'u2', email: 'u2@example.com' }],
+    });
+
+    const result = await sweepOrganization(db, org() as never, NOW);
+
+    expect(result.casesCreated).toBe(2);
+    expect(cases.map((c) => c.candidateUserId).sort()).toEqual(['u1', 'u2']);
+  });
+});
+
+describe('sweepOrganization — snapshot capture (U4, KTD5)', () => {
+  /*
+    Two members under one org-wide requirement (c1, evidence-only — no tools,
+    so the assignment pass creates nothing and the capture is what is under
+    test). u1 holds c1 current and is placed at the active location AND
+    department; u2 holds nothing and is placed nowhere. Expected numbers:
+      org   → compliant 1 / members 2 / gaps 1
+      loc1  → compliant 1 / members 1 / gaps 0
+      d1    → compliant 1 / members 1 / gaps 0
+    The ORG row's numbers come from the same derivation GET /training-summary
+    computes its KPIs with (requiredStandingByMember + complianceCountsOf) —
+    the route suite pins an equivalent two-member fixture to the same
+    {compliant 1, members 2, gaps 1}, so the snapshot and the dashboard cannot
+    tell different stories about one workforce.
+  */
+  const snapshotFixture = () =>
+    makeDb({
+      memberships: [
+        { id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' },
+        { id: 'm2', orgId: 'org-1', userId: 'u2', status: 'active' },
+      ],
+      heldLocations: [{ membershipId: 'm1', locationId: 'loc1', position: 0 }],
+      heldDepartments: [{ membershipId: 'm1', departmentId: 'd1' }],
+      locations: [{ id: 'loc1', orgId: 'org-1', name: 'Site A', status: 'active' }],
+      departments: [{ id: 'd1', orgId: 'org-1', name: 'Crew A', status: 'active' }],
+      roleLinks: [
+        { id: 'l1', orgId: 'org-1', roleId: null, locationId: null, departmentId: null, competencyId: 'c1', tier: 'required' },
+      ],
+      tools: [],
+      holders: [{ userId: 'u1', competencyId: 'c1', ...grantExpiringIn(400), revokedAt: null }],
+      comps: [COMP],
+      users: [USER, { id: 'u2', email: 'u2@example.com' }],
+    });
+
+  it('writes one row per scope per UTC day — and a second same-day run leaves exactly the same rows', async () => {
+    const { db, snapshots } = snapshotFixture();
+
+    const first = await sweepOrganization(db, org() as never, NOW);
+    const second = await sweepOrganization(db, org() as never, NOW);
+
+    // Delete-then-insert per (org, day): the second run REPLACES the day's
+    // rows rather than stacking a duplicate set beside them.
+    expect(first.snapshotsWritten).toBe(3);
+    expect(second.snapshotsWritten).toBe(3);
+    expect(first.snapshotFailed).toBeUndefined();
+    expect(snapshots).toHaveLength(3);
+
+    const orgRow = snapshots.find((r) => r.scopeType === null);
+    expect(orgRow).toMatchObject({
+      orgId: 'org-1',
+      capturedOn: '2026-08-06',
+      scopeId: null,
+      compliantCount: 1,
+      memberCount: 2,
+      requiredGapCount: 1,
+    });
+    expect(snapshots.find((r) => r.scopeType === 'location')).toMatchObject({
+      scopeId: 'loc1',
+      capturedOn: '2026-08-06',
+      compliantCount: 1,
+      memberCount: 1,
+      requiredGapCount: 0,
+    });
+    expect(snapshots.find((r) => r.scopeType === 'department')).toMatchObject({
+      scopeId: 'd1',
+      capturedOn: '2026-08-06',
+      compliantCount: 1,
+      memberCount: 1,
+      requiredGapCount: 0,
+    });
+  });
+
+  it('captures a zeroed org row for an org with no active members — 0/0, never a skipped day', async () => {
+    // An empty org still gets its trend point: 0 members is a true statement,
+    // and a missing row would render as an outage rather than an empty org.
+    const { db, snapshots } = makeDb({});
+    const written = await captureComplianceSnapshots(db, 'org-1', NOW);
+    expect(written).toBe(1);
+    expect(snapshots).toEqual([
+      {
+        orgId: 'org-1',
+        capturedOn: '2026-08-06',
+        scopeType: null,
+        scopeId: null,
+        compliantCount: 0,
+        memberCount: 0,
+        requiredGapCount: 0,
+      },
+    ]);
+  });
+
+  it('keeps the assignment/notification results when the snapshot write fails (isolation)', async () => {
+    // The first two passes committed real work; a snapshot failure after them
+    // is a missing trend point, and must surface as a FLAG beside the numbers
+    // rather than un-counting them.
+    const { db, notices, snapshots } = makeDb({
+      holders: [{ userId: 'u1', competencyId: 'c1', ...grantExpiringIn(20), revokedAt: null }],
+      comps: [COMP],
+      users: [USER],
+    });
+    (db as { delete: unknown }).delete = () => {
+      throw new Error('snapshot table unavailable');
+    };
+
+    const result = await sweepOrganization(db, org() as never, NOW);
+
+    expect(result.noticesSent).toBe(1);
+    expect(notices).toHaveLength(1);
+    expect(result.snapshotFailed).toBe(true);
+    expect(result.snapshotsWritten).toBe(0);
+    expect(snapshots).toHaveLength(0);
   });
 });
 

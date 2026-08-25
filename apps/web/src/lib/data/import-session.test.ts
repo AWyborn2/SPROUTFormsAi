@@ -37,6 +37,9 @@ import {
   acceptAnswerSet,
   addFixedRowItem,
   answerSetAccepted,
+  captureImportCorrections,
+  sendImportCorrections,
+  deleteField,
   adjustGeometryBand,
   adjustGeometryBoundary,
   changeFieldType,
@@ -1160,6 +1163,47 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
       expect(getImportSession().fields.every((f) => f.groupOrdinal === undefined)).toBe(true);
     });
   });
+
+  /**
+   * The extraction-batch window (R1). Unlike `groupOrdinal` and `questionRef`
+   * it lives on the field and CROSSES the publish whitelist: the standalone
+   * Placement screen reads published fields, so a window that stopped at
+   * review would scope detection there and silently stop after publish.
+   */
+  describe('sourcePages threading — seed, publish, split inheritance', () => {
+    it('seeds the window onto the review field and publishes it through the whitelist', async () => {
+      await seedSession([{ ...CATEGORY_A, sourcePages: { from: 5, to: 8 } }]);
+
+      expect(getImportSession().fields[0]?.sourcePages).toEqual({ from: 5, to: 8 });
+      expect(reviewedToFields(getImportSession().fields)[0]?.sourcePages).toEqual({
+        from: 5,
+        to: 8,
+      });
+    });
+
+    it('publishes a field with no window without the key — legacy stays legacy (R6)', async () => {
+      await seedSession([CATEGORY_A]);
+
+      for (const published of reviewedToFields(getImportSession().fields)) {
+        expect('sourcePages' in published).toBe(false);
+      }
+    });
+
+    it('a field split into three groups carries the source window on every part', async () => {
+      // Correct BY DESIGN, unlike `sourcePosition` (dropped above): the groups
+      // all came out of the same extraction batch, so the window that scoped
+      // the merged block scopes each of them.
+      await seedSession([{ ...CATEGORY_A, sourcePages: { from: 5, to: 8 } }]);
+
+      splitTableGroups('catA', 3);
+
+      const published = reviewedToFields(getImportSession().fields);
+      expect(published).toHaveLength(3);
+      for (const part of published) {
+        expect(part.sourcePages).toEqual({ from: 5, to: 8 });
+      }
+    });
+  });
 });
 
 describe('checkbox-group per-option geometry (publish boundary)', () => {
@@ -1930,5 +1974,102 @@ describe('copying a placement between fields', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * The correction diff (Phase D). captureImportCorrections reads the raw
+ * extraction against the reviewer's edited fields; sendImportCorrections POSTs
+ * it at publish, fire-and-forget.
+ */
+describe('captureImportCorrections / sendImportCorrections', () => {
+  const AI_EXTRACTION: ExtractionResult = {
+    sourceType: 'pdf_import',
+    path: 'ai',
+    fileName: 'dozer.pdf',
+    pageCount: 18,
+    captureId: 'cap-1',
+    fields: [
+      { id: 'ai_1', label: 'Q1', type: 'radio', confidence: 0.9, options: ['a', 'b'] },
+      { id: 'ai_2', label: 'Site', type: 'text', confidence: 0.9 },
+    ],
+    designNotes: [],
+  };
+
+  /** Drive a session to `ready` seeded from the given extraction. */
+  async function seedReady(extraction: ExtractionResult) {
+    postMock.mockResolvedValueOnce({ assetId: 'asset-1' });
+    postMock.mockResolvedValueOnce(extraction);
+    await startExtraction(makeFile());
+    expect(getImportSession().status).toBe('ready');
+  }
+
+  it('returns null before an extraction has landed', () => {
+    expect(captureImportCorrections()).toBeNull();
+  });
+
+  it('carries the context and reports no corrections for an untouched review', async () => {
+    await seedReady(AI_EXTRACTION);
+    const corrections = captureImportCorrections();
+    expect(corrections).toMatchObject({
+      captureId: 'cap-1',
+      documentType: 'generic',
+      path: 'ai',
+      pageCount: 18,
+    });
+    expect(corrections?.corrections).toEqual([]);
+  });
+
+  it('records a retype and a deletion the reviewer made', async () => {
+    await seedReady(AI_EXTRACTION);
+    changeFieldType('ai_1', 'textarea');
+    deleteField('ai_2');
+
+    const corrections = captureImportCorrections()!.corrections;
+    expect(corrections).toContainEqual(
+      expect.objectContaining({ fieldId: 'ai_1', kind: 'retype', from: 'radio', to: 'textarea' }),
+    );
+    expect(corrections).toContainEqual(
+      expect.objectContaining({ fieldId: 'ai_2', kind: 'deleted', wasType: 'text' }),
+    );
+  });
+
+  it('POSTs the diff to /pdf/corrections with the field count and refs', async () => {
+    await seedReady(AI_EXTRACTION);
+    deleteField('ai_2');
+    postMock.mockClear();
+    postMock.mockResolvedValueOnce({ id: 'corr-1' });
+
+    sendImportCorrections({ assetId: 'asset-1', formId: 'form-9' });
+
+    expect(postMock).toHaveBeenCalledTimes(1);
+    const [path, body] = postMock.mock.calls[0]!;
+    expect(path).toBe('/pdf/corrections');
+    expect(body).toMatchObject({
+      fieldCount: 2,
+      assetId: 'asset-1',
+      formId: 'form-9',
+      corrections: expect.objectContaining({ captureId: 'cap-1', path: 'ai' }),
+    });
+  });
+
+  it('swallows a POST rejection so a publish can never fail on it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await seedReady(AI_EXTRACTION);
+    postMock.mockClear();
+    postMock.mockRejectedValueOnce(new Error('boom'));
+
+    expect(() => sendImportCorrections({ assetId: 'asset-1' })).not.toThrow();
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    warn.mockRestore();
+  });
+
+  it('does not POST for an abandoned session (no committed publish, no signal)', async () => {
+    await seedReady(AI_EXTRACTION);
+    resetImportSession();
+    postMock.mockClear();
+
+    sendImportCorrections({ assetId: 'asset-1' });
+    expect(postMock).not.toHaveBeenCalled();
   });
 });

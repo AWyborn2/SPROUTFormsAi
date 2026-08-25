@@ -18,6 +18,7 @@
  */
 import type { ImportSnapshot } from './import-draft-store.js';
 import type {
+  AuditResult,
   BrandingKit,
   FormBrand,
   FormBrandInput,
@@ -32,22 +33,27 @@ import type {
   SubmissionValue,
 } from '@formai/shared';
 import { geometrySegments, ROLE_LABELS } from '@formai/shared';
-import { ApiError, apiClient } from './api-client.js';
+import { ApiError, apiClient, uploadAttachment } from './api-client.js';
 import { ROLE_NAMES } from './types.js';
 import type {
+  AuditFormInput,
   BuilderDraftDetail,
   BuilderDraftSummary,
   SaveBuilderDraftInput,
   ApiKey,
+  CorrectionCandidates,
+  PlacementInsights,
   AuditCategory,
   AuditEntry,
   CreatedApiKey,
   BrandEditProposal,
   BrandPdfScan,
   BrandScanProposal,
+  AwardLinkEffects,
   Competency,
   CompetencyHolder,
   CompetencyRule,
+  UnlinkedTool,
   DashboardSummary,
   FillLink,
   FormDetail,
@@ -77,6 +83,8 @@ import type {
   WorkingListItem,
   ComplianceReport,
   RetirementReview,
+  TrainingMatrix,
+  TrainingSummary,
   TaxDepartment,
   TaxLocation,
   TaxRole,
@@ -84,6 +92,10 @@ import type {
   TrainingRequest,
   TaxonomySettings,
   TemplateStatus,
+  RecommendedCompetencies,
+  RequirementScopeRef,
+  RequirementTiers,
+  ScopeRequirementsState,
 } from './types.js';
 import type {
   AssessmentToolManifest,
@@ -140,6 +152,8 @@ interface FormDetailDto extends FormSummaryDto {
     fieldCount: number;
     publishedAt: string | null;
     publishedByName: string | null;
+    revisionIdentity: { code?: string; reviewedOn?: string; note?: string } | null;
+    note: string | null;
   }>;
 }
 
@@ -210,6 +224,8 @@ function toFormDetail(dto: FormDetailDto): FormDetail {
       fieldCount: v.fieldCount,
       publishedAt: v.publishedAt ? relativeTime(v.publishedAt) : '—',
       publishedBy: v.publishedByName ?? '—',
+      revisionIdentity: v.revisionIdentity ?? undefined,
+      note: v.note ?? undefined,
     })),
   };
 }
@@ -275,6 +291,8 @@ interface MemberDto {
   emailSent?: boolean;
   /** Present on a freshly created invite — the link to hand over or print. */
   acceptPath?: string;
+  /** Competency counts; null below the view_competencies grant, on invites, and on non-active rows. Absent on create/patch responses. */
+  counts?: { requiredCurrent: number; requiredAttention: number; optionalLapsed: number } | null;
 }
 
 interface AuditEntryDto {
@@ -357,6 +375,7 @@ function toMember(dto: MemberDto): Member {
     email: dto.email,
     role: ROLE_LABELS[dto.role] as RoleName,
     status: (dto.status === 'active' ? 'active' : 'invited') as MemberStatus,
+    counts: dto.counts ?? null,
   };
 }
 
@@ -420,6 +439,17 @@ function toCompetencyRule(dto: CompetencyRuleDto): CompetencyRule {
     competency: dto.competency,
     enabled: dto.enabled,
   };
+}
+
+/**
+ * The scope address for requirement reads and writes (KTD6): the org scope has
+ * no id, every other scope rides `scope/scopeId`. Spelled once so the GET,
+ * preview POST and PUT can never drift onto different addresses.
+ */
+function requirementsPath(ref: RequirementScopeRef): string {
+  return ref.scope === 'org'
+    ? '/taxonomy/requirements/org'
+    : `/taxonomy/requirements/${ref.scope}/${ref.scopeId}`;
 }
 
 export const store = {
@@ -568,11 +598,14 @@ export const store = {
   forkDraftVersion(input: {
     formId: string;
     fields: FormField[];
+    /** Overrides the inherited source PDF — a revision that replaced the paper. */
+    sourcePdfAssetId?: string;
   }): Promise<{ form: FormSummary; versionId: string }> {
     return apiClient
       .post<FormSummaryDto & { createdVersionId: string }>(`/forms/${input.formId}/versions`, {
         fields: input.fields,
         publish: false,
+        ...(input.sourcePdfAssetId ? { sourcePdfAssetId: input.sourcePdfAssetId } : {}),
       })
       .then((dto) => ({ form: toFormSummary(dto), versionId: dto.createdVersionId }));
   },
@@ -619,8 +652,50 @@ export const store = {
     templateId: string;
     name: string;
     manifest: AssessmentToolManifest;
+    /**
+     * The ONE competency passing this tool awards (U5, R1, KTD4). Required and
+     * exactly one element — the API 400s `invalid_award` on zero, two, or an id
+     * the org does not own. The plural spelling rides the existing jsonb
+     * column; strictly-one is enforced at the boundary, not the schema.
+     */
+    awardedCompetencyIds: string[];
   }): Promise<{ id: string }> {
     return apiClient.post<{ id: string }>('/assessment-tools', input);
+  },
+
+  /**
+   * The tools still awarding nothing — the one-time backfill worklist (U4, R3,
+   * KTD5). Admin-gated server-side (403 below admin): reading the worklist
+   * sits on the same gate as acting on it, so callers must not fetch this for
+   * roles the endpoint would refuse.
+   */
+  listUnlinkedTools(): Promise<UnlinkedTool[]> {
+    return apiClient.get<UnlinkedTool[]>('/assessment-tools/unlinked');
+  },
+
+  /**
+   * What a FIRST award link would convert and activate, computed without
+   * committing (U4, KTD10) — the same computation the apply runs, so the
+   * counts shown before are the counts reported after.
+   *
+   * The backfill panel only performs first links (its rows are, by
+   * definition, tools with no award), so neither this nor the apply below
+   * ever sends the re-link fields (`confirm`, `carryRoleLinks`).
+   */
+  previewAwardLink(toolId: string, competencyId: string): Promise<AwardLinkEffects> {
+    return apiClient.post<AwardLinkEffects>(`/assessment-tools/${toolId}/award/preview`, {
+      competencyId,
+    });
+  },
+
+  /**
+   * Link the one competency an existing tool awards (U4, R3, R15). In one
+   * server transaction this writes the award, converts every legacy
+   * Role → tool requirement into a direct competency link, and creates the
+   * activated cases — exactly what the preview counted.
+   */
+  applyAwardLink(toolId: string, competencyId: string): Promise<AwardLinkEffects> {
+    return apiClient.put<AwardLinkEffects>(`/assessment-tools/${toolId}/award`, { competencyId });
   },
 
   publishFormVersion(input: { formId: string; versionId: string }): Promise<FormSummary> {
@@ -720,6 +795,15 @@ export const store = {
 
   discardBuilderDraft(id: string): Promise<void> {
     return apiClient.delete<void>(`${BUILDER_DRAFTS}/${id}`).then(() => undefined);
+  },
+
+  /**
+   * The secondary-extraction pass — ask the server for printed input areas the
+   * first extraction produced no field for, given the labels already in the
+   * draft. A review aid the author runs on demand; never applied on its own.
+   */
+  auditForm(input: AuditFormInput): Promise<AuditResult> {
+    return apiClient.post<AuditResult>('/pdf/audit', input);
   },
 
   archiveForm(id: string): Promise<FormSummary> {
@@ -847,6 +931,17 @@ export const store = {
 
   listApiKeys(): Promise<ApiKey[]> {
     return apiClient.get<ApiKeyDto[]>('/api-keys').then((rows) => rows.map(toApiKey));
+  },
+
+  /** Recurring extraction-correction shapes surfaced as candidate rules (admin). */
+  listCorrectionCandidates(minCount?: number): Promise<CorrectionCandidates> {
+    const query = minCount ? `?minCount=${minCount}` : '';
+    return apiClient.get<CorrectionCandidates>(`/pdf/corrections/candidates${query}`);
+  },
+
+  /** The auto-place hit-rate metric and recurring placement shapes (admin). */
+  getPlacementInsights(): Promise<PlacementInsights> {
+    return apiClient.get<PlacementInsights>('/pdf/placements/insights');
   },
 
   /**
@@ -1071,6 +1166,27 @@ export const store = {
   getComplianceReport(): Promise<ComplianceReport> {
     return apiClient.get<ComplianceReport>('/compliance');
   },
+  /** The workforce × competency grid, one payload for the training matrix (U5). */
+  getTrainingMatrix(): Promise<TrainingMatrix> {
+    return apiClient.get<TrainingMatrix>('/training-matrix');
+  },
+  /**
+   * The one-page KPI roll-up (U6). `location`/`department` narrow the scope
+   * (at most one — omitting both reads org-wide); `axis` picks the grouping
+   * of the compliance-by-group chart.
+   */
+  getTrainingSummary(params: {
+    location?: string;
+    department?: string;
+    axis?: 'location' | 'department' | 'role';
+  }): Promise<TrainingSummary> {
+    const search = new URLSearchParams();
+    if (params.location) search.set('location', params.location);
+    if (params.department) search.set('department', params.department);
+    if (params.axis) search.set('axis', params.axis);
+    const query = search.toString();
+    return apiClient.get<TrainingSummary>(`/training-summary${query ? `?${query}` : ''}`);
+  },
   /** The caller's own expiry notices — a login delivery route (U21, R98). */
   listMyNotices(): Promise<ExpiryNotice[]> {
     return apiClient.get<ExpiryNotice[]>('/notices');
@@ -1100,21 +1216,53 @@ export const store = {
       replacementDepartmentId,
     });
   },
-  getRoleRequiredAssessments(roleId: string): Promise<{ configured: boolean; toolIds: string[] }> {
-    return apiClient.get(`/taxonomy/roles/${roleId}/required-assessments`);
+  /*
+    A SCOPE's requirements travel in COMPETENCY terms at four scopes since the
+    inheritance round (R1, KTD6): org | location | department | role, each
+    addressed at `/taxonomy/requirements/...` (org carries no id). The old
+    `/taxonomy/roles/:id/required-assessments` paths still answer as delegates
+    for deployed clients, but this client speaks the scope addresses (U6).
+  */
+  getScopeRequirements(ref: RequirementScopeRef): Promise<ScopeRequirementsState> {
+    return apiClient.get(requirementsPath(ref));
   },
-  /** The blast radius of a proposed change, computed without committing (U12). */
-  previewRoleRequiredAssessments(
-    roleId: string,
-    toolIds: string[],
+  /**
+   * The blast radius of a proposed change, computed without committing (R6,
+   * KTD5). No fingerprint — a preview cannot go stale. `removeLegacyToolIds`
+   * routes the awaitingLink exit through the SAME door and is legal at ROLE
+   * scope only (the API 400s it elsewhere — KTD6).
+   */
+  previewScopeRequirements(
+    ref: RequirementScopeRef,
+    body: RequirementTiers & { removeLegacyToolIds?: string[] },
   ): Promise<{ effects: RequiredAssessmentsChangeEffects }> {
-    return apiClient.post(`/taxonomy/roles/${roleId}/required-assessments/preview`, { toolIds });
+    return apiClient.post(`${requirementsPath(ref)}/preview`, body);
   },
-  setRoleRequiredAssessments(
+  /**
+   * Replace both tiers at one scope. Echoes the GET's fingerprint; a stale one
+   * 409s `requirements_changed`. The fingerprint is SCOPE-LOCAL (KTD7), so
+   * saves at different scopes never 409 each other.
+   */
+  setScopeRequirements(
+    ref: RequirementScopeRef,
+    body: RequirementTiers & { fingerprint: string },
+  ): Promise<ScopeRequirementsState & { effects: RequiredAssessmentsChangeEffects }> {
+    return apiClient.put(requirementsPath(ref), body);
+  },
+  /**
+   * Remove ONE awaitingLink legacy row — the exit for a tool that will never
+   * be linked. ROLE SCOPE ONLY (KTD6): no other scope ever had legacy rows.
+   * Fingerprint-guarded like the PUT; previewed beforehand through
+   * `previewScopeRequirements` with `removeLegacyToolIds`.
+   */
+  removeLegacyRequirement(
     roleId: string,
-    toolIds: string[],
-  ): Promise<{ configured: boolean; toolIds: string[]; effects: RequiredAssessmentsChangeEffects }> {
-    return apiClient.put(`/taxonomy/roles/${roleId}/required-assessments`, { toolIds });
+    toolId: string,
+    fingerprint: string,
+  ): Promise<{ awaitingLink: string[]; effects: RequiredAssessmentsChangeEffects; fingerprint: string }> {
+    return apiClient.delete(`/taxonomy/requirements/role/${roleId}/${toolId}`, {
+      fingerprint,
+    });
   },
   updateTaxonomySettings(patch: Partial<TaxonomySettings>): Promise<TaxonomySettings> {
     return apiClient.patch<TaxonomySettings>('/taxonomy/settings', patch);
@@ -1127,6 +1275,14 @@ export const store = {
    */
   getHeldCompetencies(userId: string): Promise<HeldCompetencyRow[]> {
     return apiClient.get<HeldCompetencyRow[]>(`/competencies/held/${userId}`);
+  },
+  /**
+   * The caller's OWN recommended competencies (U7, R12) — a self-scope read.
+   * Carries the org's self-start toggle beside the rows because the request
+   * affordance needs both facts (toggle ON and a requestable tool, R14/AE5).
+   */
+  listMyRecommended(): Promise<RecommendedCompetencies> {
+    return apiClient.get<RecommendedCompetencies>('/competencies/recommended');
   },
   /**
    * What an induction submission would seed onto a profile, and whether it may
@@ -1144,13 +1300,25 @@ export const store = {
   validateWorkforceImport(csv: string): Promise<WorkforceImportPreview> {
     return apiClient.post<WorkforceImportPreview>('/workforce-import/validate', { csv });
   },
-  /** Confirm and run it. The file is re-validated server-side (U24). */
+  /**
+   * Confirm and START it — the file is re-validated server-side, and this
+   * returns as soon as the run has an id rather than when the run has finished
+   * (U24). A file of a few hundred people takes minutes; waiting for it is what
+   * timed the browser out and left an operator staring at an upload form beside
+   * a live import.
+   *
+   * 409 here means one is already running, and the error body carries its id.
+   */
   runWorkforceImport(csv: string): Promise<{ runId: string }> {
     return apiClient.post<{ runId: string }>('/workforce-import/run', { csv });
   },
-  /** The run report, readable long after the page was closed (U24, R171). */
+  /** The run report — progress while it runs, the full report after (U24, R171). */
   getWorkforceImportRun(runId: string): Promise<WorkforceImportRun> {
     return apiClient.get<WorkforceImportRun>(`/workforce-import/runs/${runId}`);
+  },
+  /** The run this organisation has in flight, asked before offering to start one. */
+  getActiveWorkforceImport(): Promise<{ run: WorkforceImportRun | null }> {
+    return apiClient.get<{ run: WorkforceImportRun | null }>('/workforce-import/active');
   },
   /** A member's record as this reader is admitted to it (U29, U38). */
   getProfile(membershipId: string): Promise<ProfileResponse> {
@@ -1252,6 +1420,26 @@ export const store = {
         ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
       })
       .then(() => undefined);
+  },
+
+  /**
+   * Attach an evidence file — the renewed licence or certificate — to one held
+   * competency (the grant row identified by `holderId`, from
+   * `getHeldCompetencies`). It lands as `held` evidence immediately: this is the
+   * editor's path (R28), distinct from the candidate's own replacement upload,
+   * which waits for approval. `uploadAttachment` streams the base64 with real
+   * upload progress, because a licence photo off a phone is routinely several MB.
+   */
+  uploadCompetencyEvidence(
+    holderId: string,
+    file: File,
+    onProgress?: (percent: number) => void,
+  ): Promise<{ id: string; fileName: string }> {
+    return uploadAttachment<{ id: string; fileName: string }>(
+      `/competency-documents/${holderId}`,
+      file,
+      onProgress,
+    );
   },
 
   /* ── Saved imports ─────────────────────────────────────────────────────── */

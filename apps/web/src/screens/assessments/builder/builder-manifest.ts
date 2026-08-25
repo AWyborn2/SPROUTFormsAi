@@ -30,6 +30,7 @@ import {
   type ExtractedField,
   type FormField,
   type FormFieldType,
+  type PartCompletionMark,
   type PartKind,
   type SetupAnswers,
   type StructureSection,
@@ -58,10 +59,28 @@ import {
  * two alongside its checklist, and calling that part theory would auto-mark a
  * demonstration nobody watched.
  */
-export function inferKind(sectionFields: readonly FormField[]): PartKind {
+export function inferKind(sectionFields: readonly FormField[], sectionLabel = ''): PartKind {
   const tables = sectionFields.filter((f) => f.type === 'repeating_group');
   if (tables.some((t) => !t.fixedRows || t.fixedRows.length === 0)) return 'logbook';
   if (tables.length > 0) return 'practical';
+  /*
+    THE ONE LABEL-BASED RULE, and deliberately the narrowest one. A CANDIDATE
+    declaration is an attestation, not an assessment — defaulting it to theory
+    put a "Theory" dropdown on a signature box and parked the hand-in for
+    marking nobody could do. The label must say CANDIDATE: this paper prints an
+    assessor declaration per part, and those are the assessor's attestations —
+    auto-completing one on the candidate's submit would sign the assessor's
+    block for them. Content alone cannot tell the two apart (both are a
+    signature and a date), which is why the word is required rather than
+    inferred. Overridable in Units & gating like every proposal.
+  */
+  if (
+    /candidate['’]?s?\s+declaration/i.test(sectionLabel) &&
+    sectionFields.some((f) => f.type === 'signature') &&
+    !sectionFields.some((f) => (f.answerKey?.length ?? 0) > 0)
+  ) {
+    return 'declaration';
+  }
   return 'theory';
 }
 
@@ -120,7 +139,14 @@ export function derivePartsFromStructure({
   keys,
   excluded,
 }: DeriveInput): DerivedPart[] {
-  const keyed = new Set(keys.map((k) => k.fieldId));
+  /*
+    KEYED means auto-marked. A written question's MODEL key (`answerKey: []`,
+    `modelAnswer` prose) is a row too, but marking never reads it — proposing
+    its question as mandatory would hand `validateManifest` a mandatory
+    question with no answer key the moment an author types a model answer,
+    turning a legitimate guide into a publish blocker.
+  */
+  const keyed = new Set(keys.filter((k) => k.answerKey.length > 0).map((k) => k.fieldId));
   const parts: DerivedPart[] = [];
   let ordinal = 0;
 
@@ -136,7 +162,7 @@ export function derivePartsFromStructure({
     if (fillable.length === 0) continue;
 
     ordinal += 1;
-    const kind = inferKind(sectionFields);
+    const kind = inferKind(sectionFields, section.label);
 
     /*
       THE ANCHOR IS THE SECTION'S HEADING WHERE IT HAS ONE, AND ITS FIRST
@@ -306,7 +332,12 @@ export function proposeCoverPointers(
  */
 
 /** Phrases that identify each printed box. Deliberately narrow. */
-const SATISFACTORY = /candidate'?s?\s+responses?\s+were|responses?\s+were\s*:?\s*$|^satisfactory$/i;
+// `['’]` because extraction reads the paper's own curly apostrophes — a
+// straight-quote-only pattern silently missed every real "Candidate's".
+const SATISFACTORY =
+  /candidate['’]?s?\s+responses?\s+were|responses?\s+were\s*:?\s*$|^(?:not\s+)?satisfactory$/i;
+/** The negative half, when the pair prints as two separate boxes. */
+const NOT_SATISFACTORY = /\bnot\s+satisfactory\b/i;
 const COACHING = /more\s+coaching|coaching\s+and\s*\/?\s*or\s+training/i;
 const FURTHER_ACTION = /detail\s+further\s+action|further\s+action/i;
 const RESULT = /assessment\s+result|overall\s+performance\s+meets|candidate\s+competent|not\s+yet\s+competent/i;
@@ -426,7 +457,27 @@ export function proposePartMarks(
   > = {};
 
   const verdicts = fields.filter((f) => SATISFACTORY.test(f.label));
-  const verdict = verdicts.length === 1 ? pairOn(verdicts[0]!) : null;
+  let verdict = verdicts.length === 1 ? pairOn(verdicts[0]!) : null;
+  /*
+    TWO PRINTED BOXES, ONE VERDICT. Plenty of papers print the pair as two
+    separate cells — "☐ Satisfactory ☐ Not Satisfactory" — which extraction
+    reads as two fields, and the exactly-one rule above rightly refuses to
+    guess between them. But two fields where exactly one is the negative is
+    not ambiguous: each half gets a TICK in its own box. `true` in the
+    negative box, never `false` in the positive one — a ✗ beside
+    "Satisfactory" with an empty "Not Satisfactory" next to it reads as
+    both and neither.
+  */
+  if (!verdict && verdicts.length === 2) {
+    const no = verdicts.find((f) => NOT_SATISFACTORY.test(f.label));
+    const yes = verdicts.find((f) => !NOT_SATISFACTORY.test(f.label));
+    if (no && yes && isSelfAnswering(no.type) && isSelfAnswering(yes.type)) {
+      verdict = {
+        yes: { fieldId: yes.id, value: true },
+        no: { fieldId: no.id, value: true },
+      };
+    }
+  }
   if (verdict) {
     out.outcomeSatisfactory = verdict.yes;
     out.outcomeNotSatisfactory = verdict.no;
@@ -490,15 +541,113 @@ function signOffFrom(
   return proposeSignOff(extracted.filter((f) => f.coverSection === 'assessor_declaration'));
 }
 
+/** Words too common on this paper to tell one part from another. */
+const COMPLETION_STOP_WORDS = new Set(['part', 'the', 'a', 'an', 'of', 'and', 'or']);
+
+/** A label's comparable tokens: lowercase words, digits and noise dropped. */
+function completionTokens(label: string): Set<string> {
+  return new Set(
+    label
+      .toLowerCase()
+      .split(/[^a-z]+/)
+      .filter((w) => w.length > 1 && !COMPLETION_STOP_WORDS.has(w)),
+  );
+}
+
+/** The printed number a label leads with, or on a part heading ("PART 3 …"). */
+function printedNumber(label: string, asPart: boolean): number | null {
+  const match = asPart ? /part\s*0*(\d+)/i.exec(label) : /^\s*0*(\d+)\b/.exec(label);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Map each part to the printed checklist row that records its completion.
+ *
+ * The methods checklist prints one numbered row per part ("3. Direct
+ * Observation Log") and the parts carry the same numbers in their headings
+ * ("PART 3 - DIRECT OBSERVATON LOG" — typos and all). The NUMBER is the
+ * anchor, because the words drift exactly like that example; token overlap
+ * then separates "PART 2 - PRACTICAL DEMONSTRATION" from "PART 2 Assessor
+ * Assessment Declaration", which share the number and nothing else.
+ *
+ * A PROPOSAL, like every other pointer here: only a fixed-row table with one
+ * answer column qualifies, a row must beat every same-numbered rival on
+ * shared words, and a table that matches fewer than two parts is judged a
+ * coincidence and proposes nothing. An unmatched part simply never ticks —
+ * visible on the printed record, never wrong on it.
+ */
+export function proposePartCompletionMarks(
+  parts: readonly Pick<AssessmentPart, 'key' | 'label'>[],
+  extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'type' | 'columns' | 'fixedRows'>[],
+): PartCompletionMark[] {
+  const tables = extracted.filter(
+    (f) =>
+      f.type === 'repeating_group' &&
+      (f.fixedRows?.length ?? 0) > 0 &&
+      (f.columns ?? []).slice(1).length === 1,
+  );
+
+  const byField = new Map<string, PartCompletionMark[]>();
+  for (const table of tables) {
+    const columnKey = table.columns![1]!.key;
+    const marks: PartCompletionMark[] = [];
+    const claimedRows = new Set<number>();
+
+    for (const part of parts) {
+      const partNumber = printedNumber(part.label, true);
+      if (partNumber === null) continue;
+      const partTokens = completionTokens(part.label);
+
+      let best: { rowIndex: number; overlap: number } | null = null;
+      let contested = false;
+      table.fixedRows!.forEach((rowLabel, rowIndex) => {
+        if (claimedRows.has(rowIndex)) return;
+        if (printedNumber(rowLabel, false) !== partNumber) return;
+        const overlap = [...completionTokens(rowLabel)].filter((t) => partTokens.has(t)).length;
+        if (overlap === 0) return;
+        if (best && overlap === best.overlap) contested = true;
+        else if (!best || overlap > best.overlap) {
+          best = { rowIndex, overlap };
+          contested = false;
+        }
+      });
+
+      if (best && !contested) {
+        const { rowIndex } = best;
+        claimedRows.add(rowIndex);
+        marks.push({ partKey: part.key, fieldId: table.id, rowIndex, columnKey });
+      }
+    }
+
+    if (marks.length >= 2) byField.set(table.id, marks);
+  }
+
+  return [...byField.values()].flat();
+}
+
 export function buildManifest(
   parts: readonly DerivedPart[],
-  extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'type' | 'options' | 'coverSection'>[],
-  setup?: Pick<SetupAnswers, 'theoryRendering'>,
+  extracted: readonly Pick<
+    ExtractedField,
+    'id' | 'label' | 'type' | 'options' | 'coverSection' | 'columns' | 'fixedRows'
+  >[],
+  setup?: Pick<
+    SetupAnswers,
+    'theoryRendering' | 'passRule' | 'passPercentage' | 'theoryAllowRetry' | 'theoryRetry'
+  >,
 ): AssessmentToolManifest {
+  const completionMarks = proposePartCompletionMarks(parts, extracted);
+  // Resolve the retry mode from either the new field or a draft that still
+  // carries only the legacy boolean, so re-publishing an old tool keeps it.
+  const retryMode = setup?.theoryRetry ?? (setup?.theoryAllowRetry ? 'immediate' : 'end');
   return {
     // `sectionKey` is builder bookkeeping and must not reach the stored record.
     parts: parts.map(({ sectionKey: _sectionKey, ...part }) => part),
     ...proposeCoverPointers(extracted),
+    // The completion checklist ticks itself as parts pass — see the manifest
+    // property. Proposed here so a tool published by this builder keeps its
+    // own printed record without anyone wiring the mapping by hand.
+    ...(completionMarks.length > 0 ? { partCompletionMarks: completionMarks } : {}),
     /*
       THE FRONT PAGE, from the assessor-declaration slice only.
 
@@ -535,6 +684,12 @@ export function buildManifest(
       default a manifest naming nothing resolves to.
     */
     ...(setup?.theoryRendering === 'stacked' ? { theoryRendering: 'stacked' as const } : {}),
+    ...(setup?.passRule === 'overall_percentage' && setup.passPercentage
+      ? { theoryPassPercent: setup.passPercentage }
+      : {}),
+    // Only a mode that differs from the resolved default ('end') is worth
+    // storing — the same rule theoryRendering follows above.
+    ...(retryMode !== 'end' ? { theoryRetry: retryMode } : {}),
   };
 }
 
@@ -551,4 +706,75 @@ export function logbookColumnsFor(
 ): { key: string; label: string }[] {
   const table = fieldsInSection(fields, part.startFieldId).find((f) => f.type === 'repeating_group');
   return (table?.columns ?? []).map((c) => ({ key: c.key, label: c.label ?? c.key }));
+}
+
+/**
+ * The choice columns of a logbook part's table — the ones a task-type minimum
+ * can key off, because the target values must be an option a filler can pick.
+ *
+ * A per-task minimum on a free-text column could never be met reliably (a typo
+ * makes the hours land nowhere), which is why the picker is scoped to columns
+ * that actually offer options — the same rule `validateManifest` enforces.
+ */
+export function logbookChoiceColumnsFor(
+  part: Pick<AssessmentPart, 'startFieldId'>,
+  fields: readonly FormField[],
+): { key: string; label: string; options: string[] }[] {
+  const table = fieldsInSection(fields, part.startFieldId).find((f) => f.type === 'repeating_group');
+  return (table?.columns ?? [])
+    .filter((c) => (c.options?.length ?? 0) > 0)
+    .map((c) => ({ key: c.key, label: c.label ?? c.key, options: [...c.options!] }));
+}
+
+/**
+ * Minimum hours read off a task label like "Overburden Removal – Topsoil (min
+ * 10 hours)", or null when it carries none.
+ *
+ * The Scraper's paper writes the target INTO each task heading, so an author
+ * who names the dropdown options after the paper gets the minimums prefilled
+ * rather than re-keyed — the same figure, transcribed once by the machine
+ * instead of six times by a person.
+ */
+export function parseTaskMinimumHours(label: string): number | null {
+  const m = /\(\s*min(?:imum)?\s+(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b/i.exec(label);
+  if (!m) return null;
+  const n = Number.parseFloat(m[1]!);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+type TaskMinimums = NonNullable<AssessmentPart['taskMinimums']>;
+
+/**
+ * The initial per-task minimums for a freshly-picked task column: one target
+ * per option whose label declares a minimum, prefilled from that label. Options
+ * with no declared minimum are left out — an author sets those by hand, or the
+ * option is one like "General items" that is not hours-gated at all.
+ */
+export function taskMinimumsFromColumn(columnKey: string, options: readonly string[]): TaskMinimums {
+  const targets = options
+    .map((value) => ({ value, minimumHours: parseTaskMinimumHours(value) }))
+    .filter((t): t is { value: string; minimumHours: number } => t.minimumHours !== null);
+  return { columnKey, targets };
+}
+
+/**
+ * Set (or clear) one task's minimum, returning the updated config. Zero, blank
+ * (NaN) or negative clears the target rather than storing an unmeetable one —
+ * matching the validator, which rejects a non-positive minimum. Targets keep
+ * the column's option order so the builder list and the candidate's chips read
+ * top-to-bottom the same.
+ */
+export function withTaskTargetHours(
+  current: TaskMinimums,
+  options: readonly string[],
+  value: string,
+  hours: number,
+): TaskMinimums {
+  const byValue = new Map(current.targets.map((t) => [t.value, t.minimumHours]));
+  if (Number.isFinite(hours) && hours > 0) byValue.set(value, hours);
+  else byValue.delete(value);
+  const targets = options
+    .filter((o) => byValue.has(o))
+    .map((o) => ({ value: o, minimumHours: byValue.get(o)! }));
+  return { columnKey: current.columnKey, targets };
 }

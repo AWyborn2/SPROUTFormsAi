@@ -10,14 +10,22 @@ import { describe, expect, it } from 'vitest';
 import type { FormField, GroupOrdinal, PageBox } from '@formai/shared';
 import { markPlacement, resolveGeometry } from '@formai/shared';
 import type { FieldProposal, PositionedText, TableProposal, TextPage } from '../../../lib/pdf-geometry.js';
+import { proposeFieldOptionCells, proposeMatchAnchorCells } from '../../../lib/pdf-geometry.js';
 import {
+  pageWindowOf,
+  windowVerdict,
+  WINDOW_CONFIDENCE_CAP,
+  WINDOW_MARGIN_PAGES,
   NEAR_EQUAL_CONFIDENCE,
   NUDGE_POINTS,
   SNAP_RANGE,
   DRAW_SNAP_RANGE,
   appendRowBelow,
+  columnEvidenceCaption,
+  type PrintedRect,
   applyFieldChanges,
   applyMatrix,
+  retargetPageChanges,
   classifyProposalTier,
   columnHandles,
   type FieldChange,
@@ -49,6 +57,7 @@ import {
   keyMove,
   isDeleteKey,
   removeSegment,
+  replaceSegmentOnPage,
   NUDGE_POINTS_COARSE,
   clampDelta,
   nudgeStep,
@@ -321,6 +330,45 @@ describe('panelState', () => {
 
     if (state.kind === 'proposed') expect(state.confirmed).toBe(true);
   });
+
+  it('carries the column-evidence provenance through from the derivation (R7)', () => {
+    const proposal = derived()!;
+
+    const state = panelState(tableField(), proposal.segment, false, proposal);
+
+    expect(state.kind).toBe('proposed');
+    if (state.kind === 'proposed') expect(state.columnEvidence).toBe('header-text');
+  });
+
+  it('gives a scalar box no column-evidence caption — provenance is a table-derivation claim', () => {
+    const box: PageBox = {
+      page: 0,
+      x: 100,
+      y: 200,
+      width: 120,
+      height: 16,
+      pageWidth: 595,
+      pageHeight: 842,
+    };
+    const state = panelState(tableField({ type: 'text' }), box, false, null);
+
+    expect(state.kind).toBe('proposed');
+    if (state.kind === 'proposed') {
+      expect(state.columnEvidence).toBeUndefined();
+      expect(columnEvidenceCaption(state.columnEvidence)).toBeNull();
+    }
+  });
+});
+
+describe('columnEvidenceCaption — the reviewer-facing half of provenance (U6, R7)', () => {
+  it('says measured for printed-boxes and inferred for header-text', () => {
+    expect(columnEvidenceCaption('printed-boxes')).toBe('Columns measured from printed boxes.');
+    expect(columnEvidenceCaption('header-text')).toBe('Columns inferred from header text.');
+  });
+
+  it('renders nothing where no table derivation stands behind the proposal', () => {
+    expect(columnEvidenceCaption(undefined)).toBeNull();
+  });
 });
 
 describe('classifyProposalTier', () => {
@@ -333,6 +381,7 @@ describe('classifyProposalTier', () => {
     anchorsLocated: 2,
     anchorsInferred: 0,
     notes: [],
+    columnEvidence: 'header-text',
   });
   const fieldProposal = (confidence: number): FieldProposal => ({
     segments: [box],
@@ -354,6 +403,14 @@ describe('classifyProposalTier', () => {
     expect(classifyProposalTier(tableProposal(0.99))).toBe('needs-review');
     expect(classifyProposalTier(fieldProposal(0.6))).toBe('needs-review');
     expect(classifyProposalTier(fieldProposal(0.99))).toBe('needs-review');
+  });
+
+  it('classifies the rect-anchored 0.95 tier as needs-review, never auto-confirm (R9/KTD5)', () => {
+    // Rect-anchored proposals ship at exactly 0.95 — measured coordinates, but
+    // a brand-new row-pairing heuristic with no printed header behind it. The
+    // first release is human-gated; raising it is a later, corpus-informed
+    // decision, and this pin is what makes that gate real.
+    expect(classifyProposalTier(tableProposal(0.95))).toBe('needs-review');
   });
 });
 
@@ -398,6 +455,126 @@ describe('deriveAcrossPages', () => {
 
   it('is empty-safe before the viewer has read the PDF', () => {
     expect(deriveAcrossPages(tableField(), [])).toBeNull();
+  });
+});
+
+/**
+ * Rect evidence reaching the decision layer (U5, R10).
+ *
+ * The headerless-checklist fixture mirrors the measured Mine Site SME shape —
+ * a shared label margin, one declared answer column, printed squares on a
+ * uniform pitch (28.4pt, the measured value) — scaled onto an A4 page so the
+ * squares sit inside it.
+ */
+describe('rect-derived proposals through deriveForField / deriveAcrossPages (U5)', () => {
+  /** The Mine Site shape: label column plus ONE answer column, five rows. */
+  function checklistField(): DerivableField {
+    return {
+      type: 'repeating_group',
+      columns: [
+        { key: 'method', label: 'Method', type: 'text' },
+        { key: 'used', label: 'Used', type: 'check_cross' },
+      ],
+      fixedRows: ['Observation', 'Practical', 'Verbal', 'Written', 'Portfolio'],
+    };
+  }
+
+  /** Five method labels at one margin — no header glyphs anywhere. */
+  function checklistLabels(dy = 0): PositionedText[] {
+    return [0, 1, 2, 3, 4].map((i) => ({
+      text: `Method ${i}`,
+      x: 40,
+      y: 762 - dy - i * 28.4,
+      width: 200,
+    }));
+  }
+
+  /** Five 9pt squares sharing an x, on the measured 28.4pt pitch. */
+  function checklistSquares(dy = 0): PrintedRect[] {
+    return [0, 1, 2, 3, 4].map((i) => ({ x: 500, y: 760 - dy - i * 28.4, width: 9, height: 9 }));
+  }
+
+  it('places a headerless checklist from the page that carries its squares, not page 0', () => {
+    const blank: TextPage = { items: [], width: A4.width, height: A4.height };
+    const withChecklist: TextPage = {
+      items: checklistLabels(),
+      width: A4.width,
+      height: A4.height,
+      rects: checklistSquares(),
+    };
+
+    const got = deriveAcrossPages(checklistField(), [blank, withChecklist]);
+
+    expect(got).not.toBeNull();
+    expect(got!.segment.page).toBe(1);
+    expect(got!.confidence).toBe(0.95);
+    expect(got!.columnEvidence).toBe('printed-boxes');
+    expect(got!.segment.rowBands).toHaveLength(5);
+  });
+
+  it('a 0.95 rect-anchored proposal lands in the needs-review tier, never auto-confirm', () => {
+    const proposal = deriveForField(
+      checklistField(),
+      0,
+      checklistLabels(),
+      A4.width,
+      A4.height,
+      checklistSquares(),
+    );
+
+    expect(proposal?.confidence).toBe(0.95);
+    expect(classifyProposalTier(proposal)).toBe('needs-review');
+  });
+
+  it('Covers AE6: stacked twin checklists refuse at selection rather than guessing table identity', () => {
+    // Two structurally identical five-row checklists in one x-run of ten
+    // squares. The gap split yields two candidates and two 0.95 proposals;
+    // `selectByRowCount` sees two equally-close rivals inside the near-equal
+    // band and refuses — the existing recourse (ordinal, drawn box) applies.
+    const items = [...checklistLabels(), ...checklistLabels(300)];
+    const rects = [...checklistSquares(), ...checklistSquares(300)];
+
+    expect(deriveForField(checklistField(), 0, items, A4.width, A4.height, rects)).toBeNull();
+  });
+
+  it('deriveForField without the rects argument still refuses the headerless page (text-only behaviour)', () => {
+    // The trailing parameter is optional precisely so every existing caller
+    // compiles and behaves unchanged: no header glyphs, no rects, no proposal.
+    expect(deriveForField(checklistField(), 0, checklistLabels(), A4.width, A4.height)).toBeNull();
+  });
+
+  it('subdivideBox ignores squares outside the drawn box — the drag still scopes the evidence', () => {
+    const box: PageBox = {
+      page: 6,
+      x: 30,
+      y: 570,
+      width: 540,
+      height: 90,
+      pageWidth: A4.width,
+      pageHeight: A4.height,
+    };
+    // A square column far below the drag, row-count-compatible with nothing
+    // inside it. If the centre filter leaked, these would reach the marriage.
+    const outside: PrintedRect[] = [0, 1, 2, 3].map((i) => ({
+      x: 505,
+      y: 300 - i * 16.8,
+      width: 9,
+      height: 9,
+    }));
+
+    const field = tableField();
+    const textOnly = subdivideBox({ box, items: pageText(), columns: field.columns!, wantRows: 4 });
+    const withOutside = subdivideBox({
+      box,
+      items: pageText(),
+      columns: field.columns!,
+      wantRows: 4,
+      rects: outside,
+    });
+
+    expect(textOnly).not.toBeNull();
+    expect(withOutside).toEqual(textOnly);
+    expect(withOutside!.columnEvidence).toBe('header-text');
   });
 });
 
@@ -1620,6 +1797,52 @@ describe('removeSegment', () => {
   });
 });
 
+describe('replaceSegmentOnPage — the page-scoped write behind a band-edge drag / box move', () => {
+  // A repeating table spanning a page break: one whole-field box per page, BOTH
+  // with a null option key. This is the exact shape that made "the second box
+  // won't divide" — editing page 1 must not rewrite page 0's box.
+  const p0: PageBox = {
+    page: 0,
+    x: 10,
+    y: 20,
+    width: 100,
+    height: 200,
+    pageWidth: 595,
+    pageHeight: 842,
+    rowBands: [{ key: 'a', start: 20, end: 120 }],
+  };
+  const p1: PageBox = { ...p0, page: 1, rowBands: [{ key: 'b', start: 20, end: 120 }] };
+
+  it('replaces ONLY the box on the named page, leaving the other page’s box untouched', () => {
+    const next: PageBox = { ...p1, height: 300, rowBands: [{ key: 'b', start: 20, end: 320 }] };
+    const out = replaceSegmentOnPage([p0, p1], null, 1, next);
+    expect(out).toEqual([p0, next]);
+    // The page-0 box is the very same object — it was never rewritten.
+    expect(out[0]).toBe(p0);
+  });
+
+  it('does NOT collapse every page’s box onto the edited one (the clobber this guards against)', () => {
+    // The bug: matching on optionKey alone (both null) rewrote every whole-field
+    // box to `next`, so the continuation vanished onto the edited page.
+    const next: PageBox = { ...p0, x: 50 };
+    const out = replaceSegmentOnPage([p0, p1], null, 0, next);
+    expect(out).toEqual([next, p1]);
+    expect(out.filter((s) => s.page === 1)).toHaveLength(1);
+  });
+
+  it('scopes to a single option on a per-option field', () => {
+    const oa: PageBox = { ...p0, optionKey: 'a', rowBands: undefined };
+    const ob: PageBox = { ...p0, optionKey: 'b', rowBands: undefined };
+    const next: PageBox = { ...ob, x: 77 };
+    expect(replaceSegmentOnPage([oa, ob], 'b', 0, next)).toEqual([oa, next]);
+  });
+
+  it('returns the SAME array when nothing matched, so the caller can skip a no-op write', () => {
+    const segments = [p0, p1];
+    expect(replaceSegmentOnPage(segments, null, 9, { ...p0, page: 9 })).toBe(segments);
+  });
+});
+
 import { deriveMatchAnchorsAcrossPages } from './geometry-actions.js';
 
 /**
@@ -1668,5 +1891,431 @@ describe('deriveMatchAnchorsAcrossPages', () => {
 
   it('refuses a question with fewer than two entries before reading a page', () => {
     expect(deriveMatchAnchorsAcrossPages([ANCHORS[0]!], [signs])).toBeNull();
+  });
+});
+
+describe('retargetPageChanges', () => {
+  /*
+    The duplicated-checklist paper: Parts 2, 4 and 6 print the identical
+    checklist, detection lands all three parts' boxes on the first matching
+    page, and the x/y it found are right everywhere but the page number.
+  */
+  const box = (page: number, x = 40, optionKey?: string) => ({
+    page,
+    x,
+    y: 60,
+    width: 20,
+    height: 14,
+    pageWidth: 600,
+    pageHeight: 800,
+    ...(optionKey ? { optionKey } : {}),
+  });
+  const placed = (id: string, pages: number[]): FormField => ({
+    id,
+    type: 'check_cross',
+    label: id,
+    required: false,
+    source: 'imported',
+    geometry: { segments: pages.map((p, i) => box(p, 40 + i * 30, i === 0 ? undefined : `opt${i}`)) },
+  });
+  const unplaced: FormField = {
+    id: 'bare',
+    type: 'text',
+    label: 'bare',
+    required: false,
+    source: 'imported',
+  };
+
+  it('re-stamps every segment onto the target page, keeping position and keys', () => {
+    const fields = [placed('a', [7, 7]), unplaced];
+
+    const next = applyFieldChanges(fields, retargetPageChanges(fields, ['a'], 11));
+    const segments = next[0]!.geometry!.segments;
+
+    expect(segments.map((s) => s.page)).toEqual([11, 11]);
+    // Position and option identity survive verbatim — the layouts are identical.
+    expect(segments.map((s) => s.x)).toEqual([40, 70]);
+    expect(segments[1]!.optionKey).toBe('opt1');
+  });
+
+  it('skips fields with no boxes rather than inventing empty geometry', () => {
+    const fields = [placed('a', [7]), unplaced];
+
+    const changes = retargetPageChanges(fields, ['a', 'bare', 'ghost'], 11);
+
+    expect(changes.map((c) => c.fieldId)).toEqual(['a']);
+  });
+
+  it('is a no-op for a field already on the target page', () => {
+    const fields = [placed('a', [11, 11])];
+
+    expect(retargetPageChanges(fields, ['a'], 11)).toEqual([]);
+  });
+});
+
+/**
+ * The extraction window as a soft prior (sourcePages scoping).
+ *
+ * Every AI field carries the 1-based page range of the 4-page batch that
+ * produced it. These tests pin the whole discipline: the window softens
+ * exactly one refusal (ambiguous document-wide, unique in-window), never
+ * auto-confirms what it influenced, never vetoes the only candidate, and —
+ * asserted with deep-equality fixtures, not assumed — leaves a field without
+ * a window byte-identical to the pre-window behaviour (R6).
+ */
+describe('pageWindowOf (R7/KTD3)', () => {
+  it('converts 1-based to 0-based, dilates one page each side, and keeps the stamped range for notes', () => {
+    expect(pageWindowOf({ from: 5, to: 8 }, 18)).toEqual({ first: 3, last: 8, from: 5, to: 8 });
+  });
+
+  it('clamps the dilated bounds to the document', () => {
+    expect(pageWindowOf({ from: 1, to: 4 }, 18)).toEqual({ first: 0, last: 4, from: 1, to: 4 });
+    expect(pageWindowOf({ from: 15, to: 18 }, 18)).toEqual({ first: 13, last: 17, from: 15, to: 18 });
+  });
+
+  it('the margin is one page and the cap sits strictly below the auto-confirm boundary', () => {
+    // classifyProposalTier auto-confirms at confidence === 1 exactly; the cap
+    // must never reach it, or a window-guessed page could publish unreviewed.
+    expect(WINDOW_MARGIN_PAGES).toBe(1);
+    expect(WINDOW_CONFIDENCE_CAP).toBeLessThan(1);
+    expect(classifyProposalTier({ segments: [], confidence: WINDOW_CONFIDENCE_CAP, notes: [] })).toBe(
+      'needs-review',
+    );
+  });
+
+  it('treats every malformed shape as absent', () => {
+    expect(pageWindowOf(undefined, 18)).toBeNull();
+    expect(pageWindowOf({ from: 0, to: 2 }, 18)).toBeNull(); // 1-based, so 0 is malformed
+    expect(pageWindowOf({ from: 5, to: 4 }, 18)).toBeNull(); // inverted
+    expect(pageWindowOf({ from: 2.5, to: 3 }, 18)).toBeNull(); // not a page number
+    expect(pageWindowOf({ from: 1, to: 2 }, 0)).toBeNull(); // no document to scope
+  });
+
+  it('ignores a window wholly past the end of the document (shorter-PDF defense)', () => {
+    expect(pageWindowOf({ from: 19, to: 22 }, 18)).toBeNull();
+    // …but a window that still touches the document survives, clamped.
+    expect(pageWindowOf({ from: 18, to: 22 }, 18)).toEqual({ first: 16, last: 17, from: 18, to: 22 });
+  });
+});
+
+describe('windowVerdict (R2-R5 truth table)', () => {
+  // Stamped pages 6-8 of a 20-page document: dilated 0-based bounds 4..8.
+  const window = pageWindowOf({ from: 6, to: 8 }, 20)!;
+  const hits = (...pages: number[]) => pages.map((page) => ({ page }));
+
+  it('refuses when nothing matched anywhere', () => {
+    expect(windowVerdict([], window)).toEqual({ kind: 'refuse' });
+  });
+
+  it('places a unique in-window hit UNWINDOWED — the prior changed nothing and leaves no trace (AE4)', () => {
+    expect(windowVerdict(hits(6), window)).toEqual({ kind: 'place', page: 6, windowed: false });
+  });
+
+  it('dilation admits a hit one page before or after the stamped range (KTD3)', () => {
+    // Stamped 6-8 is 0-based 5..7; pages 4 and 8 are the one-page tolerance.
+    expect(windowVerdict(hits(4), window)).toEqual({ kind: 'place', page: 4, windowed: false });
+    expect(windowVerdict(hits(8), window)).toEqual({ kind: 'place', page: 8, windowed: false });
+  });
+
+  it('places the one in-window hit over document-wide rivals, naming the excluded pages (AE1/R5)', () => {
+    const verdict = windowVerdict(hits(6, 11, 16), window);
+
+    expect(verdict).toEqual({
+      kind: 'place',
+      page: 6,
+      windowed: true,
+      note: 'Matched on page 7; pages 12 and 17 excluded by the extraction window (pages 6–8).',
+    });
+  });
+
+  it('refuses two in-window hits — ambiguity INSIDE the window is a question the window cannot answer (AE2)', () => {
+    expect(windowVerdict(hits(5, 6), window)).toEqual({ kind: 'refuse' });
+    // Outsiders change nothing about that.
+    expect(windowVerdict(hits(5, 6, 15), window)).toEqual({ kind: 'refuse' });
+  });
+
+  it('places a unique OUT-of-window hit, flagged — the soft prior never vetoes the only candidate (AE5)', () => {
+    expect(windowVerdict(hits(15), window)).toEqual({
+      kind: 'place',
+      page: 15,
+      windowed: true,
+      note: 'Matched on page 16, outside the extraction window (pages 6–8) — check the page.',
+    });
+  });
+
+  it('refuses two out-of-window hits, exactly as the unwindowed scan would', () => {
+    expect(windowVerdict(hits(12, 15), window)).toEqual({ kind: 'refuse' });
+  });
+
+  it('names a one-page stamped window as a single page', () => {
+    const single = pageWindowOf({ from: 6, to: 6 }, 20)!;
+
+    const verdict = windowVerdict(hits(5, 11), single);
+    expect(verdict.kind).toBe('place');
+    if (verdict.kind === 'place' && verdict.windowed) {
+      expect(verdict.note).toBe(
+        'Matched on page 6; page 12 excluded by the extraction window (page 6).',
+      );
+    }
+  });
+});
+
+describe('deriveOptionCellsAcrossPages through the window (U4)', () => {
+  /** A minimal page carrying the dozer's measured tick / cross / N-A header. */
+  function questionPage(question: string): TextPage {
+    return {
+      width: 595,
+      height: 842,
+      items: [
+        { text: 'N/A', x: 539.9, y: 648.6, width: 13.3 },
+        { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7, width: 192 },
+        { text: '', x: 502.6, y: 647.7, width: 7.1 },
+        { text: '/ ×', x: 512.1, y: 647.7, width: 10.3 },
+        { text: question, x: 37.5, y: 630.8, width: 258.1 },
+        { text: 'Wearing correct PPE', x: 37.5, y: 614, width: 84 },
+      ],
+    };
+  }
+
+  const LABEL = 'Receive and clarify the work instructions';
+  const OPTIONS = ['tick', 'cross', 'na'];
+  const q = questionPage(LABEL);
+  const other = questionPage('Something else entirely');
+
+  it('AE1: places the one in-window copy of a criterion three pages print, capped and noted', () => {
+    // Pages 1, 4 and 6 (as printed) all carry the criterion; the field's batch
+    // was page 4. Stamped {4,4} dilates to 0-based 2..4, so only page 4 is in.
+    const pages = [q, other, other, q, other, q];
+
+    const res = deriveOptionCellsAcrossPages(
+      { label: LABEL, options: OPTIONS },
+      pages,
+      pageWindowOf({ from: 4, to: 4 }, pages.length),
+    );
+
+    expect(res).not.toBeNull();
+    expect(res!.segments.every((s) => s.page === 3)).toBe(true);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(classifyProposalTier(res)).toBe('needs-review');
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 4; pages 1 and 6 excluded by the extraction window (page 4).',
+    );
+  });
+
+  it('AE2: two in-window copies still refuse — the window resolves nothing inside itself', () => {
+    const pages = [other, other, q, q];
+
+    expect(
+      deriveOptionCellsAcrossPages(
+        { label: LABEL, options: OPTIONS },
+        pages,
+        pageWindowOf({ from: 3, to: 4 }, pages.length),
+      ),
+    ).toBeNull();
+  });
+
+  it('AE3: no window is byte-identical to the pre-change scan — deep-equal on the single hit, null on two', () => {
+    const pages = [other, q];
+
+    // The across-pages wrapper adds nothing to the untouched per-page rule:
+    // its no-window output IS proposeFieldOptionCells' own proposal, verbatim.
+    const expected = proposeFieldOptionCells({
+      page: 1,
+      pageWidth: q.width,
+      pageHeight: q.height,
+      items: q.items,
+      label: LABEL,
+      options: OPTIONS,
+    });
+    expect(expected).not.toBeNull();
+    expect(deriveOptionCellsAcrossPages({ label: LABEL, options: OPTIONS }, pages)).toEqual(expected);
+    // An explicit null window is the same absent-window path.
+    expect(deriveOptionCellsAcrossPages({ label: LABEL, options: OPTIONS }, pages, null)).toEqual(
+      expected,
+    );
+
+    expect(deriveOptionCellsAcrossPages({ label: LABEL, options: OPTIONS }, [q, other, q])).toBeNull();
+  });
+
+  it('AE4: a window that was not needed leaves no fingerprints — same confidence, same notes', () => {
+    const pages = [other, q, other];
+
+    const unwindowed = deriveOptionCellsAcrossPages({ label: LABEL, options: OPTIONS }, pages);
+    const windowed = deriveOptionCellsAcrossPages(
+      { label: LABEL, options: OPTIONS },
+      pages,
+      pageWindowOf({ from: 1, to: 2 }, pages.length),
+    );
+
+    expect(windowed).toEqual(unwindowed);
+  });
+
+  it('AE5: a unique hit OUTSIDE the window still places, capped, with the check-the-page note', () => {
+    const pages = [other, other, other, other, other, other, q, other];
+
+    const res = deriveOptionCellsAcrossPages(
+      { label: LABEL, options: OPTIONS },
+      pages,
+      pageWindowOf({ from: 1, to: 2 }, pages.length),
+    );
+
+    expect(res).not.toBeNull();
+    expect(res!.segments.every((s) => s.page === 6)).toBe(true);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 7, outside the extraction window (pages 1–2) — check the page.',
+    );
+  });
+});
+
+describe('deriveMatchAnchorsAcrossPages through the window (U4)', () => {
+  const signItems: PositionedText[] = [
+    { text: 'Restricted area', x: 60, y: 700, width: 78 },
+    { text: 'Biosecurity sign', x: 380, y: 700, width: 80 },
+    { text: 'Permission to pass', x: 60, y: 670, width: 92 },
+    { text: 'Traffic hazard sign', x: 380, y: 670, width: 92 },
+  ];
+
+  const ANCHORS = [
+    { key: 'l0', side: 'l' as const, text: 'Restricted area' },
+    { key: 'l1', side: 'l' as const, text: 'Permission to pass' },
+    { key: 'r0', side: 'r' as const, text: 'Biosecurity sign' },
+    { key: 'r1', side: 'r' as const, text: 'Traffic hazard sign' },
+  ];
+
+  const blank: TextPage = { width: 595, height: 842, items: [] };
+  const signs: TextPage = { width: 595, height: 842, items: signItems };
+
+  it('places the one in-window copy of a question two pages claim, capped and noted', () => {
+    const pages = [signs, blank, blank, blank, blank, signs];
+
+    const res = deriveMatchAnchorsAcrossPages(
+      ANCHORS,
+      pages,
+      pageWindowOf({ from: 5, to: 6 }, pages.length),
+    );
+
+    expect(res).not.toBeNull();
+    expect(res!.segments.every((s) => s.page === 5)).toBe(true);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(classifyProposalTier(res)).toBe('needs-review');
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 6; page 1 excluded by the extraction window (pages 5–6).',
+    );
+  });
+
+  it('refuses two in-window claims exactly as today', () => {
+    const pages = [blank, blank, blank, blank, signs, signs];
+
+    expect(
+      deriveMatchAnchorsAcrossPages(ANCHORS, pages, pageWindowOf({ from: 5, to: 6 }, pages.length)),
+    ).toBeNull();
+  });
+
+  it('a window that was not needed leaves no fingerprints, and no window is the pre-change scan verbatim', () => {
+    const pages = [blank, blank, signs];
+
+    const expected = proposeMatchAnchorCells({
+      page: 2,
+      pageWidth: signs.width,
+      pageHeight: signs.height,
+      items: signs.items,
+      anchors: ANCHORS,
+    });
+    expect(expected).not.toBeNull();
+    expect(deriveMatchAnchorsAcrossPages(ANCHORS, pages)).toEqual(expected);
+    expect(
+      deriveMatchAnchorsAcrossPages(ANCHORS, pages, pageWindowOf({ from: 3, to: 3 }, pages.length)),
+    ).toEqual(expected);
+  });
+});
+
+describe('deriveAcrossPages through the window (U5/R9)', () => {
+  const blank = { items: [], width: A4.width, height: A4.height };
+  const withTable = { items: pageText(), width: A4.width, height: A4.height };
+
+  it('an identical table on two pages lands in the window instead of on the first page that fits', () => {
+    const pages = [blank, blank, withTable, blank, blank, withTable];
+
+    // The contrast case first: without a window, the earlier page wins — the
+    // exact first-page capture the section-move tool exists to clean up after.
+    expect(deriveAcrossPages(tableField(), pages)!.segment.page).toBe(2);
+
+    const res = deriveAcrossPages(tableField(), pages, pageWindowOf({ from: 6, to: 6 }, pages.length));
+
+    expect(res).not.toBeNull();
+    expect(res!.segment.page).toBe(5);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(classifyProposalTier(res)).toBe('needs-review');
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 6; page 3 excluded by the extraction window (page 6).',
+    );
+  });
+
+  it('two in-window candidates do NOT refuse — the existing tiebreak picks, capped because a page was excluded', () => {
+    // The table path never refused on ambiguity and does not start to (R9):
+    // pages 5 and 6 are both in the stamped {5,6} window, page 3 is excluded.
+    const pages = [blank, blank, withTable, blank, withTable, withTable];
+
+    const res = deriveAcrossPages(tableField(), pages, pageWindowOf({ from: 5, to: 6 }, pages.length));
+
+    expect(res).not.toBeNull();
+    // The existing tiebreak (earlier page on a full tie) runs over the
+    // in-window survivors only.
+    expect(res!.segment.page).toBe(4);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 5; page 3 excluded by the extraction window (pages 5–6).',
+    );
+  });
+
+  it('no in-window candidate: the existing best-pick runs over everything, capped with the outside note', () => {
+    const pages = [blank, blank, withTable, blank, blank, blank];
+
+    const res = deriveAcrossPages(tableField(), pages, pageWindowOf({ from: 5, to: 6 }, pages.length));
+
+    expect(res).not.toBeNull();
+    expect(res!.segment.page).toBe(2);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 3, outside the extraction window (pages 5–6) — check the page.',
+    );
+  });
+
+  it('no window is byte-identical to the pre-change pick, and equals the untouched per-page derivation', () => {
+    const pages = [blank, blank, withTable, blank, blank, withTable];
+
+    // The across-pages combiner adds nothing to deriveForField's own pick.
+    const expected = deriveForField(tableField(), 2, withTable.items, A4.width, A4.height);
+    expect(expected).not.toBeNull();
+    expect(deriveAcrossPages(tableField(), pages)).toEqual(expected);
+    expect(deriveAcrossPages(tableField(), pages, null)).toEqual(expected);
+  });
+
+  it('every candidate in-window means the window changed nothing — deep-equal to the unwindowed pick', () => {
+    const pages = [blank, blank, withTable, withTable];
+
+    const unwindowed = deriveAcrossPages(tableField(), pages);
+    const windowed = deriveAcrossPages(
+      tableField(),
+      pages,
+      pageWindowOf({ from: 3, to: 4 }, pages.length),
+    );
+
+    expect(windowed).toEqual(unwindowed);
+    expect(windowed!.confidence).toBe(1); // untouched, still auto-confirmable
+  });
+
+  it('an ordinal field without a window keeps the pre-change path, null included', () => {
+    // No fixture in the suite can make a per-page ordinal pick succeed (the
+    // rightmost-cluster rule collapses side-by-side groups into one proposal,
+    // so stacked look-alikes refuse — the ADMN regression above). What must
+    // hold is that a window neither invents a pick where the unwindowed path
+    // refused everywhere, nor disturbs the refusal.
+    const field = tableField({ groupOrdinal: { index: 0, count: 3 }, fixedRows: undefined });
+    const pages = [blank, withTable];
+
+    expect(deriveAcrossPages(field, pages)).toBeNull();
+    expect(deriveAcrossPages(field, pages, pageWindowOf({ from: 1, to: 2 }, pages.length))).toBeNull();
   });
 });

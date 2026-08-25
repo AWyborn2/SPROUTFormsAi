@@ -45,11 +45,17 @@ export interface HeldCompetencyState {
 
 export interface AssignmentInput {
   /**
-   * The required tool ids of each Role the person holds, one array per Role. The
-   * union across them is what the person is obliged to hold (R48); a Role with
-   * no configured requirements contributes an empty array and so assigns nothing
-   * (R49). Changing which Roles a person holds is passing a different set of
-   * arrays (R51).
+   * The required tool ids the person's scopes confer. HISTORICAL NAME, WIDER
+   * MEANING since the requirement inheritance round (U3, KTD4): the arrays
+   * once carried one Role each, but the caller now passes the flattened union
+   * of the membership's WHOLE scope stack — org, placed Locations, placed
+   * Departments, held Roles (R2) — usually as a single array. The name stays
+   * because the engine has NEVER read the grouping: it unions everything
+   * before deciding (see below), so per-role arrays and one flat array are
+   * indistinguishable here, and renaming would touch every caller for zero
+   * behaviour change. A scope with no requirements contributes nothing (R49);
+   * changing what a person's placement confers is passing a different set
+   * (R51).
    */
   roleRequirements: readonly (readonly string[])[];
   /** The tools those requirements name, by id. A named tool absent here is skipped. */
@@ -58,8 +64,12 @@ export interface AssignmentInput {
   held: readonly HeldCompetencyState[];
   /**
    * The Location ids on the membership, in membership order (R60 reads the
-   * first). At least one — U4's placement validator guarantees it, and with none
-   * there is nowhere to place a case, so an empty list assigns nothing.
+   * first). With none there is nowhere to place a case, so an empty list
+   * assigns nothing — and that skip DELIBERATELY survives the scope rounds
+   * (KTD4): a member with no location placement can still OWE an org or
+   * department requirement, which stays visible through standing/compliance
+   * while no case is planned. The gap names its own fix; it is never silently
+   * met.
    */
   locationIds: readonly string[];
   /**
@@ -78,40 +88,52 @@ export interface AssignmentDecision {
 }
 
 /**
- * The projected effects of a retrospective change to a Role's required
- * assessments (U12). ONE function computes these and the write plan (KTD10): the
- * preview returns them and discards the plan, the apply returns them and
- * executes it, so `created` here equals the cases the apply inserts on unchanged
- * data.
+ * The projected effects of a retrospective change to a Role's requirements
+ * (U12, reworked in COMPETENCY terms by the role-competency links round). ONE
+ * function computes these and the write plan (KTD10): the preview returns them
+ * and discards the plan, the apply returns them and executes it, so `created`
+ * here equals the cases the apply inserts on unchanged data.
+ *
+ * The unit of change is now a COMPETENCY, not a tool: a Role's requirement is
+ * a competency link, and an added competency plans a case only where the KTD2
+ * resolver finds an awarding assessment — a licence-type competency with none
+ * adds to required standing without creating anything.
  *
  * Union-by-presence, not a discriminated add/remove — the apply body is the full
- * desired set, so a single save can add one tool and drop another at once, and
- * `created` can be non-zero alongside the removal counters. The side that does
- * not apply reads 0/[].
+ * desired set, so a single save can add one competency and drop another at
+ * once, and `created` can be non-zero alongside the removal counters. The side
+ * that does not apply reads 0/[].
  */
 export interface RequiredAssessmentsChangeEffects {
-  /** Tools the change ADDS (desired minus current). Empty on a pure removal. */
-  addedToolIds: string[];
-  /** Tools the change REMOVES (current minus desired). Empty on a pure addition. */
-  removedToolIds: string[];
+  /** Competencies the change ADDS to the required tier (desired minus current). Empty on a pure removal. */
+  addedCompetencyIds: string[];
+  /**
+   * Competencies the change REMOVES from required standing — dropped required
+   * links plus the awards of any legacy tool row this change explicitly
+   * removes (the awaitingLink exit, KTD9). Empty on a pure addition.
+   */
+  removedCompetencyIds: string[];
   /** Distinct current holders of the Role — a headcount, whichever way it changes (R82, R84, R85). */
   affected: number;
   /**
    * Assessment CASES the addition creates (R83, R84). Already past the skip rule,
    * so it is the holders left with an unmet requirement, not the headcount — and
-   * on a multi-tool add it can exceed `affected`. Zero on a pure removal, and
-   * never used to describe a removal (R85).
+   * on a multi-competency add it can exceed `affected`. Zero on a pure removal,
+   * and never used to describe a removal (R85). An added competency with no
+   * awarding assessment contributes nothing here (R7, R9 — evidence-only).
    */
   created: number;
   /**
-   * Cases already in flight for a removed tool that run to completion rather than
-   * being cancelled (R55). Counts cases, not people. Zero on a pure addition.
+   * Cases already in flight for a requirement this change drops that run to
+   * completion rather than being cancelled (R55). Counts cases, not people.
+   * Zero on a pure addition.
    */
   inFlightContinuing: number;
   /**
    * (holder, competency) standings that drop from required to optional (R56) —
-   * a competency a removed tool awards that no Role the holder still carries
-   * requires. Counts pairs, not competencies. Zero on a pure addition.
+   * a removed competency that no Role the holder still carries requires,
+   * through EITHER source (direct link or remaining legacy derivation). Counts
+   * pairs, not competencies. Zero on a pure addition.
    */
   competenciesDemoting: number;
 }

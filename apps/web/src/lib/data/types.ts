@@ -11,6 +11,7 @@ import type {
   CompetencyStatus,
   DateFormat,
   DisplayIdentifier,
+  DocumentType,
   ExtractionResult,
   FormContainer,
   FormField,
@@ -56,6 +57,8 @@ export interface FormVersionSummary {
   publishedAt: string;
   publishedBy: string;
   note?: string;
+  /** The paper document's own revision identity — set by assessment-tool revisions. */
+  revisionIdentity?: { code?: string; reviewedOn?: string; note?: string };
 }
 
 /** Full template detail incl. the fields of the current version (builder/fill). */
@@ -176,6 +179,16 @@ export const INVITABLE_ROLES: RoleName[] = ['Admin', 'Builder', 'Reviewer', 'Vie
 
 export type MemberStatus = 'active' | 'invited';
 
+/** Per-member competency counts on the Team list (oversight round, R1). */
+export interface MemberCompetencyCounts {
+  /** Required competencies currently held (incl. expiring and grace — eligibility). */
+  requiredCurrent: number;
+  /** Required competencies expiring, in grace, or expired (urgency; overlaps current by design). */
+  requiredAttention: number;
+  /** Optional competencies fully lapsed — muted, never a flag. */
+  optionalLapsed: number;
+}
+
 /** A team member (membership projection). */
 export interface Member {
   /** The MEMBERSHIP id — what team management routes address. */
@@ -191,6 +204,8 @@ export interface Member {
   email: string;
   role: RoleName;
   status: MemberStatus;
+  /** Null when the reader may not see competencies (R4), and on invited/non-active rows. */
+  counts: MemberCompetencyCounts | null;
 }
 
 /* ── API keys ─────────────────────────────────────────────────────────────── */
@@ -465,10 +480,54 @@ export interface CompetencyHolder {
    * currency is about the date.
    */
   standing: Standing;
+  /**
+   * WHICH scopes require/recommend the viewed competency of this holder (U8,
+   * R5) — both render on a member under a location AND a role requirement.
+   * ABSENT (not empty) on rows the caller may not read sources for, under the
+   * same per-holder gate as the licence columns.
+   */
+  sources?: CompetencySourceRef[];
   /** Still satisfies a requirement — held, expiring or grace, and not revoked. */
   current: boolean;
   /** Wording for a status worth saying out loud; null when there is nothing. */
   note: string | null;
+}
+
+/**
+ * One assessment tool still awarding NOTHING — a row on the one-time backfill
+ * worklist (U4, R3, KTD5).
+ *
+ * An award-less tool is INERT competency machinery: the engine treats its empty
+ * awards list as vacuously satisfied (no case is ever assigned for it) and
+ * sign-off grants nothing. New tools cannot be created this way any more (U2
+ * requires exactly one award at create), so this list only ever shrinks.
+ */
+export interface UnlinkedTool {
+  id: string;
+  name: string;
+  templateId: string;
+  /**
+   * The server's one confident guess — an exact case-insensitive match of the
+   * tool's name against a competency's name or code — or null. Never fuzzier
+   * than that (R3): linking activates assignment, so a wrong match accepted by
+   * reflex would assign the wrong assessment to real people.
+   */
+  suggestion: { competencyId: string; name: string } | null;
+}
+
+/**
+ * What a FIRST award link converts and activates (U2/U4, KTD10): legacy Role →
+ * tool requirements that become competency links, the people those Roles
+ * cover, and the cases the activation creates. The preview and the apply
+ * return the same shape from the same computation, which is what lets the
+ * panel promise "links N, creates M" before anything lands.
+ */
+export interface AwardLinkEffects {
+  rolesLinked: number;
+  affected: number;
+  created: number;
+  /** True when the tool already awards this competency — a no-op, not an error. */
+  alreadyLinked?: boolean;
 }
 
 /** A rule gating one form section behind a required competency. */
@@ -545,18 +604,50 @@ export interface TighteningReviewItem {
   heldRoles: Array<{ id: string; name: string }>;
 }
 
+/**
+ * One scope that requires or recommends a competency of a person (R5, U8) —
+ * "Required — from Boddington, Operations and Dozer Operator". Names only:
+ * captions never show ids, and the org scope renders as "org-wide" rather
+ * than by its name.
+ */
+export interface CompetencySourceRef {
+  scope: 'org' | 'location' | 'department' | 'role';
+  name: string;
+}
+
 /** One person-competency gap on the compliance report (U20). */
 export interface ComplianceGap {
   userId: string;
   name: string;
   competencyId: string;
   competencyName: string;
+  /**
+   * WHICH scopes require it, by name (R5, U8) — every contributor on a
+   * cross-scope duplicate. Optional only for rolling-deploy tolerance; the
+   * API always sends it (empty on an optional lapse: nothing requires those).
+   */
+  sources?: CompetencySourceRef[];
+  /**
+   * The KTD4 marker: this member has NO location placement, so the gap can
+   * never book itself — "cannot be scheduled" until somebody places them.
+   */
+  noLocationPlacement?: boolean;
+  /**
+   * Whether a BOOKABLE assessment awards this competency, from the shared
+   * KTD2 resolver server-side (U8, R7). False is the evidence-only case — a
+   * licence-type competency nothing awards — where "book the assessment" is a
+   * dead end and the remedy is recording evidence (an imported or manual
+   * grant, R11). The screen words each row accordingly.
+   */
+  hasAwardingAssessment: boolean;
 }
 
 /** How the workforce stands, as an auditor reads it (U20). */
 export interface ComplianceReport {
   /** A required competency that lapsed on its date. */
   expired: ComplianceGap[];
+  /** A required competency still current but inside the 90-day planning window — bookable runway. */
+  expiring: ComplianceGap[];
   /** A required competency the person has never held. */
   neverHeld: ComplianceGap[];
   /** A held competency that lapsed but no Role requires — reported, not a failure (R102). */
@@ -637,10 +728,17 @@ export interface RetirementReview {
   roles: Array<RetiredValueReview & { departmentId: string }>;
 }
 
-/** The three organisation settings that govern how far a person may spread (R24, R25, R40). */
+/** The organisation settings that govern how far a person may spread (R24, R25, R40). */
 export interface TaxonomySettings {
   allowMultipleLocations: boolean;
   allowMultipleDepartments: boolean;
+  /** Whether a qualified assessor may run and certify their own case. */
+  allowSelfAssessment: boolean;
+  /**
+   * Whether a supervisor's/SME's part sign-off may be applied as a labelled
+   * signature by on-case staff, rather than requiring that person's own login.
+   */
+  allowLabelledSignoff: boolean;
   displayIdentifier: DisplayIdentifier;
   /** Days before a pooled case reads as overdue (U13, R63). */
   pooledCaseOverdueDays: number;
@@ -648,6 +746,97 @@ export interface TaxonomySettings {
   notificationLeadDays: number;
   /** How the organisation writes an ambiguous slash-separated date. */
   dateFormat: DateFormat;
+  /**
+   * Whether a candidate may SELF-START recommended training through the
+   * voluntary request flow (U7, R14, KTD6). Default OFF. Gates the candidate
+   * affordance only — assessors and admins assign regardless, and required
+   * gaps are always requestable (AE5).
+   */
+  candidateSelfStartRecommended: boolean;
+}
+
+/* ── Scope requirements in competency terms (U6 — R1, R5, R6, R9, KTD6) ───── */
+
+/** The four requirement scopes (R1). No others exist. */
+export type RequirementScope = 'org' | 'location' | 'department' | 'role';
+
+/**
+ * Addresses ONE scope's requirement list (KTD6): the org scope carries no id
+ * (`/taxonomy/requirements/org`), every other scope is `scope + scopeId`
+ * (`/taxonomy/requirements/:scope/:scopeId`).
+ */
+export interface RequirementScopeRef {
+  scope: RequirementScope;
+  /** Present for location/department/role; absent at org scope (KTD6). */
+  scopeId?: string;
+}
+
+/**
+ * A scope's stored requirement state, as the editor reads and writes it.
+ * One shape at all four scopes (KTD6), with the two role-only fields optional:
+ * only roles carry the R50 configured flag and the legacy tool derivation.
+ */
+export interface ScopeRequirementsState {
+  /**
+   * ROLE SCOPE ONLY — the STORED fact (R50), never a row count: a Role
+   * emptied of requirements is configured; one nobody set up is not. Flips
+   * only when the REQUIRED tier is authored — a recommended-only save leaves
+   * it false. Absent at the other scopes, whose row count is unambiguous
+   * (KTD9 of the inheritance round).
+   */
+  configured?: boolean;
+  /** Competency ids the scope REQUIRES — compliance-bearing (R5 prior round; R1/R2 now). */
+  required: string[];
+  /** Competency ids the scope RECOMMENDS — visible, never enforced (R8). */
+  recommended: string[];
+  /**
+   * ROLE SCOPE ONLY — legacy tool ids still deriving requirements the old way.
+   * Each exits via the backfill conversion or the explicit fingerprint-guarded
+   * remove. No other scope ever had legacy rows (KTD2/KTD6).
+   */
+  awaitingLink?: string[];
+  /**
+   * The stale-edit guard: every write echoes it, a stale echo 409s. SCOPE-LOCAL
+   * (KTD7) — it hashes only this scope's own rows, so an org save never
+   * invalidates an open role editor.
+   */
+  fingerprint: string;
+}
+
+/** The preview/PUT body's tier halves, as any scope editor sends them. */
+export interface RequirementTiers {
+  required: string[];
+  recommended: string[];
+}
+
+/* ── Recommended surfaces (U7 — R12, R14) ─────────────────────────────────── */
+
+/** One competency the caller's held Roles recommend, on their own surfaces. */
+export interface RecommendedCompetency {
+  competencyId: string;
+  name: string;
+  code: string | null;
+  /** Whether the caller already holds it current — held rows need no action. */
+  held: boolean;
+  /**
+   * The ONE bookable assessment awarding it, per the shared KTD2 resolver —
+   * exactly the tool an approval would assign. Null is evidence-only (R7):
+   * nothing to self-start.
+   */
+  requestableToolId: string | null;
+  /** The scopes recommending it, by name — "Recommended — from <Location>" (AE5, U8). */
+  sources?: CompetencySourceRef[];
+}
+
+/**
+ * The self-scope recommended read (`GET /competencies/recommended`). The
+ * toggle rides the payload because the request affordance needs BOTH facts —
+ * toggle ON and a requestable tool (R14, AE5) — and a candidate has no other
+ * read for the org setting.
+ */
+export interface RecommendedCompetencies {
+  selfStartEnabled: boolean;
+  items: RecommendedCompetency[];
 }
 
 /** The whole taxonomy in one read, for the settings screen. */
@@ -722,6 +911,12 @@ export interface ProfileAccess {
  * OPTIONAL competency as a compliance failure, which it is not (R102).
  */
 export interface HeldCompetencyRow {
+  /**
+   * The GRANT ROW's own id (not the competency's). Renewing a lapsed ticket
+   * attaches the new licence to this holding via
+   * `POST /competency-documents/:holderId`.
+   */
+  holderId: string;
   competencyId: string;
   /** The competency's display name — records never show a raw id. */
   name: string;
@@ -732,6 +927,14 @@ export interface HeldCompetencyRow {
   licenceNumber: string | null;
   status: CompetencyStatus;
   standing: Standing;
+  /**
+   * The scopes producing that standing, by name (R5, U8). ABSENT — not empty
+   * — when the viewer gate withholds them: sources enumerate the subject's
+   * placement, so the API omits the field from a caller reading a colleague's
+   * record without `profiles.view_competencies` at 'all'. Empty means the
+   * true fact "no scope names this" (an optional entry).
+   */
+  sources?: CompetencySourceRef[];
   /** True while it still satisfies a requirement — held, expiring or grace. */
   current: boolean;
   expiresAt: string | null;
@@ -799,12 +1002,19 @@ export interface WorkforceImportPreview {
   };
 }
 
-/** What a completed run did — every figure derived from its recorded rows (R171). */
+/** What a run is doing, or did. A dead one reads `failed`, never `running` forever. */
+export type WorkforceImportStatus = 'running' | 'completed' | 'failed';
+
+/** What a run did — every figure derived from its recorded rows (R171). */
 export interface WorkforceImportRun {
   runId: string;
   startedAt: string;
   completedAt: string | null;
+  status: WorkforceImportStatus;
+  /** Set only on a failure: what threw, or `abandoned` for a run whose process died. */
+  failureReason: string | null;
   rowsTotal: number;
+  /** Rows actually recorded — a count, never an estimate. */
   rowsProcessed: number;
   profilesCreated: number;
   membershipsAdded: number;
@@ -894,6 +1104,8 @@ export interface BuilderDraftSummary {
   step: string;
   formId: string | null;
   versionId: string | null;
+  /** Set when the draft revises a published tool — one per tool, server-enforced. */
+  revisionOfToolId: string | null;
   savedByUserId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -919,4 +1131,223 @@ export interface SaveBuilderDraftInput {
   state: Record<string, unknown>;
   formId?: string | null;
   versionId?: string | null;
+  /** Set when the draft revises a published tool — the server enforces one per tool. */
+  revisionOfToolId?: string | null;
+}
+
+/**
+ * The body `POST /pdf/audit` accepts — the secondary-extraction pass.
+ *
+ * The PDF comes in exactly one of two ways (an uploaded `assetId` or inline
+ * base64), and `knownLabels` is what the draft has already captured, so the
+ * audit reports only what it does not already have.
+ */
+export interface AuditFormInput {
+  fileName: string;
+  assetId?: string;
+  pdfBase64?: string;
+  knownLabels: string[];
+  documentType?: DocumentType;
+}
+
+/**
+ * One recurring extraction-correction shape surfaced as a candidate rule — the
+ * read model behind the admin insights screen (learning loop 2c). Mirrors the
+ * API's `CandidateRule`: a content-free shape key, how often it recurred, a few
+ * of this org's example captures, and the rule it suggests looking at.
+ */
+export interface CorrectionCandidate {
+  documentType: string;
+  shape: string;
+  count: number;
+  sampleCaptureIds: string[];
+  suggestion: string;
+}
+
+export interface CorrectionCandidates {
+  minCount: number;
+  candidates: CorrectionCandidate[];
+}
+
+/**
+ * The placement loop's read model — the auto-place hit-rate metric, the
+ * recurring content-free placement shapes (each with the engine seam it points
+ * at), and the weekly trend. Mirrors the API's `aggregatePlacementRows` output
+ * plus the per-shape suggestion the route folds in.
+ */
+export interface PlacementMethodMetric {
+  method: string;
+  attempted: number;
+  autoConfirmed: number;
+  hitRate: number;
+}
+
+export interface PlacementTypeMetric {
+  documentType: string;
+  sessions: number;
+  proposalsAttempted: number;
+  autoConfirmed: number;
+  acceptedAsIs: number;
+  adjusted: number;
+  rejected: number;
+  noMatch: number;
+  manualDraws: number;
+  retargets: number;
+  hitRate: number;
+  needsReviewRate: number;
+  noMatchRate: number;
+  adjustmentRate: number;
+  byMethod: PlacementMethodMetric[];
+}
+
+export interface PlacementShapeCluster {
+  documentType: string;
+  shape: string;
+  count: number;
+  suggestion: string;
+}
+
+export interface PlacementTrendPoint {
+  week: string;
+  sessions: number;
+  proposalsAttempted: number;
+  autoConfirmed: number;
+  hitRate: number;
+  adjusted: number;
+  adjustmentRate: number;
+}
+
+export interface PlacementInsights {
+  metrics: PlacementTypeMetric[];
+  shapes: PlacementShapeCluster[];
+  trend: PlacementTrendPoint[];
+}
+
+/** One column of the training matrix (U5) — the org's competencies, name-sorted by the API. */
+export interface TrainingMatrixCompetency {
+  id: string;
+  name: string;
+  code: string | null;
+  validForMonths: number | null;
+  gracePeriodDays: number | null;
+}
+
+/**
+ * One member × competency intersection. ABSENT (`null` in the row's `cells`)
+ * means nothing requires or recommends it and nothing is held. Present with a
+ * `standing` but no `status` (or `revoked`) means the tier asks for something
+ * the person does not hold — a GAP when required. `status` carries the dated
+ * state of a real grant; `expiresAt` rides along so the client can apply its
+ * own expiring window without re-deriving expiry.
+ */
+export interface TrainingMatrixCell {
+  standing: Standing;
+  status?: CompetencyStatus;
+  expiresAt?: string;
+  revoked?: true;
+  /** Where the grant came from, when one exists. */
+  evidence?: 'assessment' | 'licence' | 'import';
+  /** No bookable assessment awards this competency — evidence is the remedy. */
+  noAward?: true;
+}
+
+/** One person's row: identity, placements, and `cells[i]` aligned to `competencies[i]`. */
+export interface TrainingMatrixMember {
+  membershipId: string;
+  userId: string;
+  name: string;
+  /** Access level, as the roster displays it. */
+  role: string;
+  locations: Array<{ id: string; name: string }>;
+  departments: Array<{ id: string; name: string }>;
+  roles: Array<{ id: string; name: string }>;
+  /** The KTD4 marker — no location placement, so no case can be planned. */
+  noLocationPlacement: boolean;
+  cells: Array<TrainingMatrixCell | null>;
+}
+
+/** `GET /training-matrix` — the whole workforce × competency grid (U5). */
+export interface TrainingMatrix {
+  competencies: TrainingMatrixCompetency[];
+  members: TrainingMatrixMember[];
+}
+
+/* ── Training summary (U6) ────────────────────────────────────────────────── */
+
+/**
+ * What the summary was computed over. `org` is the default; a location or
+ * department scope narrows every number except the trend, which stays
+ * org-wide (snapshots are captured per org only).
+ */
+export type TrainingSummaryScope =
+  | { type: 'org' }
+  | { type: 'location' | 'department'; id: string; name: string };
+
+/** One competency's open-gap count — the API serves the top 6, count-desc. */
+export interface TrainingSummaryGapCompetency {
+  competencyId: string;
+  name: string;
+  count: number;
+}
+
+/** One group on the compliance-by-axis chart. % is client-derived. */
+export interface TrainingSummaryGroup {
+  id: string;
+  name: string;
+  memberCount: number;
+  compliantCount: number;
+}
+
+/** One ISO week's sign-off count; the last of the 8 is week-to-date. */
+export interface TrainingSummaryWeek {
+  weekStart: string;
+  count: number;
+  currentWeek?: boolean;
+}
+
+/** One daily standing snapshot on the compliance trend. */
+export interface TrainingSummaryTrendPoint {
+  capturedOn: string;
+  compliantCount: number;
+  memberCount: number;
+  requiredGapCount: number;
+}
+
+/**
+ * `GET /training-summary` — the one-page KPI roll-up (U6). Counts only; every
+ * percentage is client-derived so a 0-member scope renders 0%, never NaN.
+ */
+export interface TrainingSummary {
+  scope: TrainingSummaryScope;
+  /** People fully compliant for every role they hold, over the scope's members. */
+  compliance: { compliantCount: number; memberCount: number };
+  /** CUMULATIVE windows: in60 includes in30, in90 includes both. */
+  expiring: { in30: number; in60: number; in90: number };
+  gaps: {
+    total: number;
+    /** Gaps only external evidence can close — no assessment awards them. */
+    evidenceOnly: number;
+    byCompetency: TrainingSummaryGapCompetency[];
+  };
+  complianceByGroup: {
+    axis: 'location' | 'department' | 'role';
+    groups: TrainingSummaryGroup[];
+  };
+  /** 8 ISO weeks of sign-offs, oldest first; the last is week-to-date. */
+  signOffs: {
+    weeks: TrainingSummaryWeek[];
+    currentWeek: number;
+    priorFullWeek: number;
+  };
+  /**
+   * Daily org-wide standing snapshots (~185 days). MAY BE EMPTY — the feature
+   * accrues history from its ship date, and the screen must say so rather
+   * than draw a chart of nothing.
+   */
+  trend: {
+    scope: 'org';
+    points: TrainingSummaryTrendPoint[];
+    /** Required-gap movement vs ~30 days ago; null until a snapshot that old exists. */
+    gapDelta: number | null;
+  };
 }

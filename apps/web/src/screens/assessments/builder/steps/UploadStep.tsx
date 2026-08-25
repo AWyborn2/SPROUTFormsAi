@@ -1,6 +1,8 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, FileDropzone, Icon } from '@formai/ui';
+import { apiClient } from '../../../../lib/data/api-client.js';
+import { fileToBase64, IMPORT_REQUEST_TIMEOUT_MS } from '../../../../lib/data/import-session.js';
 import {
   ASSESSMENT_PATHWAYS,
   BUILDER_STEP_LABELS,
@@ -105,6 +107,12 @@ function Stat({ value, label }: { value: number | string; label: string }) {
 
 export function UploadStep({ draft }: { draft: BuilderDraftState }) {
   const { phase, stats, extraction, setup } = draft;
+  // The retry mode, migrating a draft that still carries only the legacy boolean.
+  const retryMode = setup.theoryRetry ?? (setup.theoryAllowRetry ? 'immediate' : 'end');
+
+  // A revision never re-extracts (KTD7) — its step 1 is the PDF decision, not
+  // a dropzone into extraction.
+  if (draft.revisionOfToolId) return <RevisionUploadStep draft={draft} />;
 
   const questions = useMemo(
     () =>
@@ -318,10 +326,22 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
               </Chip>
             </div>
             {setup.passRule === 'overall_percentage' && (
-              <p className="mt-2 text-[11.5px] text-warning-text">
-                Recorded, but not yet applied: marking gates on the must-pass set today. The tool
-                will behave as if the first option were chosen until that lands.
-              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <label className="text-[11.5px] text-text-secondary">Pass threshold</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={setup.passPercentage ?? 100}
+                  onChange={(e) =>
+                    draft.setSetup({
+                      passPercentage: Math.max(1, Math.min(100, Number(e.target.value) || 100)),
+                    })
+                  }
+                  className="h-[28px] w-16 rounded-lg border border-border bg-surface-page px-2 text-center text-[12px]"
+                />
+                <span className="text-[11.5px] text-text-tertiary">%</span>
+              </div>
             )}
           </div>
 
@@ -345,6 +365,37 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
                 A single stacked form
               </Chip>
             </div>
+            {setup.theoryRendering === 'one_per_screen' && (
+              <div className="mt-3">
+                <div className="text-[12px] font-medium text-text-secondary">
+                  If a candidate gets a question wrong
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  <Chip
+                    on={retryMode === 'immediate'}
+                    onClick={() => draft.setSetup({ theoryRetry: 'immediate' })}
+                  >
+                    Retry it straight away
+                  </Chip>
+                  <Chip
+                    on={retryMode === 'end'}
+                    onClick={() => draft.setSetup({ theoryRetry: 'end' })}
+                  >
+                    Re-take the quiz at the end
+                  </Chip>
+                  <Chip on={retryMode === 'off'} onClick={() => draft.setSetup({ theoryRetry: 'off' })}>
+                    No retry
+                  </Chip>
+                </div>
+                <p className="mt-1.5 text-[11px] text-text-tertiary">
+                  {retryMode === 'immediate'
+                    ? 'They must get each question right before moving on.'
+                    : retryMode === 'end'
+                      ? 'They answer through to the end; a failed quiz can then be re-taken.'
+                      : 'One attempt — a wrong answer is final unless the assessor reopens it.'}
+                </p>
+              </div>
+            )}
           </div>
 
           <div>
@@ -437,6 +488,117 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
           can be corrected in the answer-key step
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Step 1 of a REVISION — keep the current document, or replace it.
+ *
+ * Nothing here extracts. The fields, keys, gating and workflow were seeded
+ * from the published version; this step only decides which paper document the
+ * revision maps to. Replacing moves every confirmed box into the carried
+ * stash for re-confirmation in the mapping step (a box confirmed against the
+ * old layout was not confirmed against the new one), and a mis-upload reverts
+ * without costing any of that confirmation.
+ */
+function RevisionUploadStep({ draft }: { draft: BuilderDraftState }) {
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const carriedCount = Object.keys(draft.carriedGeometry).length;
+
+  const replace = async (file: File) => {
+    setUploadError(null);
+    setUploading(true);
+    try {
+      const base64 = await fileToBase64(file);
+      const { assetId } = await apiClient.post<{ assetId: string }>(
+        '/pdf/upload',
+        { pdfBase64: base64 },
+        { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+      );
+      draft.replacePdf(assetId, file.name);
+    } catch {
+      setUploadError('Uploading the replacement failed — nothing changed. Try again.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="mx-auto max-w-[780px]">
+      <h2 className="mb-1.5 font-heading text-[23px] font-bold">The paper document</h2>
+      <p className="mb-6 max-w-[62ch] text-[14.5px] leading-relaxed text-text-secondary">
+        This revision was seeded from the published tool — every field, answer key, unit and
+        workflow carried over. Keep the current document if only the digital side changes, or
+        upload the reviewed revision of the paper.
+      </p>
+
+      <div className="mb-4 flex items-center gap-3 rounded-lg border border-border bg-surface-card p-[12px_14px]">
+        <span className="grid h-[38px] w-8 flex-none place-items-center rounded-[5px] bg-danger-soft">
+          <Icon name="file-text" size={17} className="text-danger" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] font-semibold">{draft.fileName}</div>
+          <div className="text-[11.5px] text-text-tertiary">
+            {draft.pdfReplaced
+              ? 'Replacement uploaded — mapped boxes carried over, awaiting re-confirmation'
+              : 'Current document kept — mapping stays confirmed exactly as published'}
+          </div>
+        </div>
+        {draft.pdfReplaced ? (
+          <Button size="sm" variant="ghost" leadingIcon="undo-2" onClick={draft.revertPdf}>
+            Revert to original
+          </Button>
+        ) : (
+          <Icon name="check-circle-2" size={17} className="flex-none text-accent" />
+        )}
+      </div>
+
+      {draft.pdfReplaced && carriedCount > 0 && (
+        <div className="mb-3 flex items-start gap-2.5 rounded-lg border border-warning bg-warning-soft p-[10px_14px] text-[12.5px] leading-relaxed text-warning-text">
+          <Icon name="map-pin" size={15} className="mt-0.5 flex-none" />
+          <span>
+            {carriedCount} mapped field{carriedCount === 1 ? '' : 's'} carried over as proposals.
+            They are pre-placed at their old positions but count as unconfirmed until you review
+            them in the PDF mapping step — a box confirmed against the old layout was not confirmed
+            against this one.
+          </span>
+        </div>
+      )}
+
+      {uploadError && (
+        <div
+          role="alert"
+          className="mb-3 flex items-start gap-2 rounded-lg border border-danger bg-danger-soft p-[10px_14px] text-[12.5px] text-danger-text"
+        >
+          <Icon name="alert-triangle" size={14} className="mt-0.5 flex-none" />
+          {uploadError}
+        </div>
+      )}
+
+      {uploading ? (
+        <div className="flex items-center gap-2.5 rounded-lg border border-border-accent bg-surface-card p-[12px_14px] text-[13px]">
+          <Icon name="loader-circle" size={16} className="animate-spin text-accent" />
+          Uploading the replacement…
+        </div>
+      ) : (
+        <FileDropzone
+          accept="application/pdf"
+          hint={
+            draft.pdfReplaced
+              ? 'Upload a different replacement · the carried boxes stay stashed'
+              : 'Upload the reviewed PDF · the webform, keys and workflow are untouched'
+          }
+          onFiles={(files) => {
+            const file = files[0];
+            if (!file) return;
+            const problem = validateUploadFile(file);
+            if (problem) return;
+            void replace(file);
+          }}
+        />
+      )}
     </div>
   );
 }

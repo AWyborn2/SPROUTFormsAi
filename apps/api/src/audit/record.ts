@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Db } from '@formai/db';
-import type { AuditCategory, TenantContext } from '@formai/shared';
+import { sensitiveProfileFieldKeys, type AuditCategory, type TenantContext } from '@formai/shared';
 
 export interface AuditInput {
   action: string;
@@ -41,6 +41,19 @@ export async function recordAudit(db: Db, tenant: TenantContext, input: AuditInp
     field: input.field ?? null,
     icon: input.icon ?? 'activity',
   });
+}
+
+/** The inventory's sensitive keys, resolved once (R8). */
+const SENSITIVE_FIELDS = new Set(sensitiveProfileFieldKeys());
+
+/**
+ * Whether this entry covers a field the inventory marks sensitive (R58).
+ * Shared by every reader of `audit_log_entries` — `GET /audit` and the
+ * dashboard's activity feed — so the Admin-only narrowing cannot hold on one
+ * surface and leak on the other.
+ */
+export function isSensitiveEntry(row: { category: string; field: string | null }): boolean {
+  return row.category === 'profiles' && row.field !== null && SENSITIVE_FIELDS.has(row.field);
 }
 
 /** Row → JSON shape shared by `GET /audit` and the dashboard's activity feed. */

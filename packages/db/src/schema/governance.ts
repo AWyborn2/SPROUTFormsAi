@@ -571,6 +571,14 @@ export const competencyRulesRelations = relations(competencyRules, ({ one }) => 
  * merged, seats per pool, competencies recorded, rows rejected — is DERIVED from
  * `import_run_rows`, because a stored tally and the rows it counts can disagree
  * and the rows are what an Admin acts on anyway.
+ *
+ * IT ALSO CARRIES THE RUN'S OWN STATE, because a run no longer lives inside the
+ * HTTP request that asked for it. A real import of 191 people took minutes, the
+ * browser gave up long before it finished, and the screen — having nothing to
+ * ask about a run it had lost the reply to — showed the upload form again with a
+ * live confirm button while the first run was still writing rows. `status`,
+ * `heartbeatAt` and `failureReason` are what let a page reopened at any moment
+ * answer "is one running, and is it still alive?" without the request.
  */
 export const importRuns = pgTable(
   'import_runs',
@@ -586,8 +594,49 @@ export const importRuns = pgTable(
     completedAt: timestamp({ withTimezone: true }),
     /** Rows the file carried, so progress reads as processed-against-total. */
     rowsTotal: integer().notNull().default(0),
+    /**
+     * `running`, `completed` or `failed`.
+     *
+     * TEXT rather than an enum, matching `seatPool` beside it: this ships in the
+     * same migration as a partial unique index over its values, and a new enum
+     * type created and then referenced in one transaction is the 55P04 shape
+     * this codebase already avoids elsewhere.
+     *
+     * `completedAt` is kept and still set, because the report has always read it
+     * and a run that finished is still the moment it finished. It is no longer
+     * the whole answer: a FAILED run also stops, and a screen that only knew
+     * "not yet complete" would show a dead run as a live one forever.
+     */
+    status: text().$type<'running' | 'completed' | 'failed'>().notNull().default('running'),
+    /**
+     * Last sign of life from the process doing the work, stamped as each row
+     * lands. THE ONLY WAY A CRASHED RUN IS DISTINGUISHABLE FROM A SLOW ONE:
+     * nothing writes `failed` when a process dies mid-run, so a run still
+     * `running` whose heartbeat has gone stale is reaped and reported failed.
+     */
+    heartbeatAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+    /** Why it failed — the thrown message, or `abandoned` for a reaped one. */
+    failureReason: text(),
   },
-  (t) => [index('import_runs_org_idx').on(t.orgId)],
+  (t) => [
+    index('import_runs_org_idx').on(t.orgId),
+    /*
+      ONE ACTIVE RUN PER ORGANISATION, enforced by the database rather than by
+      the check in front of it.
+
+      The check is there too and gives the caller a reason with the live run's
+      id; this index is what makes the guard true under a double-submit, where
+      two requests both read "nothing running" before either inserts. That race
+      is not hypothetical — it is exactly the moment the incident produced: a
+      timed-out browser showing a live confirm button beside a run still
+      writing rows. Row-level merging means a second pass would not corrupt
+      anything, but it would double the work against production and leave the
+      operator with two reports and no way to tell which was which.
+    */
+    uniqueIndex('import_runs_one_active_per_org')
+      .on(t.orgId)
+      .where(sql`status = 'running'`),
+  ],
 );
 
 /**

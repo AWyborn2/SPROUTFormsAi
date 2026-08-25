@@ -1,9 +1,18 @@
 import {
+  autoVerdictWrite,
   caseProgress,
+  completionTickRows,
+  fieldsInPart,
   isCaseCompetent,
+  isSelfMarking,
+  markKeyedQuestions,
+  markTheory,
   moreCoachingRequired,
   requiredParts,
+  rowsByTask,
+  sectionForPart,
   validateManifest,
+  workflowOf,
   type AssessmentPathway,
   type AssessmentToolManifest,
   type DeclaredMark,
@@ -100,6 +109,13 @@ export interface AssembleCaseInput {
    * nobody reached.
    */
   resolved?: boolean;
+  /**
+   * The part keys THIS CASE requires (`casePartKeys`: pathway ∩ the tool's
+   * per-Location rule), for judging a multi-part completion row. The route
+   * resolves it — the case's Location lives on the case row, which this seam
+   * deliberately never sees. Omitted means every mapped part applies.
+   */
+  applicablePartKeys?: ReadonlySet<string>;
 }
 
 export interface AssembledCase {
@@ -125,6 +141,77 @@ function authoritativeAttempt(
   return attempts
     .filter((a) => a.partKey === partKey && a.outcome === 'satisfactory')
     .sort((a, b) => b.attemptNumber - a.attemptNumber)[0];
+}
+
+/**
+ * Re-derive the marks a self-marked attempt should carry, filling only gaps.
+ *
+ * The ✓/✗ each question earned, the part's verdict pair and the further-action
+ * note are all written into the attempt's stored values AT MARKING — but only
+ * by the marking code that ran then. An attempt marked before that code
+ * existed, or before the manifest declared its verdict boxes, stores the
+ * answers alone, and the printed outcome column exports blank on exactly the
+ * paper the marks were computed for.
+ *
+ * Re-run the same arithmetic over the same stored answers with the same
+ * version's keys, and MERGE UNDER the stored values: anything marking (or a
+ * person) already recorded wins, so a certified record is never rewritten —
+ * only its silences are filled. Skipped entirely unless the attempt PASSED —
+ * a failed attempt never prints. A self-marking part heals the full result
+ * (marks, verdict pair, further-action note); a JUDGED part heals only its
+ * keyed subset's ✓/✗ (mixed marking), because everything else on it belongs
+ * to the person who judged it.
+ */
+export function withDerivedMarks(
+  attempt: CaseAttemptRecord,
+  versionFields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+): CaseAttemptRecord {
+  if (attempt.outcome !== 'satisfactory') return attempt;
+  const part = manifest.parts.find((p) => p.key === attempt.partKey);
+  if (!part) return attempt;
+  if (!isSelfMarking(versionFields, manifest, part.key)) {
+    /*
+      A JUDGED part is a person's verdict — but its KEYED SUBSET is still
+      arithmetic (mixed marking). The outcome route persists those pre-marks
+      now; an attempt resolved before it did stores the answers alone, and the
+      printed ✓/✗ beside each keyed choice question exports blank on exactly
+      the paper the marks were computed for. Same healing rule as below: same
+      arithmetic, same keys, merged UNDER the stored values so a box the
+      assessor ticked — every written question's, and any keyed cell a person
+      overrode — is never rewritten.
+
+      Scoped to the PART'S OWN SLICE, unlike the whole-version `markTheory`
+      call below: this runs for every judged part of the case, and marking one
+      part's attempt against another part's keys would write marks for
+      questions this attempt never contained. A part with no keyed question
+      derives nothing and the attempt is returned untouched — which keeps a
+      purely person-judged practical exactly as the person left it.
+    */
+    const keyed = markKeyedQuestions(fieldsInPart(versionFields, manifest, part.key), attempt.values);
+    if (keyed.marks.length === 0) return attempt;
+    return { ...attempt, values: { ...keyed.derivedValues, ...(attempt.values ?? {}) } };
+  }
+
+  const marked = markTheory({ fields: versionFields, values: attempt.values, part, manifest });
+  // The part's auto-locked verdict radio, by the same rule hand-in writes it —
+  // an attempt marked before that write existed backfills here, under the
+  // stored values like every other derived mark.
+  const verdict = autoVerdictWrite(
+    versionFields,
+    manifest,
+    part,
+    attempt.outcome,
+    sectionForPart(workflowOf(manifest, versionFields), part.key)?.fieldSource,
+  );
+  return {
+    ...attempt,
+    values: {
+      ...marked.derivedValues,
+      ...(verdict ? { [verdict.fieldId]: verdict.value } : {}),
+      ...(attempt.values ?? {}),
+    },
+  };
 }
 
 /**
@@ -191,6 +278,7 @@ export function assembleCaseValues({
   attempts,
   signOff,
   resolved,
+  applicablePartKeys,
 }: AssembleCaseInput): AssembledCase {
   const known = new Set(manifest.parts.map((p) => p.key));
   const unknown = [...new Set(attempts.map((a) => a.partKey))].filter((k) => !known.has(k));
@@ -212,7 +300,12 @@ export function assembleCaseValues({
   const rendered: string[] = [];
   const blank: string[] = [];
 
-  const passing = requiredParts(manifest, pathway);
+  // Narrowed to what THIS case requires — a Location-excluded part prints
+  // blank like a part outside the pathway, and is never reported as a blank
+  // REQUIRED part on a signed case.
+  const passing = requiredParts(manifest, pathway).filter(
+    (p) => !applicablePartKeys || applicablePartKeys.has(p.key),
+  );
   for (const part of passing) {
     const attempt = authoritativeAttempt(attempts, part.key);
     if (!attempt) {
@@ -272,12 +365,68 @@ export function assembleCaseValues({
   }
 
   /*
+    THE COMPLETION CHECKLIST TICKS ITSELF (manifest.partCompletionMarks).
+    Derived from the same attempt rows part state comes from, on an OPEN case
+    as much as a resolved one — a mid-programme export is exactly where "what
+    has this candidate finished so far" is being asked. Written over whatever
+    an attempt stored for the field, so the printed record can never claim a
+    completion the progress does not back.
+  */
+  const completionMarks = manifest.partCompletionMarks ?? [];
+  if (completionMarks.length > 0) {
+    const progress = caseProgress(
+      manifest,
+      pathway,
+      attempts.map((a) => ({ partKey: a.partKey, attemptNumber: a.attemptNumber, outcome: a.outcome })),
+      applicablePartKeys,
+    );
+    for (const fieldId of new Set(completionMarks.map((m) => m.fieldId))) {
+      const rows = completionTickRows(
+        completionMarks.filter((m) => m.fieldId === fieldId),
+        progress,
+        values[fieldId],
+        applicablePartKeys,
+      );
+      if (rows.length > 0) values[fieldId] = rows;
+    }
+  }
+
+  /*
+    MULTI-STAGE LOGBOOK ROW ROUTING. The candidate fills ONE table carrying a
+    task-type column; the paper prints a separate grid per task. Partition the
+    source's rows by task and write each group under the print-only field that
+    task maps to, so the renderer draws each grid from its own field with no
+    notion of tasks — the export path itself is untouched. Written over whatever
+    the target field held. A task with more rows than its grid prints what fits
+    (the renderer's fixed row bands); the hours are counted elsewhere, so nothing
+    is lost to the record.
+  */
+  for (const part of manifest.parts) {
+    const routing = part.logbookRouting;
+    if (!routing) continue;
+    const source = values[routing.sourceFieldId];
+    if (!Array.isArray(source)) continue;
+    const byTask = rowsByTask(source as RepeatingRowValue[], routing.columnKey);
+    for (const route of routing.routes) {
+      values[route.fieldId] = byTask.get(route.value) ?? [];
+    }
+  }
+
+  /*
     THE FRONT PAGE. Written after the per-part merge so no part's Object.assign
     can clobber a cover-page key, and every entry gated on the manifest actually
     naming it — a field the manifest does not name is written nothing at all and
     exports blank. On a competency record, silence is the safe failure; a
     confident mark in the wrong box asserts a finding nobody made.
   */
+  /*
+    THE PATHWAY TICK, seeded from the case like the location stream: the
+    pathway chose which parts this document shows filled, so the box saying so
+    must come from the same fact — an open OR resolved case prints it, because
+    which programme the candidate is on is true from day one.
+  */
+  writeMark(values, manifest.pathwayMarks?.[pathway]);
+
   for (const part of passing) {
     if (rendered.includes(part.key)) writeMark(values, part.checklistMark);
   }
@@ -297,7 +446,7 @@ export function assembleCaseValues({
         partKey: a.partKey,
         attemptNumber: a.attemptNumber,
         outcome: a.outcome,
-      })));
+      })), applicablePartKeys);
       const coaching = moreCoachingRequired(progress);
       if (coaching === true) writeMark(values, marks.moreCoachingRequiredYes);
       if (coaching === false) writeMark(values, marks.moreCoachingRequiredNo);
@@ -341,6 +490,11 @@ export interface ExportCaseInput extends AssembleCaseInput {
   originalPdf: Uint8Array;
   /** The full field set of the version being exported against. */
   fields: FormField[];
+  /**
+   * The PINNED version's paper revision identity, printed at the bottom of
+   * page 1 so the evidence names the document revision it certifies against.
+   */
+  revisionIdentity?: { code?: string; reviewedOn?: string; note?: string } | null;
 }
 
 /**
@@ -351,31 +505,24 @@ export interface ExportCaseInput extends AssembleCaseInput {
  * export that quietly drops a part is indistinguishable from one where the
  * candidate never did it.
  */
-export async function exportCasePdf({
-  originalPdf,
-  fields,
-  manifest,
-  pathway,
-  locationStream,
-  candidateName,
-  attempts,
-  signOff,
-  resolved,
-}: ExportCaseInput): Promise<Uint8Array> {
-  const problems = validateManifest(manifest, fields);
+export async function exportCasePdf(input: ExportCaseInput): Promise<Uint8Array> {
+  /*
+    EVERYTHING BUT THE RENDERER'S OWN INPUTS FLOWS THROUGH UNTOUCHED. This used
+    to re-list every assemble field by hand, and the list drifted: the route
+    resolved `prefillValues` and `prerequisiteValues` and this seam silently
+    dropped both, so the printed identity block and the prerequisite ✓ exported
+    blank on every case while the code that computed them ran for nothing. A
+    rest-spread cannot drift — a field added to `AssembleCaseInput` reaches
+    `assembleCaseValues` without this function knowing it exists.
+  */
+  const { originalPdf, fields, revisionIdentity, ...assemble } = input;
+
+  const problems = validateManifest(assemble.manifest, fields);
   if (problems.length > 0) {
     throw new CaseExportError('case_export_invalid_manifest', problems);
   }
 
-  const { values, blank } = assembleCaseValues({
-    manifest,
-    pathway,
-    locationStream,
-    candidateName,
-    attempts,
-    signOff,
-    resolved,
-  });
+  const { values, blank } = assembleCaseValues(assemble);
 
   /*
     A SIGNED CASE WITH A BLANK REQUIRED PART IS A CONTRADICTION.
@@ -388,7 +535,7 @@ export async function exportCasePdf({
 
     `blank` was previously destructured away and never consulted.
   */
-  if (signOff && blank.length > 0) {
+  if (assemble.signOff && blank.length > 0) {
     throw new CaseExportError(
       'case_export_competent_with_blank_parts',
       blank.map(
@@ -400,5 +547,5 @@ export async function exportCasePdf({
 
   // `roundTripExport` applies the visibility filter itself, so a section the
   // candidate's stream excluded cannot appear carrying an answer.
-  return roundTripExport({ originalPdf, fields, values });
+  return roundTripExport({ originalPdf, fields, values, revisionIdentity });
 }

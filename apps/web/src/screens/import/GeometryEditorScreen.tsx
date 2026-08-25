@@ -1,25 +1,38 @@
-import { useCallback, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import {
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
 import {
   geometrySegments,
-  isChoiceField,
-  isMatchingQuestion,
   matchAnchors,
   GLYPH_KINDS,
   GLYPH_LABELS,
+  type DocumentType,
   type FormField,
   type GlyphKind,
   type MatchAnchor,
   type PageBox,
+  type PlacementFieldClass,
 } from '@formai/shared';
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
+import { sendPlacementOutcomes } from '../../lib/data/placement-outcomes.js';
+import { createPlacementRecorder, type PlacementRecorder } from './inspector/placement-recorder.js';
 import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
 import {
+  clearWholeFieldBoxOnPage,
+  distributeOptionCells,
+  mergeWholeFieldBox,
   proposeManualGrid,
   proposeRectGrid,
   proposeRowCell,
   rowCellIndex,
+  setGlyphOnAll,
 } from '../../lib/pdf-geometry.js';
 import {
   groupFields,
@@ -32,6 +45,8 @@ import { PdfViewer } from './PdfViewer.js';
 import {
   applyFieldChanges,
   classifyProposalTier,
+  columnEvidenceCaption,
+  derivationMethodOf,
   deriveAcrossPages,
   deriveMatchAnchorsAcrossPages,
   deriveOptionCellsAcrossPages,
@@ -39,13 +54,19 @@ import {
   isDeleteKey,
   keyMove,
   moveSegment,
+  NUDGE_POINTS,
+  NUDGE_POINTS_COARSE,
   removeSegment,
+  replaceSegmentOnPage,
   moveBand,
   moveBoundary,
+  pageWindowOf,
+  retargetPageChanges,
   snapTargets,
   snapTargetsY,
   type BandHandle,
   type FieldChange,
+  type PageWindow,
 } from './inspector/geometry-actions.js';
 
 /**
@@ -97,6 +118,16 @@ export interface GeometryEditorScreenProps {
    * say so.
    */
   onSaved?: (fields: FormField[]) => void;
+  /**
+   * What class of paper the host knows it is placing, for the placement
+   * learning loop's metric slices (KTD6). Forms carry no document type of
+   * their own, so this is the HOST's knowledge: the builder passes
+   * `'assessment'` (its whole flow is assessments), the standalone route
+   * passes nothing and the recorded outcomes bucket as `unspecified` — the
+   * same posture as `extraction_corrections.documentType`. Never affects
+   * placement itself.
+   */
+  documentType?: DocumentType;
 }
 
 export function GeometryEditorScreen({
@@ -105,6 +136,7 @@ export function GeometryEditorScreen({
   embedded = false,
   onDone,
   onSaved,
+  documentType,
 }: GeometryEditorScreenProps = {}) {
   const params = useParams<{ id: string; versionId: string }>();
   // Props win where given; the route is the fallback, so the standalone screen
@@ -124,6 +156,14 @@ export function GeometryEditorScreen({
    */
   const [edited, setEdited] = useState<FormField[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /**
+   * Which page's whole-field box is the EDITABLE one, for a table that spans a
+   * page break and so carries one box per page. Null falls back to the first.
+   * The other pages' bands still render, read-only, so nothing looks undivided.
+   * Set to the page an author just drew or divided; clicking a page row switches
+   * it. Reset whenever the selected field changes.
+   */
+  const [activeOverlayPage, setActiveOverlayPage] = useState<number | null>(null);
   const [textPages, setTextPages] = useState<readonly TextPage[]>([]);
   /**
    * Why the last drawn table box could not be subdivided, and for which field.
@@ -159,9 +199,28 @@ export function GeometryEditorScreen({
   >([]);
   /** Busy flag around the bulk auto-place pass (U4), for the button's affordance. */
   const [isAutoPlacing, setIsAutoPlacing] = useState(false);
+  /**
+   * The 1-based page the move/scan controls target. Text, not number — an
+   * input mid-edit is legitimately empty, and coercing '' to 0 would offer
+   * "move to page 0" while the author is still typing.
+   */
+  const [targetPage, setTargetPage] = useState('');
 
   const fields = edited ?? version?.fields ?? [];
   const selected = fields.find((f) => f.id === selectedId) ?? null;
+
+  /**
+   * The placement session's outcome recorder (the learning loop's capture
+   * seam). A ref, never state — events must not drive a render — created
+   * lazily so one recorder spans the whole session across both mounts. Every
+   * placement action below feeds it one line; a successful Save drains it and
+   * sends, fire-and-forget (R4/KTD1). A NEW placement action must feed it too,
+   * or the hit-rate metric silently undercounts — see `derivationMethodOf`.
+   * Telemetry only: nothing here is ever load-bearing for the placement itself.
+   */
+  const recorderRef = useRef<PlacementRecorder | null>(null);
+  recorderRef.current ??= createPlacementRecorder();
+  const recorder = recorderRef.current;
 
   /*
     THE LIST IS GROUPED, COUNTED AND FILTERABLE (U15).
@@ -233,10 +292,29 @@ export function GeometryEditorScreen({
    * conditional and every hook in this component must run on every render.
    */
   const overlay = useMemo(
-    () => bandOverlayFor(drawTarget, selectedId, proposalPreviews, fields),
-    [drawTarget, selectedId, proposalPreviews, fields],
+    () => bandOverlayFor(drawTarget, selectedId, proposalPreviews, fields, activeOverlayPage),
+    [drawTarget, selectedId, proposalPreviews, fields, activeOverlayPage],
   );
   const bandOverlay = overlay?.box ?? null;
+  /*
+    A table spanning a page break carries one whole-field box per page. Only ONE
+    is the editable overlay above; the rest render their bands READ-ONLY on their
+    own pages, so an author sees every page's divisions and never mistakes a
+    divided continuation for an unplaced one. Excludes the active overlay (it is
+    already drawn, editable) and only lists boxes that HAVE bands to show.
+  */
+  const readonlyBands = useMemo(() => {
+    if (!bandOverlay) return [];
+    const field = fields.find((f) => f.id === selectedId);
+    if (!field || isPerOptionField(field)) return [];
+    return (field.geometry?.segments ?? []).filter(
+      (s) =>
+        rowCellIndex(s) === null &&
+        s.optionKey === undefined &&
+        s.page !== bandOverlay.page &&
+        (s.rowBands?.length ?? 0) > 0,
+    );
+  }, [bandOverlay, fields, selectedId]);
 
   /**
    * Where a dragged band edge may land, from the overlay page's own text —
@@ -274,22 +352,31 @@ export function GeometryEditorScreen({
         : moveBand(overlay.box, handle.axis, adjustment.key, adjustment.edge, value);
     if (!next) return;
 
+    // The band-moved signal, RAW points in — the recorder buckets. Recorded
+    // only for edits that landed (a refused move taught the engine nothing).
+    const bandKind = handle.axis === 'column' ? 'column-band' : 'row-band';
+
     if (overlay.source.kind === 'preview') {
       const { fieldId } = overlay.source;
+      recorder.previewAdjusted(fieldId, bandKind, value - handle.at);
       setProposalPreviews((prev) =>
         prev.map((p) => (p.fieldId === fieldId && 'segment' in p.proposal ? { ...p, proposal: { ...p.proposal, segment: next } } : p)),
       );
       return;
     }
+    recorder.placedAdjusted(overlay.source.fieldId, bandKind, value - handle.at);
 
     const { fieldId, optionKey } = overlay.source;
+    // Matched by page AS WELL AS optionKey: a table spanning a page break has
+    // several whole-field boxes, all with optionKey null, and matching on the
+    // key alone would rewrite EVERY page's box to this one — collapsing the
+    // continuation onto the page being edited.
+    const page = overlay.box.page;
     mutate(fieldId, (f) => {
       const segments = f.geometry?.segments ?? [];
-      if (!segments.some((s) => (s.optionKey ?? null) === optionKey)) return f;
-      return {
-        ...f,
-        geometry: { segments: segments.map((s) => ((s.optionKey ?? null) === optionKey ? next : s)) },
-      };
+      const nextSegments = replaceSegmentOnPage(segments, optionKey, page, next);
+      if (nextSegments === segments) return f;
+      return { ...f, geometry: { segments: nextSegments } };
     });
   }
 
@@ -312,8 +399,13 @@ export function GeometryEditorScreen({
     // Clamped to nothing — the box is already against the page edge.
     if (next === overlay.box) return;
 
+    // The whole-box-moved signal: the dominant axis's raw delta, bucketed by
+    // the recorder. One finding per field per bucket, however many nudges.
+    const movedBy = Math.max(Math.abs(dx), Math.abs(dy));
+
     if (overlay.source.kind === 'preview') {
       const { fieldId } = overlay.source;
+      recorder.previewAdjusted(fieldId, 'box-moved', movedBy);
       setProposalPreviews((prev) =>
         prev.map((p) =>
           p.fieldId === fieldId && 'segment' in p.proposal
@@ -323,15 +415,16 @@ export function GeometryEditorScreen({
       );
       return;
     }
+    recorder.placedAdjusted(overlay.source.fieldId, 'box-moved', movedBy);
 
     const { fieldId, optionKey } = overlay.source;
+    // Page-scoped, like `onBandEdge`: don't drag every page's box onto this one.
+    const page = overlay.box.page;
     mutate(fieldId, (f) => {
       const segments = f.geometry?.segments ?? [];
-      if (!segments.some((sg) => (sg.optionKey ?? null) === optionKey)) return f;
-      return {
-        ...f,
-        geometry: { segments: segments.map((sg) => ((sg.optionKey ?? null) === optionKey ? next : sg)) },
-      };
+      const nextSegments = replaceSegmentOnPage(segments, optionKey, page, next);
+      if (nextSegments === segments) return f;
+      return { ...f, geometry: { segments: nextSegments } };
     });
   }
 
@@ -421,6 +514,7 @@ export function GeometryEditorScreen({
    */
   function selectField(field: FormField) {
     setSelectedId(field.id);
+    setActiveOverlayPage(null);
     setDrawTarget(null);
     // Scoped to this field only — every OTHER field's parked needs-review
     // proposal must survive selecting something else in the sidebar. A flat
@@ -429,8 +523,17 @@ export function GeometryEditorScreen({
 
     if (geometrySegments(field).length > 0) return;
 
-    const proposal = deriveProposal(field, textPages);
+    const proposal = deriveProposal(field, textPages, pageWindowOf(field.sourcePages, textPages.length));
     const tier = classifyProposalTier(proposal);
+    /*
+      Record the engine's verdict — including a refusal, which is exactly the
+      per-document-class number a tuning round needs. Only once the text layer
+      exists: `deriveProposal` refuses on an empty one, and that null is "the
+      page hasn't loaded", not an engine no-match. A field with no derivation
+      family (method null) was never the engine's to answer.
+    */
+    const method = derivationMethodOf(field);
+    if (method && textPages.length > 0) recorder.proposed(field.id, method, tier);
     if (tier === 'no-match') return;
 
     if (tier === 'needs-review') {
@@ -447,6 +550,7 @@ export function GeometryEditorScreen({
     // a single `mutateMany` batch, not a loop of individual `mutate()` calls
     // — the exact bug U2 fixed for the "Place all N" button (KTD3).
     mutateMany(changesForProposal(field, proposal!));
+    recorder.accepted(field.id, 'auto');
   }
 
   /**
@@ -465,7 +569,7 @@ export function GeometryEditorScreen({
    * pass instead of calling `mutateMany` once per field. needs-review fields
    * are parked into `proposalPreviews`; no-match fields are left alone.
    */
-  function autoPlaceRemaining() {
+  function autoPlaceRemaining(onlyPage?: number) {
     setIsAutoPlacing(true);
 
     // Yield a frame first: the loop below is synchronous and, for a large
@@ -476,17 +580,47 @@ export function GeometryEditorScreen({
       const changes: FieldChange[] = [];
       const reviews: { fieldId: string; proposal: FieldProposal | TableProposal }[] = [];
 
+      /*
+        A PAGE-SCOPED SCAN EMPTIES THE OTHER PAGES, it never slices the array:
+        a TextPage's number IS its index, so handing the derivers
+        `[textPages[7]]` would re-number page 7 as page 0 and every box would
+        land on the cover. Duplicated-checklist papers are why the scope
+        exists — Parts 2, 4 and 6 print identical fields, so a whole-document
+        match lands all three on the first page that fits, and scoping the
+        scan to the page in front of the author is what lets detection find
+        the OTHER copies.
+      */
+      const scope =
+        onlyPage === undefined
+          ? textPages
+          : textPages.map((p, i) =>
+              i === onlyPage ? p : { ...p, items: [], rules: undefined, rects: undefined },
+            );
+
       for (const field of fields) {
         if (geometrySegments(field).length >= expectedBoxes(field)) continue;
 
-        const proposal = deriveProposal(field, textPages);
+        /*
+          The page-scoped pass passes NO window (R8/AE6): the author pointing
+          at a page is a stronger disambiguation than the batch prior, and a
+          stale or boundary-shifted window must not downgrade — or exclude —
+          an explicit human choice. Only the whole-document pass consults it.
+        */
+        const window =
+          onlyPage === undefined ? pageWindowOf(field.sourcePages, textPages.length) : null;
+        const proposal = deriveProposal(field, scope, window);
         const tier = classifyProposalTier(proposal);
+        // Same recording rule as `selectField` — the recorder upserts, so a
+        // page-scoped re-run updates a field's tier rather than double-counting.
+        const method = derivationMethodOf(field);
+        if (method && textPages.length > 0) recorder.proposed(field.id, method, tier);
         if (tier === 'no-match') continue;
         if (tier === 'needs-review') {
           reviews.push({ fieldId: field.id, proposal: proposal! });
           continue;
         }
         changes.push(...changesForProposal(field, proposal!));
+        recorder.accepted(field.id, 'auto');
       }
 
       if (changes.length > 0) mutateMany(changes);
@@ -502,6 +636,61 @@ export function GeometryEditorScreen({
     });
   }
 
+  /** The 1-based page input as a 0-based index, or null while empty/invalid. */
+  function targetPageIndex(): number | null {
+    const n = Number(targetPage);
+    if (!Number.isInteger(n) || n < 1) return null;
+    if (textPages.length > 0 && n > textPages.length) return null;
+    return n - 1;
+  }
+
+  /** Re-stamp the given fields' boxes onto a page at the same x/y. */
+  function moveBoxesToPage(fieldIds: readonly string[], page: number) {
+    const changes = retargetPageChanges(fields, fieldIds, page);
+    if (changes.length === 0) {
+      toast({ variant: 'warning', message: 'Nothing to move — no placed boxes on that selection.' });
+      return;
+    }
+    // The retarget signal — gap #3's quantified case. Each moved field's delta
+    // is measured from its own first box's page, before the move lands.
+    for (const { fieldId } of changes) {
+      const from = fields.find((f) => f.id === fieldId)?.geometry?.segments?.[0]?.page;
+      if (from !== undefined) recorder.retargeted([fieldId], page - from);
+    }
+    mutateMany(changes);
+    toast({
+      variant: 'success',
+      message: `Moved ${changes.length} field${changes.length === 1 ? '' : 's'} to page ${page + 1}.`,
+    });
+  }
+
+  /**
+   * The ids of the selected field's SECTION — nearest preceding
+   * `section_header` through to the next one. This is the unit the
+   * duplicated-checklist fix works in: Part 4 is one section whose every box
+   * sits on Part 2's page, and moving it field-by-field is thirty chances to
+   * miss one.
+   */
+  function sectionIdsOf(fieldId: string): string[] {
+    const at = fields.findIndex((f) => f.id === fieldId);
+    if (at < 0) return [fieldId];
+    let start = 0;
+    for (let i = at; i >= 0; i -= 1) {
+      if (fields[i]!.type === 'section_header') {
+        start = i;
+        break;
+      }
+    }
+    let end = fields.length;
+    for (let i = start + 1; i < fields.length; i += 1) {
+      if (fields[i]!.type === 'section_header') {
+        end = i;
+        break;
+      }
+    }
+    return fields.slice(start, end).map((f) => f.id);
+  }
+
   /**
    * Open a needs-review field from the queue (U5/R5 step-through) without
    * re-running `selectField`'s own derive-and-tier pass — the field's parked
@@ -513,6 +702,7 @@ export function GeometryEditorScreen({
    */
   function openReviewField(fieldId: string) {
     setSelectedId(fieldId);
+    setActiveOverlayPage(null);
     setDrawTarget(null);
   }
 
@@ -531,6 +721,7 @@ export function GeometryEditorScreen({
       const field = fields.find((f) => f.id === fieldId);
       if (!field) continue;
       changes.push(...changesForProposal(field, proposal));
+      recorder.accepted(fieldId, 'confirm-all');
     }
 
     mutateMany(changes);
@@ -549,6 +740,7 @@ export function GeometryEditorScreen({
     if (!field) return;
 
     mutateMany(changesForProposal(field, entry.proposal));
+    recorder.accepted(fieldId, 'confirm');
     setProposalPreviews((prev) => prev.filter((p) => p.fieldId !== fieldId));
   }
 
@@ -559,11 +751,15 @@ export function GeometryEditorScreen({
    * as draw-only, exactly like a `no-match` field — nothing else to build.
    */
   function rejectProposed(fieldId: string) {
+    recorder.rejected(fieldId);
     setProposalPreviews((prev) => prev.filter((p) => p.fieldId !== fieldId));
   }
 
   /** Replace one option's box, keyed by `optionKey`, leaving siblings alone. */
   function setOptionBox(fieldId: string, optionKey: string, box: PageBox | null) {
+    // A placed box (not a clear) is a hand draw. The recorder's own
+    // prior-refusal guard decides whether it counts as engine feedback.
+    if (box) recorder.manualDraw(fieldId, 'option');
     mutate(fieldId, (f) => {
       const others = (f.geometry?.segments ?? []).filter((s) => s.optionKey !== optionKey);
       // Placing an option box retires any whole-field box: the exporter reads
@@ -575,8 +771,77 @@ export function GeometryEditorScreen({
     });
   }
 
+  /**
+   * Sweep an area: divide one drawn box into a cell per option and place them
+   * all at once.
+   *
+   * The gap this closes: a choice field whose option boxes the extraction missed
+   * offered only per-option "Draw", one box at a time — six drags for the Q3
+   * checklist. This is the option analog of a table's "Divide into rows": drag
+   * one box around the printed options and each gets its band. REPLACES the
+   * field's placement outright (the whole-field box and any earlier option boxes
+   * go), because the swept set is the answer to "where does each option's mark
+   * land" and a stale box underneath is a second answer.
+   */
+  function distributeOptions(field: FormField, box: PageBox) {
+    const cells = distributeOptionCells(box, field.options ?? []);
+    if (cells.length === 0) return;
+    recorder.manualDraw(field.id, 'option');
+    mutate(field.id, (f) => ({ ...f, geometry: { segments: cells } }));
+  }
+
   function setScalarBox(fieldId: string, box: PageBox | null) {
+    if (box) recorder.manualDraw(fieldId, 'scalar');
     mutate(fieldId, (f) => (box ? { ...f, geometry: { segments: [box] } } : stripGeometry(f)));
+  }
+
+  /**
+   * Write ONE page's whole-field table box, keeping any box this table has on
+   * OTHER pages.
+   *
+   * A repeating table whose printed rows run across a page break carries one box
+   * per page. The exporter draws each on its own page and consumes value rows in
+   * printed order ACROSS them — `round-trip`'s `rowCursor` persists between
+   * segments in array order, so the segments are kept sorted by page (page 8's
+   * rows before page 9's). Replacing every segment, the way a scalar field's
+   * single box does, wiped the continuation the moment the author placed the
+   * next page — the reported "no way to place a table that spans two pages".
+   *
+   * A whole-field box is matched by page AND by being one (`rowCellIndex`
+   * null, no `optionKey`), so a table's per-row or per-option cells are never
+   * disturbed.
+   */
+  function setTablePageBox(fieldId: string, seg: PageBox) {
+    mutate(fieldId, (f) => ({
+      ...f,
+      geometry: { segments: mergeWholeFieldBox(f.geometry?.segments ?? [], seg) },
+    }));
+  }
+
+  /** Clear the whole-field box on ONE page, keeping the table's other pages. */
+  function clearTablePage(fieldId: string, page: number) {
+    mutate(fieldId, (f) => {
+      const kept = clearWholeFieldBoxOnPage(f.geometry?.segments ?? [], page);
+      return kept.length > 0 ? { ...f, geometry: { segments: kept } } : stripGeometry(f);
+    });
+  }
+
+  /**
+   * Set (or clear) the printed glyph on EVERY placed box of a field at once.
+   *
+   * A "select correct answers" question places one box per option, a table one
+   * per page or row — and an author who wanted them all to print the SAME mark
+   * (a ring around each chosen option, say) had to pick it box by box. This
+   * applies the one choice across every segment, leaving positions and bands
+   * untouched. Clearing (undefined) restores each to the field's default mark —
+   * the same "no markStyle" the per-box picker writes.
+   */
+  function setAllGlyphs(fieldId: string, glyph: GlyphKind | undefined) {
+    mutate(fieldId, (f) => {
+      const segs = f.geometry?.segments ?? [];
+      if (segs.length === 0) return f;
+      return { ...f, geometry: { segments: setGlyphOnAll(segs, glyph) } };
+    });
   }
 
   /**
@@ -622,7 +887,12 @@ export function GeometryEditorScreen({
         ? null
         : { fieldId: field.id, title: 'Placed, but its rows were not measured', detail: result.detail },
     );
-    setScalarBox(field.id, result.ok ? result.proposal.segment : box);
+    // Merge by page, not replace: a box drawn on the continuation page must not
+    // wipe the one already placed on the page the table starts on.
+    recorder.manualDraw(field.id, 'table');
+    setTablePageBox(field.id, result.ok ? result.proposal.segment : box);
+    // The page just drawn becomes the editable overlay.
+    setActiveOverlayPage(box.page);
   }
 
   /**
@@ -640,6 +910,7 @@ export function GeometryEditorScreen({
       result.ok ? null : { fieldId: field.id, title: 'Not placed', detail: result.detail },
     );
     if (!result.ok) return;
+    recorder.manualDraw(field.id, 'row');
     mutate(field.id, (f) => {
       const kept = (f.geometry?.segments ?? []).filter((s) => {
         const at = rowCellIndex(s);
@@ -659,9 +930,12 @@ export function GeometryEditorScreen({
    * draggable edges through the band overlay, and reach the record only when
    * they save.
    */
-  function setManualGrid(field: FormField, rows: number) {
+  function setManualGrid(field: FormField, rows: number, page: number) {
+    // The whole-field box ON THIS PAGE. A table spanning a page break has one
+    // per page, each divided into its OWN rows (page 8's rows, then page 9's),
+    // so the divide has to name which one it is acting on.
     const box = (field.geometry?.segments ?? []).find(
-      (s) => rowCellIndex(s) === null && s.optionKey === undefined,
+      (s) => rowCellIndex(s) === null && s.optionKey === undefined && s.page === page,
     );
     if (!box) return;
     const result = proposeManualGrid({
@@ -673,7 +947,9 @@ export function GeometryEditorScreen({
     setGridRefusal(
       result.ok ? null : { fieldId: field.id, title: 'Not divided', detail: result.detail },
     );
-    if (result.ok) setScalarBox(field.id, result.segment);
+    if (result.ok) setTablePageBox(field.id, result.segment);
+    // Editing follows the page just divided, so its new bands are draggable.
+    setActiveOverlayPage(page);
   }
 
   function clearRowBox(fieldId: string, rowIndex: number) {
@@ -779,7 +1055,14 @@ export function GeometryEditorScreen({
   ];
 
   return (
-    <div className="fai-rise flex h-[calc(100vh-56px)] flex-col">
+    /*
+      Standalone, the screen owns the viewport below the 56px app bar. Embedded
+      (the builder's PDF-mapping step) it FILLS ITS SLOT instead — the builder
+      pins its own chrome and footer around a fixed-height body, and a
+      viewport-height child inside that slot would overflow it by exactly the
+      chrome's height, putting the page scrollbar back.
+    */
+    <div className={`fai-rise flex flex-col ${embedded ? 'h-full min-h-0' : 'h-[calc(100vh-56px)]'}`}>
       {/*
         THE HEADER'S TWO HALVES ARE GATED SEPARATELY.
 
@@ -809,10 +1092,70 @@ export function GeometryEditorScreen({
             variant="outline"
             leadingIcon="wand-sparkles"
             disabled={isAutoPlacing}
-            onClick={autoPlaceRemaining}
+            onClick={() => autoPlaceRemaining()}
           >
             {isAutoPlacing ? 'Auto-placing…' : 'Auto-place remaining fields'}
           </Button>
+          {/*
+            THE DUPLICATED-SECTION KIT. Parts 2, 4 and 6 print the identical
+            checklist on different pages, so whole-document detection lands
+            all three on the first page that matches. The page number here
+            scopes both remedies: SCAN re-runs detection against that page
+            alone (for the copies detection never found), and the MOVE
+            buttons re-stamp already-placed boxes onto it at the same x/y
+            (for boxes that are right everywhere but their page).
+          */}
+          <span className="flex items-center gap-1.5 rounded-lg border border-border px-2 py-1">
+            <label htmlFor="target-page" className="text-[11px] font-semibold text-text-tertiary">
+              Page
+            </label>
+            <input
+              id="target-page"
+              type="number"
+              min={1}
+              max={Math.max(1, textPages.length)}
+              value={targetPage}
+              onChange={(e) => setTargetPage(e.target.value)}
+              placeholder="–"
+              className="h-6 w-14 rounded border border-border bg-surface-card px-1.5 text-[12px]"
+            />
+            <button
+              type="button"
+              disabled={isAutoPlacing || !targetPageIndex()}
+              onClick={() => {
+                const page = targetPageIndex();
+                if (page !== null) autoPlaceRemaining(page);
+              }}
+              title="Re-run detection for unplaced fields against this page only"
+              className="rounded-md border border-border px-2 py-0.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-hover disabled:opacity-40"
+            >
+              Scan
+            </button>
+            <button
+              type="button"
+              disabled={!selectedId || !targetPageIndex()}
+              onClick={() => {
+                const page = targetPageIndex();
+                if (page !== null && selectedId) moveBoxesToPage([selectedId], page);
+              }}
+              title="Move the selected field's boxes to this page, same position"
+              className="rounded-md border border-border px-2 py-0.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-hover disabled:opacity-40"
+            >
+              Move field
+            </button>
+            <button
+              type="button"
+              disabled={!selectedId || !targetPageIndex()}
+              onClick={() => {
+                const page = targetPageIndex();
+                if (page !== null && selectedId) moveBoxesToPage(sectionIdsOf(selectedId), page);
+              }}
+              title="Move every box in the selected field's section to this page, same positions"
+              className="rounded-md border border-border px-2 py-0.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-hover disabled:opacity-40"
+            >
+              Move section
+            </button>
+          </span>
           <Button
             variant="outline"
             leadingIcon="save"
@@ -826,6 +1169,25 @@ export function GeometryEditorScreen({
                   // builder does — overwriting every box at publish.
                   onSaved?.(fields);
                   toast({ variant: 'success', message: 'Placement saved to the draft.' });
+                  /*
+                    The placement learning loop's emit — LAST, after the save
+                    is fully acknowledged, never awaited (R4/KTD1). Save is
+                    this surface's commit gate, so only now are the recorded
+                    outcomes ground truth. `drain()` empties the recorder, so
+                    a second save in the same session sends only its own new
+                    events; a session with nothing recorded sends nothing.
+                  */
+                  const events = recorder.drain();
+                  if (events.length > 0) {
+                    sendPlacementOutcomes({
+                      ...(documentType ? { documentType } : {}),
+                      ...(formId ? { formId } : {}),
+                      ...(versionId ? { versionId } : {}),
+                      context: embedded ? 'builder' : 'standalone',
+                      fieldCount: fields.length,
+                      events,
+                    });
+                  }
                 },
                 onError: () => toast({ variant: 'danger', message: "Couldn't save — try again." }),
               })
@@ -860,9 +1222,16 @@ export function GeometryEditorScreen({
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <aside className="w-[340px] shrink-0 overflow-y-auto border-r border-border">
+        <aside className="flex w-[340px] shrink-0 flex-col border-r border-border">
+          {/*
+            PINNED, NOT FIRST-IN-THE-SCROLL. The review queue is what the
+            author is acting on — Confirm/Reject for the proposal highlighted
+            on the page — and living inside the list's scroll meant it left
+            the screen the moment they scrolled to see the field in context.
+            The queue and the filter hold still; only the field list scrolls.
+          */}
           {proposalPreviews.length > 0 && (
-            <div className="border-b border-border bg-[var(--accent-soft)] p-[12px_14px]">
+            <div className="flex-none border-b border-border bg-[var(--accent-soft)] p-[12px_14px]">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[12.5px] font-semibold">
                   {proposalPreviews.length} field{proposalPreviews.length === 1 ? '' : 's'} need review
@@ -876,7 +1245,9 @@ export function GeometryEditorScreen({
                   Confirm all proposed
                 </Button>
               </div>
-              <div className="mt-2 flex flex-col gap-1.5">
+              {/* Its own scroll past ~4 rows, so a big bulk pass cannot pin
+                  the whole panel's height to the queue. */}
+              <div className="fai-scroll mt-2 flex max-h-[150px] flex-col gap-1.5 overflow-y-auto">
                 {proposalPreviews.map(({ fieldId }) => {
                   const field = fields.find((f) => f.id === fieldId);
                   const label = field?.label || fieldId;
@@ -914,7 +1285,7 @@ export function GeometryEditorScreen({
               </div>
             </div>
           )}
-          <div className="border-b border-border p-[10px_14px]">
+          <div className="flex-none border-b border-border p-[10px_14px]">
             <input
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -924,6 +1295,7 @@ export function GeometryEditorScreen({
             />
           </div>
 
+          <div className="fai-scroll min-h-0 flex-1 overflow-y-auto">
           {groups.map((group) => {
             const isCollapsed = !!collapsedGroups[group.key];
             return (
@@ -979,6 +1351,7 @@ export function GeometryEditorScreen({
               No fields match “{filter}”.
             </p>
           )}
+          </div>
         </aside>
 
         {/*
@@ -1003,6 +1376,7 @@ export function GeometryEditorScreen({
             onTextLayer={onTextLayer}
             placements={placements}
             bandOverlay={bandOverlay}
+            readonlyBands={readonlyBands}
             onMoveBox={moveOverlayBox}
             bandSnapTargets={bandSnapTargets}
             bandSnapTargetsY={bandSnapTargetsY}
@@ -1011,9 +1385,11 @@ export function GeometryEditorScreen({
             drawLine={drawTarget?.toOptionKey !== undefined}
             onDrawBox={(box) => {
               if (!drawTarget) return;
-              const { fieldId, optionKey, rowIndex } = drawTarget;
+              const { fieldId, optionKey, rowIndex, distribute } = drawTarget;
               const target = fields.find((f) => f.id === fieldId);
-              if (target?.type === 'repeating_group' && rowIndex !== undefined) {
+              if (distribute && target) {
+                distributeOptions(target, box);
+              } else if (target?.type === 'repeating_group' && rowIndex !== undefined) {
                 setRowBox(target, rowIndex, box);
               } else if (optionKey !== null) setOptionBox(fieldId, optionKey, box);
               else if (target?.type === 'repeating_group') setTableBox(target, box);
@@ -1083,9 +1459,14 @@ export function GeometryEditorScreen({
               }
               onSetOptionBox={(optionKey, box) => setOptionBox(selected.id, optionKey, box)}
               onSetScalarBox={(box) => setScalarBox(selected.id, box)}
+              onSetTablePageBox={(seg) => setTablePageBox(selected.id, seg)}
+              onClearTablePage={(page) => clearTablePage(selected.id, page)}
+              onSetAllGlyphs={(glyph) => setAllGlyphs(selected.id, glyph)}
+              activePage={activeOverlayPage}
+              onActivatePage={setActiveOverlayPage}
               onClearRowBox={(rowIndex) => clearRowBox(selected.id, rowIndex)}
               onRestyleRowBox={(rowIndex, box) => restyleRowBox(selected.id, rowIndex, box)}
-              onDivideGrid={(rows) => setManualGrid(selected, rows)}
+              onDivideGrid={(rows, page) => setManualGrid(selected, rows, page)}
             />
           ) : (
             <p className="text-[12.5px] text-text-tertiary">
@@ -1132,6 +1513,12 @@ interface DrawTarget {
    * Absent everywhere else — a table placed as a measured grid is one box.
    */
   rowIndex?: number;
+  /**
+   * Sweep mode: the next drag is ONE box around a choice field's whole option
+   * list, divided into a cell per option. `optionKey` is null here — the drag
+   * places every option at once, not one.
+   */
+  distribute?: boolean;
 }
 
 function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
@@ -1142,7 +1529,8 @@ function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
     // The far end is part of the identity: arming "statement 1 → sign 2" and
     // then "statement 1 → sign 3" must swap the target, not toggle it off.
     a.toOptionKey === b.toOptionKey &&
-    a.rowIndex === b.rowIndex
+    a.rowIndex === b.rowIndex &&
+    a.distribute === b.distribute
   );
 }
 
@@ -1160,13 +1548,14 @@ function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
  * one per printed entry, n + m rather than n × m.
  */
 function isPerOptionField(field: FormField): boolean {
-  if (isMatchingQuestion(field.options)) return false;
-  return isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0;
+  // Delegated to the dispatcher's own predicate so this screen, the recorder
+  // and `deriveProposal` can never disagree about a field's derivation family.
+  return derivationMethodOf(field) === 'option-cells';
 }
 
 /** Whether this field is placed as matching anchors — see `isPerOptionField`. */
 function isMatchAnchorField(field: FormField): boolean {
-  return isChoiceField(field.type) && !field.printSelectedValue && isMatchingQuestion(field.options);
+  return derivationMethodOf(field) === 'match-anchor';
 }
 
 /**
@@ -1241,6 +1630,7 @@ function bandOverlayFor(
   selectedId: string | null,
   proposalPreviews: readonly { fieldId: string; proposal: FieldProposal | TableProposal }[],
   fields: readonly FormField[],
+  activeOverlayPage: number | null,
 ): BandOverlayInfo | null {
   if (drawTarget) {
     const field = fields.find((f) => f.id === drawTarget.fieldId);
@@ -1266,7 +1656,14 @@ function bandOverlayFor(
   */
   const field = fields.find((f) => f.id === selectedId);
   if (field && !isPerOptionField(field)) {
-    const segment = field.geometry?.segments?.[0];
+    const wholeField = (field.geometry?.segments ?? []).filter(
+      (s) => rowCellIndex(s) === null && s.optionKey === undefined,
+    );
+    // A page-spanning table has one whole-field box per page. The ACTIVE page —
+    // the one just drawn, divided, or clicked — is the editable overlay; the
+    // rest render read-only (see `readonlyBands`). A single-page field has one
+    // box and `wholeField[0]` is it.
+    const segment = wholeField.find((s) => s.page === activeOverlayPage) ?? wholeField[0];
     if (segment) {
       return { box: segment, source: { kind: 'segment', fieldId: selectedId, optionKey: segment.optionKey ?? null } };
     }
@@ -1284,10 +1681,21 @@ function bandOverlayFor(
  * and the bulk "Auto-place remaining fields" pass (U4) both route through this
  * so they classify identically. Empty `textPages` (the text layer hasn't loaded
  * yet) refuses rather than deriving off nothing.
+ *
+ * `window` is the field's resolved extraction window — the CALLER's decision,
+ * not this function's, because the same field is scanned with its window on
+ * the whole-document pass and without it on the author's page-scoped pass
+ * (R8): which prior applies depends on who asked, not on what the field is.
+ *
+ * EVERY CALLER MUST FEED THE PLACEMENT RECORDER with the tier it classifies
+ * (see `recorder` in the component): the derivation dispatch below mirrors
+ * `derivationMethodOf`, and a caller that derives without recording makes the
+ * hit-rate metric silently undercount its family.
  */
 function deriveProposal(
   field: FormField,
   textPages: readonly TextPage[],
+  window: PageWindow | null,
 ): FieldProposal | TableProposal | null {
   if (textPages.length === 0) return null;
   /*
@@ -1297,13 +1705,13 @@ function deriveProposal(
     something the candidate might do rather than something the page prints.
   */
   if (isMatchAnchorField(field)) {
-    return deriveMatchAnchorsAcrossPages(matchAnchors(field.options ?? []), textPages);
+    return deriveMatchAnchorsAcrossPages(matchAnchors(field.options ?? []), textPages, window);
   }
   if (isPerOptionField(field)) {
-    return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages);
+    return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages, window);
   }
   if (field.type === 'repeating_group') {
-    return deriveAcrossPages(field, textPages);
+    return deriveAcrossPages(field, textPages, window);
   }
   return null;
 }
@@ -1500,6 +1908,11 @@ function PlacementPanel({
   onToggleDraw,
   onSetOptionBox,
   onSetScalarBox,
+  onSetTablePageBox,
+  onClearTablePage,
+  onSetAllGlyphs,
+  activePage,
+  onActivatePage,
   onClearRowBox,
   onRestyleRowBox,
   onDivideGrid,
@@ -1510,9 +1923,19 @@ function PlacementPanel({
   onToggleDraw: (target: DrawTarget) => void;
   onSetOptionBox: (optionKey: string, box: PageBox | null) => void;
   onSetScalarBox: (box: PageBox | null) => void;
+  /** Merge one page's whole-field table box, keeping the table's other pages. */
+  onSetTablePageBox: (seg: PageBox) => void;
+  /** Clear the whole-field table box on one page. */
+  onClearTablePage: (page: number) => void;
+  /** Set (or clear, with undefined) the printed glyph on every placed box at once. */
+  onSetAllGlyphs: (glyph: GlyphKind | undefined) => void;
+  /** Which page's table box is the editable overlay (multi-page tables). */
+  activePage: number | null;
+  /** Make a page's box the editable one — its bands become draggable. */
+  onActivatePage: (page: number) => void;
   onClearRowBox: (rowIndex: number) => void;
   onRestyleRowBox: (rowIndex: number, box: PageBox) => void;
-  onDivideGrid: (rows: number) => void;
+  onDivideGrid: (rows: number, page: number) => void;
 }) {
   const perOption = isPerOptionField(field);
   const matchAnchorField = isMatchAnchorField(field);
@@ -1520,10 +1943,22 @@ function PlacementPanel({
   const wholeFieldBox = (field.geometry?.segments ?? []).find(
     (s) => rowCellIndex(s) === null && s.optionKey === undefined,
   );
-  /** Divide-into-rows count; seeded from the printed rows where declared. */
-  const [divideRows, setDivideRows] = useState(() =>
-    field.fixedRows?.length ? String(field.fixedRows.length) : '',
-  );
+  /**
+   * Every whole-field box, one per page, in page order — a table whose printed
+   * rows run across a page break carries one box on each page it appears on.
+   */
+  const wholeFieldBoxes = (field.geometry?.segments ?? [])
+    .filter((s) => rowCellIndex(s) === null && s.optionKey === undefined)
+    .sort((a, b) => a.page - b.page);
+  /**
+   * Boxes that print a mark of their own — every placed box EXCEPT a matching
+   * question's anchors, which draw a connector, not a glyph. When there are two
+   * or more, the author can set them all to the same mark at once instead of
+   * box by box.
+   */
+  const glyphBoxes = matchAnchorField ? [] : (field.geometry?.segments ?? []);
+  /** Sweep mode for a choice field: one drag places a cell for every option. */
+  const sweepTarget: DrawTarget = { fieldId: field.id, optionKey: null, distribute: true };
   /*
    * The per-row fallback is offered where it can mean something: a fixed-row
    * table with exactly ONE answer column. One drawn rectangle per row IS that
@@ -1555,17 +1990,21 @@ function PlacementPanel({
    */
   const proposal = useMemo(() => {
     if (textPages.length === 0) return null;
+    // The panel's own derivation consults the field's extraction window
+    // exactly as `deriveProposal` does — the offer shown here and the one the
+    // bulk pass parks must be the same proposal, notes and cap included.
+    const window = pageWindowOf(field.sourcePages, textPages.length);
     // Matching is checked first for the same reason `deriveProposal` checks it
     // first: its field IS a choice field, and the option-cell derivation would
     // otherwise match its PAIRINGS against text that never prints them.
-    if (matchAnchorField) return deriveMatchAnchorsAcrossPages(anchors, textPages);
-    if (perOption) return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages);
+    if (matchAnchorField) return deriveMatchAnchorsAcrossPages(anchors, textPages, window);
+    if (perOption) return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages, window);
     return null;
   }, [field, textPages, perOption, matchAnchorField, anchors]);
 
   const tableProposal = useMemo(() => {
     if (textPages.length === 0 || field.type !== 'repeating_group') return null;
-    return deriveAcrossPages(field, textPages);
+    return deriveAcrossPages(field, textPages, pageWindowOf(field.sourcePages, textPages.length));
   }, [field, textPages]);
 
   return (
@@ -1608,16 +2047,33 @@ function PlacementPanel({
           <p className="text-[11.5px] leading-snug text-text-secondary">
             A grid was detected on page {tableProposal.segment.page + 1}.
           </p>
+          {/*
+            Provenance, not a warning (R7): says whether the answer columns are
+            the measured extents of printed boxes or an inference from header
+            glyphs. Its absence is the tell if the rect extractor ever silently
+            regresses to zero again — the measured wording just stops appearing.
+          */}
+          <p className="mt-1 text-[11px] leading-snug text-text-tertiary">
+            {columnEvidenceCaption(tableProposal.columnEvidence)}
+          </p>
           <Button
             variant="outline"
             leadingIcon="wand-sparkles"
             className="mt-1.5 w-full justify-center"
-            onClick={() => onSetScalarBox(tableProposal.segment)}
+            onClick={() => onSetTablePageBox(tableProposal.segment)}
           >
             Place this grid
           </Button>
         </div>
       )}
+
+      {/*
+        SET EVERY BOX AT ONCE. A "select correct answers" question, or a table
+        spread over pages/rows, places many boxes; picking the same mark for all
+        of them one at a time is the tedium this removes. Shown only once there
+        are two or more boxes to act on.
+      */}
+      {glyphBoxes.length > 1 && <BulkGlyphRow boxes={glyphBoxes} onSetAll={onSetAllGlyphs} />}
 
       {matchAnchorField ? (
         <MatchAnchorRows
@@ -1629,6 +2085,28 @@ function PlacementPanel({
         />
       ) : perOption ? (
         <div className="flex flex-col gap-1.5">
+          {/*
+            SWEEP AN AREA. When the extraction placed none of the options — or a
+            set came out wrong — drag ONE box around the printed option list and
+            each option gets its own cell, instead of drawing them one by one. It
+            replaces whatever was placed; nudge the bands afterwards.
+          */}
+          <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+            <Button
+              variant={sameTarget(drawTarget, sweepTarget) ? 'primary' : 'outline'}
+              leadingIcon="scan-line"
+              className="w-full justify-center"
+              onClick={() => onToggleDraw(sweepTarget)}
+            >
+              {sameTarget(drawTarget, sweepTarget)
+                ? 'Drawing… drag around the options'
+                : 'Sweep an area — place every option'}
+            </Button>
+            <p className="mt-1.5 text-[11px] leading-snug text-text-tertiary">
+              Drag one box around all {field.options!.length} printed options; each gets its own cell,
+              top to bottom. Fine-tune any of them below.
+            </p>
+          </div>
           {field.options!.map((option) => {
             const target: DrawTarget = { fieldId: field.id, optionKey: option };
             const box = (field.geometry?.segments ?? []).find((s) => s.optionKey === option);
@@ -1645,55 +2123,63 @@ function PlacementPanel({
             );
           })}
         </div>
+      ) : field.type === 'repeating_group' ? (
+        <>
+          {/*
+            THE WHOLE-FIELD BOX(ES), one per page. A table whose printed rows run
+            across a page break appears on more than one page; each page carries
+            its own box, divided into ITS rows, and the exporter consumes value
+            rows in printed order across them. Drawing merges by page, so a box
+            on the continuation page never wipes the one where the table starts.
+          */}
+          <TablePageBoxes
+            boxes={wholeFieldBoxes}
+            fixedRowCount={field.fixedRows?.length ?? 0}
+            armed={sameTarget(drawTarget, { fieldId: field.id, optionKey: null })}
+            activePage={activePage}
+            onActivate={onActivatePage}
+            onToggleDraw={() => onToggleDraw({ fieldId: field.id, optionKey: null })}
+            onSetPageBox={onSetTablePageBox}
+            onClearPage={onClearTablePage}
+            onDivide={onDivideGrid}
+          />
+          {rowFallback && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-[11px] leading-snug text-text-tertiary">
+                Or place each row&rsquo;s box yourself — for when the measured grid is wrong.
+                Drawing any row replaces the whole-grid box; a row left blank exports as recorded
+                data with no mark on the page.
+              </p>
+              {field.fixedRows!.map((rowLabel, index) => {
+                const target: DrawTarget = { fieldId: field.id, optionKey: null, rowIndex: index };
+                const box = (field.geometry?.segments ?? []).find(
+                  (s) => rowCellIndex(s) === index,
+                );
+                return (
+                  <BoxRow
+                    key={index}
+                    label={rowLabel || `Row ${index + 1}`}
+                    box={box}
+                    armed={sameTarget(drawTarget, target)}
+                    onToggleDraw={() => onToggleDraw(target)}
+                    onClear={() => onClearRowBox(index)}
+                    onRestyle={(next) => onRestyleRowBox(index, next)}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </>
       ) : (
         <>
           <BoxRow
             label="Answer box"
-            /*
-              The WHOLE-FIELD segment only. In per-row or yes/no-pair mode the
-              first stored segment is one cell of several, and labelling it
-              "Answer box · p1" would report a box nobody placed.
-            */
             box={wholeFieldBox}
             armed={sameTarget(drawTarget, { fieldId: field.id, optionKey: null })}
             onToggleDraw={() => onToggleDraw({ fieldId: field.id, optionKey: null })}
             onClear={() => onSetScalarBox(null)}
             onRestyle={onSetScalarBox}
           />
-          {/*
-            DIVIDE BY SAY-SO. When a page's printed shapes cannot be measured —
-            or measured the wrong table — the author still knows where the rows
-            are: divide the drawn box evenly, then drag the band edges to fit.
-            Offered only while a whole-field box exists to divide, on the page
-            THAT box sits on, which is the page the author drew it.
-          */}
-          {field.type === 'repeating_group' && wholeFieldBox && (
-            <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
-              <p className="text-[11px] leading-snug text-text-tertiary">
-                Rows not measured, or measured on the wrong page? Divide the drawn box into equal
-                rows, then drag the edges to fit the printed lines.
-              </p>
-              <div className="mt-1.5 flex items-center gap-1.5">
-                <input
-                  type="number"
-                  min={1}
-                  value={divideRows}
-                  onChange={(e) => setDivideRows(e.target.value)}
-                  aria-label="Number of printed rows"
-                  placeholder="rows"
-                  className="h-[28px] w-[64px] rounded-sm border border-border bg-surface-page px-1.5 text-[12px]"
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={!Number.isInteger(Number(divideRows)) || Number(divideRows) < 1}
-                  onClick={() => onDivideGrid(Number(divideRows))}
-                >
-                  Divide into rows
-                </Button>
-              </div>
-            </div>
-          )}
           {field.type === 'boolean_yes_no' && (
             <div className="flex flex-col gap-1.5">
               {/*
@@ -1719,32 +2205,6 @@ function PlacementPanel({
                     onToggleDraw={() => onToggleDraw(target)}
                     onClear={() => onSetOptionBox(key, null)}
                     onRestyle={(next) => onSetOptionBox(key, next)}
-                  />
-                );
-              })}
-            </div>
-          )}
-          {rowFallback && (
-            <div className="flex flex-col gap-1.5">
-              <p className="text-[11px] leading-snug text-text-tertiary">
-                Or place each row&rsquo;s box yourself — for when the measured grid is wrong.
-                Drawing any row replaces the whole-grid box; a row left blank exports as recorded
-                data with no mark on the page.
-              </p>
-              {field.fixedRows!.map((rowLabel, index) => {
-                const target: DrawTarget = { fieldId: field.id, optionKey: null, rowIndex: index };
-                const box = (field.geometry?.segments ?? []).find(
-                  (s) => rowCellIndex(s) === index,
-                );
-                return (
-                  <BoxRow
-                    key={index}
-                    label={rowLabel || `Row ${index + 1}`}
-                    box={box}
-                    armed={sameTarget(drawTarget, target)}
-                    onToggleDraw={() => onToggleDraw(target)}
-                    onClear={() => onClearRowBox(index)}
-                    onRestyle={(next) => onRestyleRowBox(index, next)}
                   />
                 );
               })}
@@ -2045,6 +2505,62 @@ function GlyphRow({ box, onChange }: { box: PageBox; onChange: (next: PageBox) =
   );
 }
 
+/**
+ * Set the printed glyph on EVERY placed box of a field at once — the bulk
+ * companion to `GlyphRow`. A button is highlighted only when ALL the boxes
+ * already share that mark; a mixed set highlights nothing, so the row reports
+ * the true state rather than a guess. Applying one leaves each box's position
+ * and bands untouched.
+ */
+function BulkGlyphRow({
+  boxes,
+  onSetAll,
+}: {
+  boxes: readonly PageBox[];
+  onSetAll: (glyph: GlyphKind | undefined) => void;
+}) {
+  const glyphs = new Set(boxes.map((b) => b.markStyle?.glyph));
+  // The mark they all share, or `null` when the set is mixed (nothing pressed).
+  const common = glyphs.size === 1 ? [...glyphs][0] : null;
+  return (
+    <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+      <span className="mb-1 block text-[10.5px] font-semibold text-text-tertiary">
+        Set all {boxes.length} boxes to print
+      </span>
+      <div className="flex flex-wrap gap-1">
+        <button
+          type="button"
+          onClick={() => onSetAll(undefined)}
+          aria-pressed={common === undefined}
+          className={`rounded-sm border px-1.5 py-0.5 text-[10px] ${
+            common === undefined
+              ? 'border-border-accent bg-surface-card font-semibold text-accent'
+              : 'border-border text-text-secondary hover:bg-surface-hover'
+          }`}
+        >
+          Default
+        </button>
+        {GLYPH_KINDS.map((glyph) => (
+          <button
+            key={glyph}
+            type="button"
+            onClick={() => onSetAll(glyph)}
+            aria-pressed={common === glyph}
+            aria-label={`Print ${GLYPH_LABELS[glyph]} on all boxes`}
+            className={`rounded-sm border px-1.5 py-0.5 text-[10px] ${
+              common === glyph
+                ? 'border-border-accent bg-surface-card font-semibold text-accent'
+                : 'border-border text-text-secondary hover:bg-surface-hover'
+            }`}
+          >
+            {GLYPH_LABELS[glyph]}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function BoxRow({
   label,
   box,
@@ -2091,6 +2607,311 @@ function BoxRow({
       {/* Only once there is a box: a style with nowhere to print is a choice
           about nothing, and it would be lost the moment the box is drawn. */}
       {box && onRestyle && <GlyphRow box={box} onChange={onRestyle} />}
+    </div>
+  );
+}
+
+/**
+ * The whole-field answer box(es) of a repeating table — one per PAGE.
+ *
+ * A table whose printed rows run across a page break appears on more than one
+ * page, and each page needs its own box divided into ITS rows. Drawing is a
+ * single armed mode: a box drawn on a page replaces THAT page's box and leaves
+ * every other page's alone (the parent's write merges by page). Once boxes
+ * exist, each is listed below with its own row count and Clear — the exporter
+ * marks the first page's rows, then the next page's, in printed order.
+ */
+function TablePageBoxes({
+  boxes,
+  fixedRowCount,
+  armed,
+  activePage,
+  onActivate,
+  onToggleDraw,
+  onSetPageBox,
+  onClearPage,
+  onDivide,
+}: {
+  boxes: readonly PageBox[];
+  fixedRowCount: number;
+  armed: boolean;
+  activePage: number | null;
+  onActivate: (page: number) => void;
+  onToggleDraw: () => void;
+  onSetPageBox: (seg: PageBox) => void;
+  onClearPage: (page: number) => void;
+  onDivide: (rows: number, page: number) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+        <div className="mb-1.5 text-[12px] font-semibold">
+          {boxes.length > 1 ? 'Answer boxes' : 'Answer box'}
+        </div>
+        <Button
+          variant={armed ? 'primary' : 'outline'}
+          leadingIcon="square-dashed"
+          className="w-full justify-center"
+          onClick={onToggleDraw}
+        >
+          {armed
+            ? 'Drawing… (click to stop)'
+            : boxes.length > 0
+              ? 'Draw a box on another page'
+              : 'Draw the answer box'}
+        </Button>
+        <p className="mt-1.5 text-[11px] leading-snug text-text-tertiary">
+          Draw a box on each page this table&rsquo;s rows appear on, then divide each into its rows.
+          A table that runs onto the next page marks its first rows on one page and the rest on the
+          next, in printed order.
+        </p>
+      </div>
+      {boxes.map((seg) => (
+        <TablePageRow
+          key={seg.page}
+          seg={seg}
+          // Seed the divide count from the table's declared rows only when there
+          // is ONE box to fill; a split table's per-page count is the author's.
+          defaultRows={boxes.length === 1 ? fixedRowCount : 0}
+          // Only offer the switch when there is more than one page to switch
+          // between — a single-page table's box is always the editable overlay.
+          active={boxes.length > 1 && seg.page === activePage}
+          onActivate={boxes.length > 1 ? () => onActivate(seg.page) : undefined}
+          onClear={() => onClearPage(seg.page)}
+          onRestyle={onSetPageBox}
+          onDivide={(rows) => onDivide(rows, seg.page)}
+        />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * One page's whole-field table box: its row count, a divide control, Clear, style.
+ * For a page-spanning table only ONE page's grid is editable on the canvas at a
+ * time; `onActivate` makes THIS page the editable one (its bands become draggable,
+ * the others render read-only) and `active` reflects which page that is. Dividing
+ * a page activates it automatically, so this switch is for going back to fine-tune
+ * a page divided earlier.
+ */
+function TablePageRow({
+  seg,
+  defaultRows,
+  active,
+  onActivate,
+  onClear,
+  onRestyle,
+  onDivide,
+}: {
+  seg: PageBox;
+  defaultRows: number;
+  active: boolean;
+  onActivate?: () => void;
+  onClear: () => void;
+  onRestyle: (next: PageBox) => void;
+  onDivide: (rows: number) => void;
+}) {
+  const measured = seg.rowBands?.length ?? 0;
+  const [rows, setRows] = useState(() =>
+    measured > 0 ? String(measured) : defaultRows > 0 ? String(defaultRows) : '',
+  );
+  const count = Number(rows);
+  const pageLabel = `Page ${seg.page + 1}`;
+  return (
+    <div
+      className={`rounded-sm border p-[8px_9px] ${
+        active ? 'border-border-accent bg-surface-accent-soft' : 'border-border-subtle bg-surface-sunken'
+      }`}
+    >
+      <div className="mb-1.5 flex items-center gap-1.5">
+        {onActivate ? (
+          <button
+            type="button"
+            onClick={onActivate}
+            aria-pressed={active}
+            title={active ? 'Editing this page on the canvas' : 'Edit this page’s rows on the canvas'}
+            className={`min-w-0 flex-1 truncate rounded-sm px-1 py-0.5 text-left text-[12px] font-semibold ${
+              active ? 'text-accent' : 'text-text-secondary hover:bg-surface-hover'
+            }`}
+          >
+            {active ? `${pageLabel} — editing` : pageLabel}
+          </button>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-[12px] font-semibold">{pageLabel}</span>
+        )}
+        <span className="text-[10.5px] font-semibold text-text-tertiary">
+          {measured > 0 ? `${measured} row${measured === 1 ? '' : 's'}` : 'not divided'}
+        </span>
+        <Button variant="outline" size="sm" leadingIcon="trash-2" onClick={onClear}>
+          Clear
+        </Button>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <input
+          type="number"
+          min={1}
+          value={rows}
+          onChange={(e) => setRows(e.target.value)}
+          aria-label={`Rows on page ${seg.page + 1}`}
+          placeholder="rows"
+          className="h-[28px] w-[64px] rounded-sm border border-border bg-surface-page px-1.5 text-[12px]"
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!Number.isInteger(count) || count < 1}
+          onClick={() => onDivide(count)}
+        >
+          Divide into rows
+        </Button>
+      </div>
+      <TableFineNudge seg={seg} onRestyle={onRestyle} />
+      <GlyphRow box={seg} onChange={onRestyle} />
+    </div>
+  );
+}
+
+/** A single 1pt nudge button — a chevron in a square, matching the row steppers. */
+function NudgeButton({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: string;
+  label: string;
+  onClick: (e: ReactMouseEvent) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className="grid h-6 w-6 flex-none place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover"
+    >
+      <Icon name={icon} size={11} />
+    </button>
+  );
+}
+
+/**
+ * Fine 1pt placement for one table page's box — the mouse-free control the
+ * screenshots asked for.
+ *
+ * A pointer drag over a preview scaled to ~2× cannot resolve a single point, and
+ * a band-edge drag SNAPS to the nearest printed rule, so "the whole grid is two
+ * points too high" or "this one line is a point off" had no precise fix — every
+ * mouse move jumped. These buttons step by exactly `NUDGE_POINTS` (hold Shift for
+ * a ten-point stride, the same coarse step the keyboard nudge uses) and write
+ * through the same page-scoped `onRestyle` a drag does.
+ *
+ * - Whole table: `moveSegment` slides the outline AND its bands together, for
+ *   positioning the grid over the printed table.
+ * - Per line: `moveBand` moves one column or row edge, refusing an inverting or
+ *   overlapping step, for squaring a single rule onto the page.
+ *
+ * PDF space is bottom-up, so a row band's `end` is its TOP edge and `start` its
+ * bottom; the row controls are labelled T/B and chevron up/down accordingly.
+ */
+function TableFineNudge({
+  seg,
+  onRestyle,
+}: {
+  seg: PageBox;
+  onRestyle: (next: PageBox) => void;
+}) {
+  const columns = seg.columnBands ?? [];
+  const rows = seg.rowBands ?? [];
+
+  const moveBox = (dx: number, dy: number) => (e: ReactMouseEvent) => {
+    const step = e.shiftKey ? NUDGE_POINTS_COARSE : NUDGE_POINTS;
+    const next = moveSegment(seg, dx * step, dy * step);
+    if (next !== seg) onRestyle(next);
+  };
+
+  const moveEdge =
+    (axis: 'column' | 'row', key: string, edge: 'start' | 'end', dir: -1 | 1) =>
+    (e: ReactMouseEvent) => {
+      const step = e.shiftKey ? NUDGE_POINTS_COARSE : NUDGE_POINTS;
+      const band = (axis === 'column' ? seg.columnBands : seg.rowBands)?.find((b) => b.key === key);
+      if (!band) return;
+      const next = moveBand(seg, axis, key, edge, band[edge] + dir * step);
+      if (next) onRestyle(next);
+    };
+
+  return (
+    <div className="mt-1.5 flex flex-col gap-1.5 rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+      <div className="text-[11px] font-semibold text-text-secondary">
+        Fine placement — 1pt per step (hold Shift for 10pt)
+      </div>
+
+      <div className="flex items-center gap-1.5">
+        <span className="min-w-0 flex-1 text-[11px] text-text-secondary">Whole table</span>
+        <NudgeButton icon="chevron-left" label="Move table left" onClick={moveBox(-1, 0)} />
+        <NudgeButton icon="chevron-up" label="Move table up" onClick={moveBox(0, 1)} />
+        <NudgeButton icon="chevron-down" label="Move table down" onClick={moveBox(0, -1)} />
+        <NudgeButton icon="chevron-right" label="Move table right" onClick={moveBox(1, 0)} />
+      </div>
+
+      {columns.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10.5px] font-semibold text-text-tertiary">Column lines</span>
+          {columns.map((band) => (
+            <div key={band.key} className="flex items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-text-tertiary">
+                {band.key}
+              </span>
+              {(['start', 'end'] as const).map((edge) => (
+                <span key={edge} className="flex flex-none items-center gap-0.5">
+                  <span className="w-[14px] text-right font-mono text-[10px] text-text-tertiary">
+                    {edge === 'start' ? 'L' : 'R'}
+                  </span>
+                  <NudgeButton
+                    icon="chevron-left"
+                    label={`Move ${band.key} ${edge === 'start' ? 'left' : 'right'} edge left`}
+                    onClick={moveEdge('column', band.key, edge, -1)}
+                  />
+                  <NudgeButton
+                    icon="chevron-right"
+                    label={`Move ${band.key} ${edge === 'start' ? 'left' : 'right'} edge right`}
+                    onClick={moveEdge('column', band.key, edge, 1)}
+                  />
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10.5px] font-semibold text-text-tertiary">Row lines</span>
+          {rows.map((band) => (
+            <div key={band.key} className="flex items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-text-tertiary">
+                {band.key}
+              </span>
+              {(['end', 'start'] as const).map((edge) => (
+                <span key={edge} className="flex flex-none items-center gap-0.5">
+                  <span className="w-[14px] text-right font-mono text-[10px] text-text-tertiary">
+                    {edge === 'end' ? 'T' : 'B'}
+                  </span>
+                  <NudgeButton
+                    icon="chevron-down"
+                    label={`Move ${band.key} ${edge === 'end' ? 'top' : 'bottom'} edge down`}
+                    onClick={moveEdge('row', band.key, edge, -1)}
+                  />
+                  <NudgeButton
+                    icon="chevron-up"
+                    label={`Move ${band.key} ${edge === 'end' ? 'top' : 'bottom'} edge up`}
+                    onClick={moveEdge('row', band.key, edge, 1)}
+                  />
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

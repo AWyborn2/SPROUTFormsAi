@@ -10,9 +10,13 @@ import type { AssessmentPart, AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 import {
+  autoVerdictWrite,
+  deriveChecklistOutcome,
   incorrectQuestionsNote,
   isSelfMarking,
+  markKeyedQuestions,
   markTheory,
+  markingCompositionWarnings,
   stripMarkingSecrets,
 } from './marking.js';
 
@@ -176,6 +180,41 @@ describe('isSelfMarking (U15)', () => {
       signOff: {
         overallSatisfactory: { fieldId: 'result', value: 'Candidate Competent' },
         overallNotSatisfactory: { fieldId: 'result', value: 'Candidate not yet Competent' },
+      },
+    };
+
+    expect(isSelfMarking(fields, manifest, 'p1')).toBe(true);
+  });
+
+  it('still self-marks when the verdict radio is locked to auto instead of declared', () => {
+    /*
+      The other spelling of the same intent: the workflow editor's `auto` lock
+      on the printed pair, which `autoVerdictWrite` fills at hand-in. Without
+      this, the switch that turns the auto-verdict ON was the same switch
+      turning the quiz's marking OFF.
+    */
+    const fields = [
+      header('h'),
+      q('g1', ['a']),
+      outcome('g1-out'),
+      unkeyed('verdict', { options: ['Satisfactory', 'Not Satisfactory'] }),
+    ];
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        { key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'], startFieldId: 'h' },
+      ],
+      workflow: {
+        roles: ['candidate', 'assessor'],
+        sections: [
+          {
+            key: 's1',
+            ordinal: 1,
+            label: 'P1',
+            partKey: 'p1',
+            access: { candidate: 'fill', assessor: 'fill' },
+            fieldSource: { verdict: 'auto' },
+          },
+        ],
       },
     };
 
@@ -518,6 +557,188 @@ describe('stripMarkingSecrets', () => {
 
     expect(fields[0]?.answerKey).toEqual(['a', 'b']);
   });
+
+  it('REMOVES A MODEL ANSWER STANDING ALONE — a written question carries no key, only prose', () => {
+    /*
+      The written-question shape: no answerKey, no options, just the assessor's
+      marking guide. The fast path's some-check must see it, or a paper of
+      eleven written questions and nothing else would be served verbatim.
+    */
+    const written: FormField = {
+      id: 'w1',
+      type: 'textarea',
+      label: 'w1',
+      required: true,
+      source: 'imported',
+      modelAnswer: 'Contact the tip head controller on channel 2 before entering.',
+    };
+
+    const stripped = stripMarkingSecrets([written]);
+
+    expect(stripped[0]).not.toBe(written);
+    expect(stripped[0]?.modelAnswer).toBeUndefined();
+    expect(stripped[0]?.label).toBe('w1');
+    expect(stripped[0]?.type).toBe('textarea');
+  });
+
+  it('removes modelAnswer alongside the other secrets on one field', () => {
+    const loaded = q('g1', ['a'], 'g1-out', { modelAnswer: 'never mind the options', answerHint: 'hint' });
+
+    const g1 = stripMarkingSecrets([loaded, outcome('g1-out')]).find((f) => f.id === 'g1');
+
+    expect(g1?.answerKey).toBeUndefined();
+    expect(g1?.outcomeTarget).toBeUndefined();
+    expect(g1?.answerHint).toBeUndefined();
+    expect(g1?.modelAnswer).toBeUndefined();
+    expect(g1?.options).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('a targeted-but-unkeyed written question still keeps the identity fast-path honest', () => {
+    // The identity return may only fire when NOTHING carries a secret — a
+    // written question's outcomeTarget alone is already enough to copy.
+    const clean: FormField[] = [header('h'), outcome('o1')];
+
+    expect(stripMarkingSecrets(clean)).toBe(clean);
+  });
+
+  it('STRIPS AN EMPTY-STRING SECRET — detection is presence, not truthiness', () => {
+    /*
+      `modelAnswer: ''` is falsy, so a truthy check let the property NAME ride
+      into a candidate payload — exactly what a "no `modelAnswer` anywhere in
+      the JSON" leak pin trips over. Same rule for an empty hint.
+    */
+    const emptied: FormField = {
+      id: 'w1',
+      type: 'textarea',
+      label: 'w1',
+      required: true,
+      source: 'imported',
+      modelAnswer: '',
+      answerHint: '',
+    };
+
+    const stripped = stripMarkingSecrets([emptied]);
+
+    expect(stripped[0]).not.toBe(emptied);
+    expect('modelAnswer' in stripped[0]!).toBe(false);
+    expect('answerHint' in stripped[0]!).toBe(false);
+  });
+});
+
+/**
+ * The arithmetic core of marking, extracted for MIXED parts: keyed choice
+ * questions pre-mark automatically while written questions wait for the
+ * assessor. What is pinned here is the boundary — exactly the keyed questions
+ * are marked, exactly their cells are written, and no part-level conclusion
+ * (verdict, note, outcome) is smuggled out with them.
+ */
+describe('markKeyedQuestions — the mixed-part pre-mark', () => {
+  /** A written question: prose answer, model-answer guide, assessor-ticked box. */
+  const written = (id: string): FormField => ({
+    id,
+    type: 'text',
+    label: id,
+    required: true,
+    source: 'imported',
+    modelAnswer: `Model answer for ${id}`,
+    outcomeTarget: { fieldId: `${id}-out` },
+  });
+
+  const radio = (id: string, options: string[], answerKey: string[]): FormField => ({
+    id,
+    type: 'radio',
+    label: id,
+    required: true,
+    source: 'imported',
+    options,
+    answerKey,
+    outcomeTarget: { fieldId: `${id}-out` },
+  });
+
+  /*
+    The reference paper in miniature — the Authorised Tip Head Controller
+    shape: 15 questions (11 written, 4 choice), each with a printed ✓/✗ box.
+  */
+  const writtenIds = ['q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q9', 'q10', 'q13', 'q14', 'q15'];
+  const mixedFields: FormField[] = [
+    header('part2'),
+    ...writtenIds.slice(0, 6).map(written),
+    radio('q7', ['a', 'b', 'c'], ['b']),
+    radio('q8', ['a', 'b', 'c', 'd'], ['c']),
+    ...['q9', 'q10'].map(written),
+    q('q11', ['a', 'b', 'c', 'd']), // checkbox_group, exact set of 4
+    radio('q12', ['True', 'False'], ['True']),
+    ...['q13', 'q14', 'q15'].map(written),
+    ...['q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7', 'q8', 'q9', 'q10', 'q11', 'q12', 'q13', 'q14', 'q15'].map(
+      (id) => outcome(`${id}-out`),
+    ),
+  ];
+
+  const answers: Record<string, SubmissionValue> = {
+    q1: 'Check the tip head is clear before reversing.',
+    q7: 'b', // right
+    q8: 'a', // wrong
+    q11: ['a', 'b', 'c', 'd'], // right — the full exact set
+    // q12 unanswered
+  };
+
+  it('MARKS EXACTLY THE FOUR KEYED QUESTIONS — written ones are not the machine’s to judge', () => {
+    const { marks } = markKeyedQuestions(mixedFields, answers);
+
+    expect(marks.map((m) => m.fieldId)).toEqual(['q7', 'q8', 'q11', 'q12']);
+    expect(marks.map((m) => m.correct)).toEqual([true, false, true, false]);
+    expect(marks.find((m) => m.fieldId === 'q12')?.unanswered).toBe(true);
+  });
+
+  it('writes only the keyed questions’ cells; every written question’s box stays blank for the assessor', () => {
+    const { derivedValues } = markKeyedQuestions(mixedFields, answers);
+
+    expect(derivedValues['q7-out']).toBe(true);
+    expect(derivedValues['q8-out']).toBe(false);
+    expect(derivedValues['q11-out']).toBe(true);
+    expect(derivedValues['q12-out']).toBe(false);
+    for (const id of writtenIds) {
+      // A pre-written ✓ on a question nobody judged would be a finding nobody
+      // made — the box must arrive empty.
+      expect(derivedValues[`${id}-out`], `${id}-out`).toBeUndefined();
+    }
+    // The candidate's prose rides through untouched.
+    expect(derivedValues.q1).toBe('Check the tip head is clear before reversing.');
+  });
+
+  it('draws no part-level conclusion — marks and values only', () => {
+    // No outcome, no verdict box, no further-action note: those belong to
+    // markTheory, which holds the whole part's evidence. In a mixed part the
+    // machine holds only the keyed subset.
+    expect(Object.keys(markKeyedQuestions(mixedFields, answers)).sort()).toEqual([
+      'derivedValues',
+      'marks',
+    ]);
+  });
+
+  it('flags mandatory only when told which questions gate', () => {
+    const bare = markKeyedQuestions(mixedFields, answers);
+    expect(bare.marks.every((m) => !m.mandatory)).toBe(true);
+
+    const gated = markKeyedQuestions(mixedFields, answers, ['q7', 'q11']);
+    expect(gated.marks.filter((m) => m.mandatory).map((m) => m.fieldId)).toEqual(['q7', 'q11']);
+  });
+
+  it('is the exact arithmetic markTheory reports — the delegation cannot drift', () => {
+    const core = markKeyedQuestions(mixedFields, answers, ['q7']);
+    const whole = markTheory({ fields: mixedFields, values: answers, part: { mandatoryFieldIds: ['q7'] } });
+
+    expect(whole.marks).toEqual(core.marks);
+    expect(whole.derivedValues).toEqual(core.derivedValues);
+  });
+
+  it('does not mutate the values it was given', () => {
+    const values: Record<string, SubmissionValue> = { q7: 'b' };
+
+    markKeyedQuestions(mixedFields, values);
+
+    expect(values).toEqual({ q7: 'b' });
+  });
 });
 
 /* ------------------------------------------------------------------ *
@@ -678,5 +899,338 @@ describe('incorrectQuestionsNote', () => {
 
   it('is empty when nothing was missed, so the caller writes nothing', () => {
     expect(incorrectQuestionsNote(marksFor({ short: ['a'], long: ['a'] }), fields)).toBe('');
+  });
+});
+
+describe('deriveChecklistOutcome (B — a practical part auto-marks from its Yes/No checklist)', () => {
+  const yesno = (id: string): FormField => ({
+    id,
+    type: 'boolean_yes_no',
+    label: id,
+    required: true,
+    source: 'imported',
+  });
+  const verdict = (id: string, options: string[]): FormField => ({
+    id,
+    type: 'radio',
+    label: id,
+    required: false,
+    source: 'imported',
+    options,
+  });
+
+  const fields: FormField[] = [
+    header('prac'),
+    yesno('c1'),
+    yesno('c2'),
+    verdict('v', ['Candidate not yet Competent', 'Candidate Competent']),
+  ];
+  const manifest: AssessmentToolManifest = {
+    parts: [{ key: 'p', ordinal: 1, label: 'Practical', kind: 'practical', pathways: ['new'], startFieldId: 'prac' }],
+  };
+  const part = manifest.parts[0]!;
+  /** The author locked the verdict field to `auto` — the opt-in signal. */
+  const AUTO: Record<string, 'entry' | 'prefill' | 'auto'> = { v: 'auto' };
+
+  const derive = (
+    values: Record<string, SubmissionValue>,
+    source: Record<string, 'entry' | 'prefill' | 'auto'> | undefined = AUTO,
+  ) => deriveChecklistOutcome(fields, manifest, part, values, source);
+
+  it('is satisfactory and writes Competent when every criterion is Yes', () => {
+    const out = derive({ c1: 'Yes', c2: 'Yes' });
+    expect(out?.outcome).toBe('satisfactory');
+    expect(out?.derivedValues.v).toBe('Candidate Competent');
+  });
+
+  it('is not satisfactory and writes not-yet when any criterion is No', () => {
+    const out = derive({ c1: 'Yes', c2: 'No' });
+    expect(out?.outcome).toBe('not_satisfactory');
+    expect(out?.derivedValues.v).toBe('Candidate not yet Competent');
+  });
+
+  it('fails an untouched criterion — a blank box is not a pass', () => {
+    const out = derive({ c1: 'Yes' });
+    expect(out?.outcome).toBe('not_satisfactory');
+    expect(out?.derivedValues.v).toBe('Candidate not yet Competent');
+  });
+
+  it('leaves the part to the assessor when the verdict field is NOT locked to auto', () => {
+    expect(derive({ c1: 'Yes', c2: 'Yes' }, { v: 'entry' })).toBeNull();
+    // No fieldSource map at all — nothing is auto, so nothing derives. (Called
+    // directly: passing `undefined` through the helper would hit its default.)
+    expect(deriveChecklistOutcome(fields, manifest, part, { c1: 'Yes', c2: 'Yes' }, undefined)).toBeNull();
+  });
+
+  it('returns null when there are no Yes/No criteria to read', () => {
+    const noCriteria = [header('prac'), verdict('v', ['Candidate not yet Competent', 'Candidate Competent'])];
+    expect(deriveChecklistOutcome(noCriteria, manifest, part, {}, AUTO)).toBeNull();
+  });
+
+  it('does not count a keyed question’s ✓/✗ cell as a criterion', () => {
+    // A check_cross that is a question's outcomeTarget is furniture, not a
+    // pass/fail criterion — it must not gate the checklist verdict.
+    const withOutcomeCell: FormField[] = [
+      header('prac'),
+      yesno('c1'),
+      { id: 'q-out', type: 'check_cross', label: 'q-out', required: false, source: 'imported' },
+      {
+        id: 'q',
+        type: 'checkbox_group',
+        label: 'q',
+        required: true,
+        source: 'imported',
+        options: ['a'],
+        answerKey: ['a'],
+        outcomeTarget: { fieldId: 'q-out' },
+      },
+      verdict('v', ['Candidate not yet Competent', 'Candidate Competent']),
+    ];
+    // c1 = Yes and the q-out cell is left blank, but it is furniture — the part
+    // is still satisfactory on the one real criterion.
+    const out = deriveChecklistOutcome(withOutcomeCell, manifest, part, { c1: 'Yes' }, AUTO);
+    expect(out?.outcome).toBe('satisfactory');
+  });
+});
+
+/**
+ * The theory-side twin of the checklist derivation: a part that already knows
+ * its outcome writes the verdict radio the author locked to `auto`.
+ */
+describe('autoVerdictWrite', () => {
+  const fields: FormField[] = [
+    header('h'),
+    q('g1', ['a']),
+    outcome('g1-out'),
+    unkeyed('verdict', { type: 'radio', options: ['Satisfactory', 'Not Satisfactory'] }),
+  ];
+  const manifestWith = (fieldSource?: Record<string, 'entry' | 'prefill' | 'auto'>): AssessmentToolManifest => ({
+    parts: [
+      { key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'], startFieldId: 'h' },
+    ],
+    workflow: {
+      roles: ['candidate', 'assessor'],
+      sections: [
+        {
+          key: 's1',
+          ordinal: 1,
+          label: 'P1',
+          partKey: 'p1',
+          access: { candidate: 'fill', assessor: 'fill' },
+          ...(fieldSource ? { fieldSource } : {}),
+        },
+      ],
+    },
+  });
+  const part = (m: AssessmentToolManifest) => m.parts[0]!;
+
+  it('writes the matching half of the pair for each outcome', () => {
+    const m = manifestWith({ verdict: 'auto' });
+    const source = m.workflow!.sections[0]!.fieldSource;
+
+    expect(autoVerdictWrite(fields, m, part(m), 'satisfactory', source)).toEqual({
+      fieldId: 'verdict',
+      value: 'Satisfactory',
+    });
+    expect(autoVerdictWrite(fields, m, part(m), 'not_satisfactory', source)).toEqual({
+      fieldId: 'verdict',
+      value: 'Not Satisfactory',
+    });
+  });
+
+  it('writes nothing unless the author locked the field to auto — an ordinary verdict stays the assessor’s', () => {
+    const m = manifestWith();
+    expect(autoVerdictWrite(fields, m, part(m), 'satisfactory', undefined)).toBeNull();
+
+    const entry = manifestWith({ verdict: 'entry' });
+    expect(
+      autoVerdictWrite(fields, entry, part(entry), 'satisfactory', entry.workflow!.sections[0]!.fieldSource),
+    ).toBeNull();
+  });
+
+  it('writes nothing when the auto-locked field has no verdict pair to resolve', () => {
+    // Options that spell neither satisfactory nor not — a coin toss on the
+    // single most consequential cell is refused, same as the checklist path.
+    const odd: FormField[] = [
+      header('h'),
+      q('g1', ['a']),
+      outcome('g1-out'),
+      unkeyed('verdict', { type: 'radio', options: ['Alpha', 'Beta'] }),
+    ];
+    const m = manifestWith({ verdict: 'auto' });
+
+    expect(
+      autoVerdictWrite(odd, m, part(m), 'satisfactory', m.workflow!.sections[0]!.fieldSource),
+    ).toBeNull();
+  });
+});
+
+/*
+  Publish-time warnings for marking compositions that misbehave at runtime.
+  Both directions of each rule are pinned — presence for the trap, absence for
+  the closest legitimate configuration — because a warning that fires on every
+  healthy practical would train authors to ignore the one that matters.
+*/
+describe('markingCompositionWarnings', () => {
+  const boolBox = (id: string, label = id): FormField => ({
+    id,
+    type: 'boolean_yes_no',
+    label,
+    required: false,
+    source: 'imported',
+  });
+  const written = (id: string, target?: string): FormField => ({
+    id,
+    type: 'textarea',
+    label: id,
+    required: true,
+    source: 'imported',
+    modelAnswer: 'the guide',
+    ...(target ? { outcomeTarget: { fieldId: target } } : {}),
+  });
+  const verdict: FormField = {
+    id: 'verdict',
+    type: 'radio',
+    label: 'The Candidate’s responses were',
+    required: false,
+    source: 'imported',
+    options: ['Satisfactory', 'Not Satisfactory'],
+  };
+  const table: FormField = {
+    id: 'table',
+    type: 'repeating_group',
+    label: 'Outcome table',
+    required: false,
+    source: 'imported',
+  };
+
+  const manifestFor = (fields: FormField[], verdictAuto: boolean): AssessmentToolManifest => ({
+    parts: [
+      {
+        key: 'p1',
+        ordinal: 1,
+        label: 'Mixed Theory',
+        kind: 'theory',
+        pathways: ['new'],
+        startFieldId: fields[0]!.id,
+      },
+    ],
+    workflow: {
+      roles: ['candidate', 'assessor'],
+      sections: [
+        {
+          key: 'p1',
+          ordinal: 1,
+          label: 'Mixed Theory',
+          partKey: 'p1',
+          access: { candidate: 'fill', assessor: 'fill' },
+          ...(verdictAuto ? { fieldSource: { verdict: 'auto' as const } } : {}),
+        },
+      ],
+    },
+  });
+
+  it('(a) WARNS on an auto-locked verdict beside an untargeted Yes/No box, naming the box', () => {
+    // The #269 opt-in plus a stray self-answering box: hand-in reads the box
+    // as a checklist criterion, finds it untouched, and records Not
+    // Satisfactory before anyone marks.
+    const fields = [
+      header('h'),
+      written('w1', 'w1-out'),
+      outcome('w1-out'),
+      boolBox('stray', 'Radio check completed'),
+      verdict,
+    ];
+
+    const warnings = markingCompositionWarnings(manifestFor(fields, true), fields);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('Mixed Theory');
+    expect(warnings[0]).toContain('"Radio check completed"');
+    expect(warnings[0]).toContain('Not Satisfactory');
+  });
+
+  it('(a) stays SILENT when the verdict is the assessor’s to pick', () => {
+    const fields = [header('h'), written('w1', 'w1-out'), outcome('w1-out'), boolBox('stray'), verdict];
+
+    expect(markingCompositionWarnings(manifestFor(fields, false), fields)).toEqual([]);
+  });
+
+  it('(a) stays SILENT when every Yes/No box is some question’s target — the healthy mixed shape', () => {
+    const fields = [header('h'), written('w1', 'w1-out'), outcome('w1-out'), verdict];
+
+    expect(markingCompositionWarnings(manifestFor(fields, true), fields)).toEqual([]);
+  });
+
+  it('(b) WARNS when a written question’s mark is addressed at a table, naming the question', () => {
+    // The marking surface excludes tables (a table id is shared with the
+    // candidate’s own rows), so the assessor has no way to tick this cell.
+    const fields = [header('h'), written('w1', 'table'), table];
+
+    const warnings = markingCompositionWarnings(manifestFor(fields, false), fields);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('"w1"');
+    expect(warnings[0]).toContain('table cell');
+  });
+
+  it('(b) stays SILENT for a KEYED question in a table — the machine writes that cell, not a person', () => {
+    const fields = [header('h'), q('k1', ['a'], 'table'), table];
+
+    expect(markingCompositionWarnings(manifestFor(fields, false), fields)).toEqual([]);
+  });
+
+  it('(b) stays SILENT for a written question aimed at a standalone ✓/✗ box', () => {
+    const fields = [header('h'), written('w1', 'w1-out'), outcome('w1-out')];
+
+    expect(markingCompositionWarnings(manifestFor(fields, false), fields)).toEqual([]);
+  });
+});
+
+/**
+ * One attempt marks ONE part. A paper with several theory parts (the Track
+ * Dozer's General + two location papers) used to have any one attempt write
+ * ✓/✗ into the OTHER parts' printed cells, and their unanswered questions
+ * dragged this part's whole-part gate to not-satisfactory.
+ */
+describe('markTheory — scoped to its own part', () => {
+  const fields: FormField[] = [
+    header('h1'),
+    q('g1', ['a']),
+    outcome('g1-out'),
+    header('h2'),
+    q('r1', ['a']),
+    outcome('r1-out'),
+  ];
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      { key: 'general', ordinal: 1, label: 'General', kind: 'theory', pathways: ['new'], startFieldId: 'h1' },
+      { key: 'raw', ordinal: 2, label: 'Raw Materials', kind: 'theory', pathways: ['new'], startFieldId: 'h2' },
+    ],
+  };
+
+  it("never writes into another part's cells, and its gate ignores their questions", () => {
+    const out = markTheory({
+      fields,
+      values: { g1: ['a'] },
+      part: manifest.parts[0]!,
+      manifest,
+    });
+
+    // Only this part's question was marked…
+    expect(out.marks.map((m) => m.fieldId)).toEqual(['g1']);
+    expect(out.derivedValues['g1-out']).toBe(true);
+    // …the other part's cell is untouched, not crossed for a question the
+    // candidate never saw…
+    expect(out.derivedValues['r1-out']).toBeUndefined();
+    // …and the unanswered other-part question does not fail this part.
+    expect(out.outcome).toBe('satisfactory');
+  });
+
+  it('marks everything only when no manifest is given — the old single-part behaviour', () => {
+    const out = markTheory({ fields, values: { g1: ['a'] }, part: {} });
+
+    expect(out.marks.map((m) => m.fieldId)).toEqual(['g1', 'r1']);
+    expect(out.outcome).toBe('not_satisfactory');
   });
 });

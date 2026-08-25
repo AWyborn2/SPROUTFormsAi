@@ -15,11 +15,26 @@
  */
 ﻿import zlib from 'node:zlib';
 import { PDFDocument } from 'pdf-lib';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { GLYPH_KINDS, MARK_STYLES_DRAWN } from '@formai/shared';
 import type { FormField, GlyphKind, PageBox, SubmissionValue } from '@formai/shared';
 import { resolveMarkStyle, roundTripExport } from './round-trip.js';
 import { LETTERHEAD, makeFlatPdf, makeTwoPageFlatPdf } from './test-pdfs.js';
+
+/*
+  THE CLOCK IS FROZEN FOR THIS FILE. pdf-lib stamps CreationDate/ModDate from
+  the wall clock into every save, and several tests here compare two
+  separately-rendered documents byte-for-byte — render across a second
+  boundary and the metadata (and the xref offsets behind it) differ, failing
+  a comparison about MARKS on a diff about TIME. Only Date is faked, so
+  nothing that awaits real timers can hang.
+*/
+beforeAll(() => {
+  vi.useFakeTimers({ now: new Date('2026-01-05T09:00:00Z'), toFake: ['Date'] });
+});
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 /** Decode `<hex>` PDF string literals in a content stream to plain text. */
 function decodeHexLiterals(content: string): string {
@@ -1034,6 +1049,32 @@ describe('roundTripExport — a drawn signature', () => {
     });
 
     expect(bytesInclude(output, '/Image')).toBe(true);
+  });
+
+  it('embeds a drawn signature in a repeating-table cell, not the data-URL text', async () => {
+    // The logbook's signature column stores the same PNG blob a scalar field
+    // does; a table cell must draw it as an image, never print the data URL.
+    const field: FormField = {
+      id: 'log',
+      type: 'repeating_group',
+      label: 'Observation log',
+      required: false,
+      source: 'imported',
+      columns: [
+        { key: 'task', label: 'Task', type: 'text' },
+        { key: 'sig', label: 'Operator signature', type: 'signature' },
+      ],
+      sourcePosition: { ...GROUPED_POS },
+      geometry: groupedGeometry(['task', 'sig'], 1),
+    };
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [field],
+      values: { log: [{ task: 'Layer stripping', sig: REAL_PNG }] },
+    });
+
+    expect(bytesInclude(output, '/Image')).toBe(true);
+    expect(bytesInclude(output, 'iVBORw0KGgo')).toBe(false);
   });
 
   it('draws nothing at all for a malformed PNG', async () => {
@@ -2204,5 +2245,42 @@ describe('roundTripExport — the five glyphs that used to be ignored', () => {
       values: VALUES,
     });
     expect(strokes(bytes).length).toBeGreaterThan(strokes(plain).length);
+  });
+});
+
+// ── the revision identity line ──────────────────────────────────────────────
+
+describe('revision identity line', () => {
+  it('draws the pinned identity at the very foot of page 1', async () => {
+    const original = await makeFlatPdf();
+    const out = await roundTripExport({
+      originalPdf: original,
+      fields: [],
+      values: {},
+      revisionIdentity: { code: 'Rev 3', reviewedOn: '08/2026', note: 'Annual review' },
+    });
+
+    // AE4: the document-control identity the auditors recognise is on the page.
+    expect(bytesInclude(out, 'Rev 3 (reviewed 08/2026)')).toBe(true);
+    expect(bytesInclude(out, 'Annual review')).toBe(true);
+    // Below any printed margin - it cannot sit over a mapped box.
+    const line = drawnGlyphs(out).find((g) => g.text.includes('Rev 3'));
+    expect(line).toBeDefined();
+    expect(line!.y).toBeLessThan(10);
+  });
+
+  it('AE1: a version without one exports exactly as before', async () => {
+    const original = await makeFlatPdf();
+    const without = await roundTripExport({ originalPdf: original, fields: [], values: {} });
+    const withEmpty = await roundTripExport({
+      originalPdf: original,
+      fields: [],
+      values: {},
+      revisionIdentity: {},
+    });
+    // No identity and an empty identity both draw nothing.
+    expect(bytesInclude(without, 'reviewed')).toBe(false);
+    expect(bytesInclude(withEmpty, 'reviewed')).toBe(false);
+    expect(drawnGlyphs(without)).toEqual(drawnGlyphs(withEmpty));
   });
 });

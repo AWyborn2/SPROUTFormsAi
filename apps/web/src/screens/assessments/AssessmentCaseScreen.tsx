@@ -2,17 +2,110 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { CaseStateBadge } from '../statusBadges.js';
 import { Button, Icon, SignaturePad, useToast } from '@formai/ui';
-import { NS_DISPOSITIONS, type NotSatisfactoryDisposition, type PartState } from '@formai/shared';
+import {
+  NS_DISPOSITIONS,
+  durationUnitLong,
+  type NotSatisfactoryDisposition,
+  type PartState,
+} from '@formai/shared';
+import { ApiError } from '../../lib/data/api-client.js';
 import {
   useAssessmentCase,
+  useAssessmentTools,
   useExportCasePdf,
   useOpenAttempt,
   useRecordOutcome,
   useSession,
+  useSetCaseLocation,
   useSignOffCase,
 } from '../../lib/data/hooks.js';
 import { caseExportFilename, caseExportProblem } from '../../lib/case-export-problem.js';
-import type { CasePartView } from '../../lib/data/assessments.js';
+import type { CaseCourseState, CasePartView } from '../../lib/data/assessments.js';
+
+/**
+ * The course-material card: what the candidate reads before the parts below
+ * can start. State only — the reading itself happens on the player screen,
+ * which paces completion; this card shows where that has got to and, while
+ * the gate is shut, says so in words rather than letting the Start buttons
+ * fail mysteriously.
+ */
+function CourseCard({
+  caseId,
+  course,
+  caseOpen,
+}: {
+  caseId: string;
+  course: CaseCourseState;
+  caseOpen: boolean;
+}) {
+  if (course.missing) {
+    return (
+      <div
+        className="mt-4 rounded-md border p-[12px_14px]"
+        style={{ background: 'var(--warning-soft)', borderColor: 'var(--border-warning)' }}
+      >
+        <div className="flex items-center gap-2 text-[13px] font-semibold" style={{ color: 'var(--warning-text)' }}>
+          <Icon name="book-open" size={15} />
+          Course material unavailable
+        </div>
+        <p className="mt-1.5 text-[12.5px]" style={{ color: 'var(--warning-text)' }}>
+          The course package this assessment links to has been removed, so the reading
+          requirement is not being enforced. Relink one in the workflow editor.
+        </p>
+      </div>
+    );
+  }
+
+  const done = course.completedAt !== null;
+  const hasSlides = course.totalSlides !== null && course.totalSlides > 0;
+  return (
+    <div className="mt-4 rounded-md border border-border bg-surface-card p-[14px_16px]">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <Icon name="book-open" size={17} className="text-text-tertiary" />
+          <div>
+            <div className="text-[14px] font-semibold">{course.title ?? 'Course material'}</div>
+            <p className="mt-0.5 text-[12.5px] text-text-tertiary">
+              {done
+                ? `Read through${course.completedAt ? ` on ${new Date(course.completedAt).toLocaleDateString()}` : ''}.`
+                : hasSlides && course.viewedCount > 0
+                  ? `${course.viewedCount} of ${course.totalSlides} slides read.`
+                  : course.required
+                    ? 'Must be read through before the assessment can start.'
+                    : 'Recommended reading for this assessment.'}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2.5">
+          {done ? (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium"
+              style={{ background: 'var(--success-soft)', color: 'var(--success-text)' }}
+            >
+              <Icon name="circle-check" size={12} />
+              Complete
+            </span>
+          ) : (
+            course.required && (
+              <span
+                className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium"
+                style={{ background: 'var(--warning-soft)', color: 'var(--warning-text)' }}
+              >
+                <Icon name="lock" size={12} />
+                Required first
+              </span>
+            )
+          )}
+          <Link to={`/app/assessments/${caseId}/course`}>
+            <Button variant={done ? 'outline' : 'primary'} leadingIcon="book-open">
+              {done ? 'Reopen course' : caseOpen && course.viewedCount > 0 ? 'Continue reading' : 'Open course'}
+            </Button>
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /**
  * One assessment case: every part, its state, and the controls to resolve it.
@@ -42,6 +135,7 @@ const KIND_HINT: Record<string, string> = {
   theory: 'Auto-marked from the answer key. The outcome is computed, not entered.',
   practical: 'Observed demonstration. The assessor records the outcome.',
   logbook: 'Hours accumulate over weeks until the minimum is reached.',
+  declaration: 'Signed by the candidate. Completes on hand-in — nobody marks it.',
 };
 
 export function AssessmentCaseScreen() {
@@ -55,6 +149,8 @@ export function AssessmentCaseScreen() {
   const [signingOff, setSigningOff] = useState(false);
 
   const isCandidate = session?.role === 'candidate';
+  const tools = useAssessmentTools();
+  const setLocation = useSetCaseLocation(id ?? '');
 
   /**
    * Download the case as a filled copy of the original assessment.
@@ -122,9 +218,40 @@ export function AssessmentCaseScreen() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="font-heading text-[23px] font-bold">{c.toolName}</h1>
-          <p className="mt-1 text-[13.5px] text-text-tertiary">
-            {done} of {c.parts.length} parts satisfactory
-            {c.locationName ? ` · ${c.locationName}` : ''}
+          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[13.5px] text-text-tertiary">
+            <span>
+              {done} of {c.parts.length} parts satisfactory
+            </span>
+            {/*
+              WHERE THIS CASE IS ASSESSED decides what it requires — the
+              per-part Location rule, the assessor rule, the printed stream —
+              so staff can set it here on an OPEN case. A case opened before
+              the rule was enforced carries none and demands every part; its
+              fix is this select, not a new case.
+            */}
+            {!isCandidate && c.state === 'open' ? (
+              <select
+                aria-label="Where this case is assessed"
+                value={c.locationId ?? ''}
+                disabled={setLocation.isPending}
+                onChange={(e) =>
+                  setLocation.mutate(e.target.value || null, {
+                    onError: () =>
+                      toast({ variant: 'warning', message: "Couldn't move the case — try again." }),
+                  })
+                }
+                className="h-[24px] rounded-sm border border-border bg-surface-page px-1.5 text-[12px]"
+              >
+                <option value="">— no location —</option>
+                {(tools.data?.find((t) => t.id === c.toolId)?.locations ?? []).map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              c.locationName && <span>· {c.locationName}</span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2.5">
@@ -157,6 +284,10 @@ export function AssessmentCaseScreen() {
           <CaseStateBadge state={c.state} size="md" />
         </div>
       </div>
+
+      {c.course && (
+        <CourseCard caseId={c.id} course={c.course} caseOpen={c.state === 'open'} />
+      )}
 
       {c.prerequisiteWarnings.length > 0 && (
         <div
@@ -191,13 +322,24 @@ export function AssessmentCaseScreen() {
                 // The server authorises per workflow: a candidate may open the
                 // steps handed to THEM, and a part that is the assessor's says
                 // so instead of failing silently.
-                onError: () =>
+                onError: (err) => {
+                  const body =
+                    err instanceof ApiError ? (err.body as Record<string, unknown>) : {};
+                  if (body?.error === 'course_not_complete') {
+                    toast({
+                      variant: 'warning',
+                      message:
+                        'The course material must be read through before the assessment can start.',
+                    });
+                    return;
+                  }
                   toast({
                     variant: 'warning',
                     message: isCandidate
                       ? 'This step is opened by your assessor.'
                       : 'Couldn’t open an attempt for this part.',
-                  }),
+                  });
+                },
               })
             }
             opening={openAttempt.isPending}
@@ -222,6 +364,33 @@ export function AssessmentCaseScreen() {
  * server-stamped and never sent: it is a claim about when a judgement was made,
  * and the only moment we can vouch for is when the request arrived.
  */
+const SIGN_OFF_ERRORS: Record<string, string> = {
+  prerequisites_unsatisfied: 'The candidate has unsatisfied prerequisite competencies.',
+  case_closed: 'This case is already closed.',
+  candidate_cannot_sign_off: 'A candidate cannot sign off their own assessment.',
+  tool_missing: 'The assessment tool for this case no longer exists.',
+  parts_incomplete: 'Not all required parts are satisfactory yet.',
+  // The password step-up on a stored-mark sign-off — a wrong password is now
+  // normal usage, so it gets a real message rather than a raw code.
+  invalid_credentials: 'That password is not right. Re-enter it, or redraw your signature to sign without one.',
+  password_required: 'Enter your password to apply your saved signature, or redraw it to sign without one.',
+  too_many_attempts: 'Too many password attempts. Wait a few minutes and try again.',
+};
+
+function signOffErrorMessage(body: Record<string, unknown>): string {
+  const code = typeof body.error === 'string' ? body.error : '';
+  const base = SIGN_OFF_ERRORS[code] ?? `Sign-off refused (${code || 'unknown'}).`;
+  if (code === 'prerequisites_unsatisfied' && typeof body.detail === 'string') {
+    // Point the assessor at the fix: a lapsed licence is renewed — re-dated and
+    // its new evidence filed — from the person's profile, under Competencies.
+    return `${base} ${body.detail} Renew it from the candidate's profile, under Competencies, then sign off again.`;
+  }
+  if (code === 'parts_incomplete' && Array.isArray(body.outstanding)) {
+    return `${base} Outstanding: ${(body.outstanding as string[]).join(', ')}.`;
+  }
+  return base;
+}
+
 function SignOffDialog({
   caseId,
   toolName,
@@ -233,9 +402,29 @@ function SignOffDialog({
 }) {
   const signOff = useSignOffCase(caseId);
   const { toast } = useToast();
-  const [name, setName] = useState('');
-  const [signature, setSignature] = useState('');
+  const { data: session } = useSession();
+  /*
+    PREFILLED FROM THE ACCOUNT, so an assessor certifies without re-typing their
+    name or re-drawing a signature they have drawn before. The saved signature
+    (remembered from the last sign-off) paints onto the pad on mount. Both stay
+    editable — clicking Sign off is still the deliberate act — and a signature
+    drawn here is remembered for next time by the sign-off route.
+  */
+  const [name, setName] = useState(session?.userName ?? '');
+  const [signature, setSignature] = useState(session?.signature ?? '');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  /*
+    THE PREFILL IS A STORED CREDENTIAL. Submitting it unchanged applies the
+    saved mark, so the API demands the password in the same request (KTD1) —
+    shown here the moment the pad still holds the untouched prefill. Wiping
+    and redrawing is a fresh act and needs none; an account with no password
+    (invite-created) is never prompted, because the server stands its gate
+    down for it (R6).
+  */
+  const usingSaved =
+    !!signature && signature === (session?.signature ?? '') && !!session?.hasPassword;
 
   async function submit() {
     setError(null);
@@ -247,8 +436,16 @@ function SignOffDialog({
       setError('Draw or type your signature — it prints on the record.');
       return;
     }
+    if (usingSaved && !password) {
+      setError('Enter your password to apply your saved signature.');
+      return;
+    }
     try {
-      const res = await signOff.mutateAsync({ assessorName: name.trim(), signature });
+      const res = await signOff.mutateAsync({
+        assessorName: name.trim(),
+        signature,
+        ...(usingSaved ? { password } : {}),
+      });
       const granted = res.granted?.length
         ? ` Competency recorded: ${res.granted.join(', ')}.`
         : '';
@@ -260,7 +457,13 @@ function SignOffDialog({
       }
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not sign this case off.');
+      if (e instanceof ApiError && e.body && typeof e.body === 'object') {
+        const b = e.body as Record<string, unknown>;
+        const reason = signOffErrorMessage(b);
+        setError(reason);
+      } else {
+        setError(e instanceof Error ? e.message : 'Could not sign this case off.');
+      }
     }
   }
 
@@ -295,6 +498,25 @@ function SignOffDialog({
         <div className="mt-1">
           <SignaturePad value={signature} onChange={setSignature} aria-label="Assessor signature" />
         </div>
+
+        {usingSaved && (
+          <>
+            <label
+              htmlFor="so-password"
+              className="mt-3.5 block text-[12.5px] font-semibold text-text-secondary"
+            >
+              Your password — this applies your saved signature
+            </label>
+            <input
+              id="so-password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              className="mt-1 w-full rounded-md border border-border bg-surface-card p-[9px_11px] text-[13.5px]"
+            />
+          </>
+        )}
 
         {error && (
           <p className="mt-3 text-[12.5px]" style={{ color: 'var(--danger)' }}>
@@ -348,7 +570,9 @@ function PartCard({
           <div className="font-heading text-[15px] font-bold">{part.label}</div>
           <div className="mt-0.5 text-[12.5px] text-text-tertiary">
             {KIND_HINT[part.kind]}
-            {part.minimumHours ? ` Minimum ${part.minimumHours} hours.` : ''}
+            {part.minimumHours
+              ? ` Minimum ${part.minimumHours} ${durationUnitLong(part.durationUnit ?? 'hours')}.`
+              : ''}
           </div>
         </div>
         <span
@@ -402,7 +626,7 @@ function PartCard({
               mark it. Only the marking control below is assessor-only. */}
           {/* The whole point of the hand-in signal: an assessor can see which
               parts are waiting on them without opening each one. */}
-          {openAttempt?.submittedAt && !readOnly && (
+          {openAttempt?.submittedAt && !readOnly && part.kind !== 'declaration' && (
             <p className="inline-flex w-fit items-center gap-1.5 rounded-pill px-3 py-1.5 text-[12.5px] font-semibold"
               style={{ background: 'var(--warning-soft)', color: 'var(--warning-text)' }}>
               <Icon name="inbox" size={14} />
@@ -421,9 +645,22 @@ function PartCard({
             </Link>
           )}
 
-          {!readOnly && openAttempt && (
-            <OutcomeForm caseId={caseId} attemptId={openAttempt.id} kind={part.kind} selfMarking={part.selfMarking} />
-          )}
+          {/*
+            THE MARKING KIT APPEARS ONLY AT A REAL CHECKPOINT.
+
+            A declaration never shows it — signing completes it, and an
+            assessor's verdict on someone else's attestation is not a thing
+            this product records. A self-marking part resolves at hand-in, so
+            the kit appears only for an attempt PARKED awaiting a mark (handed
+            in before hand-in marking existed). Person-judged parts — the
+            paper's own assessor checkpoints — keep it as always.
+          */}
+          {!readOnly &&
+            openAttempt &&
+            part.kind !== 'declaration' &&
+            (!part.selfMarking || !!openAttempt.submittedAt) && (
+              <OutcomeForm caseId={caseId} attemptId={openAttempt.id} kind={part.kind} selfMarking={part.selfMarking} />
+            )}
 
           {/* Both sides get the button now: the server authorises per
               workflow, so a candidate opening a step handed to them succeeds
@@ -465,10 +702,12 @@ function PartCard({
  */
 function OutcomeForm({ caseId, attemptId, kind, selfMarking }: { caseId: string; attemptId: string; kind: string; selfMarking: boolean }) {
   const record = useRecordOutcome(caseId);
+  const { data: session } = useSession();
   const [outcome, setOutcome] = useState<'satisfactory' | 'not_satisfactory' | ''>('');
   const [disposition, setDisposition] = useState<NotSatisfactoryDisposition>('coaching_then_retry');
   const [reason, setReason] = useState('');
-  const [assessorName, setAssessorName] = useState('');
+  // Prefilled from the account so the assessor is not re-typing their own name.
+  const [assessorName, setAssessorName] = useState(session?.userName ?? '');
   const [error, setError] = useState<string | null>(null);
 
   const needsReason = outcome === 'not_satisfactory';

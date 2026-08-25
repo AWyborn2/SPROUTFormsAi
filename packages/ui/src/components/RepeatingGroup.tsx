@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { cn } from '../utils/cn.js';
+import { Dialog } from './Dialog.js';
 import { Icon } from './Icon.js';
+import { SignaturePad } from './SignaturePad.js';
 
 /**
  * A column in a repeating group. Kept local to @formai/ui (structurally
@@ -22,6 +24,12 @@ export interface RepeatingGroupColumn {
    * direct edits, exactly as answer-set semantics are resolved by the caller.
    */
   computed?: boolean;
+  /**
+   * `date` / `time` cells only — seed with today's date / the current time when
+   * a new row is added, and offer a one-tap re-stamp button. Editable, not
+   * locked. Structurally compatible with @formai/shared's `RepeatingColumn`.
+   */
+  autoStamp?: boolean;
 }
 
 /**
@@ -94,13 +102,28 @@ function emptyRow(
   for (const c of columns) {
     // A member of an answer set starts null, never false: false is "not this
     // option", and a whole row of falses is indistinguishable from an answer.
-    row[c.key] = groupedKeys.has(c.key)
-      ? null
-      : // A check/cross cell seeds `null` in EVERY mode, unlike yes/no. Its
-        // `false` means "assessed and failed" — seeding it would record a
-        // fail on every untouched row of an audit table, which is the one
-        // value this type must never invent.
-        c.type === 'check_cross'
+    if (groupedKeys.has(c.key)) {
+      row[c.key] = null;
+      continue;
+    }
+    // Auto-stamp date/time columns the moment the row exists: the entry is
+    // being added to log something happening now, so the value the filler would
+    // type is the one the app already holds. Left editable for honest
+    // back-dating of a prior shift.
+    if (c.autoStamp && c.type === 'date') {
+      row[c.key] = todayISODate();
+      continue;
+    }
+    if (c.autoStamp && c.type === 'time') {
+      row[c.key] = currentTimeHHMM();
+      continue;
+    }
+    // A check/cross cell seeds `null` in EVERY mode, unlike yes/no. Its
+    // `false` means "assessed and failed" — seeding it would record a fail on
+    // every untouched row of an audit table, which is the one value this type
+    // must never invent.
+    row[c.key] =
+      c.type === 'check_cross'
         ? null
         : c.type === 'boolean_yes_no'
           ? fixedMode
@@ -528,6 +551,16 @@ export function currentTimeHHMM(): string {
 }
 
 /**
+ * Today's date as `YYYY-MM-DD` in LOCAL time — the native date input's value
+ * format. Local, not `toISOString()`: an evening entry in a positive-UTC-offset
+ * zone would otherwise stamp tomorrow, dating a shift a day out.
+ */
+export function todayISODate(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
+/**
  * Two-state column types and the labels their buttons carry.
  *
  * `check_cross` exists so an audit's pass/fail reads as pass/fail rather than
@@ -567,6 +600,20 @@ function RepeatingCell({
     exactly as they do today.
   */
   const explicitPair = column.type === 'check_cross' || (column.type === 'boolean_yes_no' && explicitYesNo);
+
+  // A signature column is a real drawn signature, not a typed name — a compact
+  // cell that opens a full pad on tap, so a row on a phone stays legible.
+  if (column.type === 'signature') {
+    return (
+      <SignatureCell
+        value={typeof value === 'string' ? value : ''}
+        label={column.label}
+        readOnly={readOnly}
+        invalid={invalid}
+        onChange={onChange}
+      />
+    );
+  }
 
   if (readOnly) {
     const blank = value === null || value === undefined || value === '';
@@ -671,6 +718,35 @@ function RepeatingCell({
     );
   }
 
+  if (column.type === 'date') {
+    // The date twin of the time cell: the value auto-seeds to today when the
+    // row is added (see `emptyRow`), and this button re-stamps it in one tap
+    // after any manual change. Present on every date cell, exactly as "Now" is
+    // on every time cell.
+    return (
+      <span className="flex items-center gap-1">
+        <input
+          type="date"
+          value={String(value ?? '')}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={column.label}
+          aria-invalid={invalid || undefined}
+          className={cn(cellClass, 'min-w-[130px]')}
+        />
+        <button
+          type="button"
+          onClick={() => onChange(todayISODate())}
+          aria-label={`Stamp today's date: ${column.label}`}
+          title="Stamp today's date"
+          className="flex h-9 flex-none items-center gap-1 rounded-md border border-border-strong bg-surface-card px-2 text-[12px] font-semibold text-text-secondary hover:bg-surface-hover focus-visible:shadow-focus"
+        >
+          <Icon name="calendar" size={13} />
+          Today
+        </button>
+      </span>
+    );
+  }
+
   if ((column.type === 'dropdown' || column.type === 'radio') && column.options) {
     return (
       <select
@@ -699,5 +775,100 @@ function RepeatingCell({
       aria-invalid={invalid || undefined}
       className={cellClass}
     />
+  );
+}
+
+/**
+ * A signature cell: a compact preview that opens a full drawing pad on tap.
+ *
+ * The stored value is a PNG data URL — the same shape a standalone signature
+ * field uses, so the export prints it like any other signature. A table cell is
+ * far too small to draw in, so the drawing happens in a modal and the cell shows
+ * a thumbnail of what was captured (or a "Tap to sign" prompt when empty). The
+ * pad only commits on Save, so cancelling a stray stroke leaves the row's
+ * signature as it was.
+ */
+function SignatureCell({
+  value,
+  label,
+  readOnly,
+  invalid,
+  onChange,
+}: {
+  value: string;
+  label: string;
+  readOnly?: boolean;
+  invalid?: boolean;
+  onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const signed = value.startsWith('data:image');
+
+  if (readOnly) {
+    return signed ? (
+      <img src={value} alt={label} className="h-9 max-w-[150px] object-contain" />
+    ) : (
+      <span className="block px-1 text-[13px] text-text-tertiary">—</span>
+    );
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label={signed ? `${label} — signed, tap to change` : `${label} — tap to sign`}
+        aria-invalid={invalid || undefined}
+        onClick={() => {
+          setDraft(value);
+          setOpen(true);
+        }}
+        className={cn(
+          'flex h-9 w-full min-w-[120px] items-center justify-center gap-1.5 rounded-md border px-2 text-[12.5px] font-semibold focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus',
+          signed
+            ? 'border-border-strong bg-surface-card text-text-primary'
+            : 'border-dashed border-border-strong bg-surface-card text-text-tertiary hover:bg-surface-hover',
+        )}
+      >
+        {signed ? (
+          <img src={value} alt="" className="h-7 max-w-[130px] object-contain" />
+        ) : (
+          <>
+            <Icon name="pen-line" size={13} />
+            Tap to sign
+          </>
+        )}
+      </button>
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title={label}
+        description="Draw the signature, then save it into the row."
+        size="md"
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="rounded-md border border-border-strong bg-surface-card px-3.5 py-2 text-[13px] font-semibold text-text-secondary hover:bg-surface-hover"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onChange(draft);
+                setOpen(false);
+              }}
+              className="rounded-md bg-accent px-3.5 py-2 text-[13px] font-semibold text-[#12321f] hover:brightness-95"
+            >
+              Save signature
+            </button>
+          </>
+        }
+      >
+        <SignaturePad value={draft} onChange={setDraft} aria-label={label} />
+      </Dialog>
+    </>
   );
 }

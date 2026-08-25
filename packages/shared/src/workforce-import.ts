@@ -580,6 +580,10 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
     if (!placementResult.ok) {
       const code = placementResult.error.code;
       if (code === 'no_location') reject('missing_location');
+      // Unreachable in practice — Location names resolve against the active
+      // map above, so an unknown/retired one rejected already — but the
+      // validator's code must not fall through to a lying reason (U5).
+      else if (code === 'unknown_location') reject('unknown_location', placementResult.error.subjectId);
       else if (code === 'unknown_role') reject('unknown_role', placementResult.error.subjectId);
       else if (code === 'role_not_offered') reject('role_not_offered', placementResult.error.subjectId);
       else reject('too_many_roles', placementResult.error.subjectId);

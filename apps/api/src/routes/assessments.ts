@@ -1,26 +1,41 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import {
   applyCalcs,
   ASSESSMENT_PATHWAYS,
+  PART_KINDS,
   NS_DISPOSITIONS,
   caseProgress,
   competencyCurrency,
+  completionTickRows,
   countsAsHeld,
   fieldsInPart,
   fieldsInSection,
   isCaseCompetent,
   isTerminalCaseState,
+  nextStepAfter,
+  deriveChecklistOutcome,
   isSelfMarking,
   moreCoachingRequired,
   type AssessmentCaseState,
+  assessorMarkBoxIds,
+  autoVerdictWrite,
+  casePartKeys,
+  type LocationPartKeys,
   logbookRows,
+  prerequisiteCompetencyIds,
+  reducePrerequisiteClasses,
+  logbookDurationRows,
+  markKeyedQuestions,
   markTheory,
+  markingCompositionWarnings,
+  SELF_ANSWERING_TYPES,
   ACCESS_LEVELS,
   VALUE_SOURCES,
   WORKFLOW_ROLES,
+  STAFF_WORKFLOW_ROLES,
   orderedParts,
   requiredParts,
   resolveAssessorRequirements,
@@ -32,17 +47,25 @@ import {
   profilePrefillValues,
   validateProfilePrefill,
   validatePrerequisiteChecks,
+  validatePartCompletionMarks,
+  validatePartOutcomeMarks,
+  validatePathwayMarks,
+  validateSignOffMarks,
   type ProfilePrefillSource,
   sectionForPart,
   workflowOf,
   writableFieldIds,
   type WorkflowRole,
+  missingDeclarationFields,
   streamCheckWarning,
   totalLoggedHours,
   stripMarkingSecrets,
   theoryRenderingOf,
+  theoryRetryOf,
+  unplacedMarkDestinations,
   validateAnswerKeys,
   validateManifest,
+  REVISION_IDENTITY_LIMITS,
   type AssessmentPart,
   type AssessmentPathway,
   type AssessmentToolManifest,
@@ -51,16 +74,29 @@ import {
   type RepeatingRowValue,
   type SubmissionValue,
   THEORY_RENDERINGS,
+  THEORY_RETRY_MODES,
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
+import { mintCourseContentPath } from './courses.js';
+import { comparePassword } from '../auth/verify-password.js';
+import {
+  recordConfirmFailure,
+  recordConfirmSuccess,
+  rejectIfLocked,
+} from '../auth/confirm-throttle.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission, permissionScope } from '../lib/permissions.js';
-import { heldCompetencyStates } from '../lib/assignment.js';
+import { assignmentCaseValues, heldCompetencyStates } from '../lib/assignment.js';
+import {
+  computeAwardLinkChange,
+  computeAwardRelinkChange,
+  NON_TERMINAL_STATES,
+} from '../lib/requirement-change.js';
 import { identifyMember, loadDisplayIdentities } from '../lib/display-identity.js';
 import { recordAudit } from '../audit/record.js';
 import { grantCompetency, revokeGrantsFromCase } from '../lib/competency-grant.js';
-import { CaseExportError, exportCasePdf } from '../pdf/index.js';
+import { CaseExportError, exportCasePdf, withDerivedMarks, type CaseAttemptRecord } from '../pdf/index.js';
 import { getStorageClient } from '../storage/index.js';
 import { db } from '../db.js';
 
@@ -93,6 +129,8 @@ const GATE = [requireTenant, requirePlanFeature('assessments')] as const;
 // ── shared helpers ──────────────────────────────────────────────────────────
 
 type Database = NonNullable<typeof db>;
+/** The root client OR an open transaction — what a read-only helper accepts. */
+type Reader = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /*
   The Admin access level (R73). Declaring the parts rule reads the organisation's
@@ -104,7 +142,9 @@ function isAdmin(role: string): boolean {
   return role === 'admin' || role === 'owner';
 }
 
-async function loadTool(database: Database, toolId: string, orgId: string) {
+// `Reader`, not `Database`: the award apply re-reads the tool INSIDE its own
+// transaction, where the handle is a transaction rather than the root client.
+async function loadTool(database: Reader, toolId: string, orgId: string) {
   return (
     (await database.query.assessmentTools.findFirst({
       where: and(eq(schema.assessmentTools.id, toolId), eq(schema.assessmentTools.orgId, orgId)),
@@ -125,6 +165,161 @@ async function attemptsFor(database: Database, caseId: string) {
     where: eq(schema.assessmentPartAttempts.caseId, caseId),
     orderBy: (a, { asc }) => [asc(a.partKey), asc(a.attemptNumber)],
   });
+}
+
+/** The org's self-assessment policy — one column, read where it gates. */
+async function selfAssessmentAllowed(database: Database, orgId: string): Promise<boolean> {
+  const org = await database.query.organizations.findFirst({
+    where: eq(schema.organizations.id, orgId),
+  });
+  return org?.allowSelfAssessment ?? false;
+}
+
+/**
+ * The org's labelled-sign-off policy: whether on-case staff may apply a
+ * supervisor's or SME's signature on their behalf (defaults on). Off means
+ * those parts wait for that person's own login — a capability not yet built,
+ * so off currently just leaves supervisor/SME-assigned fields to nobody, as
+ * before this feature.
+ */
+async function labelledSignoffAllowed(database: Database, orgId: string): Promise<boolean> {
+  const org = await database.query.organizations.findFirst({
+    where: eq(schema.organizations.id, orgId),
+  });
+  return org?.allowLabelledSignoff ?? true;
+}
+
+/**
+ * The workflow parties whose fill access this caller holds on a part.
+ *
+ * The candidate is only ever the candidate. On-case STAFF hold the assessor's
+ * access and — when the org allows labelled sign-off — the supervisor's and
+ * SME's too, so one person can apply those signatures the way they sign the
+ * paper on someone's behalf. A self-assessor is both the candidate and staff.
+ * With labelled sign-off off, staff resolve to the assessor alone, so a
+ * supervisor/SME field is left to nobody rather than signed by the wrong party.
+ */
+export function fillParties(opts: {
+  party: WorkflowRole;
+  selfAssessing: boolean;
+  labelled: boolean;
+}): WorkflowRole[] {
+  const staff: WorkflowRole[] = opts.labelled ? [...STAFF_WORKFLOW_ROLES] : ['assessor'];
+  if (opts.selfAssessing) return ['candidate', ...staff];
+  if (opts.party === 'candidate') return ['candidate'];
+  return staff;
+}
+
+/**
+ * Whether this caller is SELF-ASSESSING on this case: they are the candidate,
+ * they hold a staff role, and the organisation permits it. A candidate-role
+ * login never qualifies — the policy is about qualified people running their
+ * own assessment, not about candidates marking themselves.
+ */
+async function isSelfAssessing(
+  database: Database,
+  tenant: { userId: string; orgId: string; role: string },
+  candidateUserId: string,
+): Promise<boolean> {
+  if (tenant.userId !== candidateUserId) return false;
+  if (tenant.role === 'candidate') return false;
+  return selfAssessmentAllowed(database, tenant.orgId);
+}
+
+/**
+ * Field access for a self-assessor: the UNION of what the candidate and the
+ * assessor may see and write. The workflow split one document between two
+ * people; with the org's policy putting one person on both ends of it, a
+ * field either side could touch is theirs — hidden only where hidden from
+ * BOTH. `auto` and `prefill` sources stay locked exactly as they are for
+ * either party alone, because `partFieldAccess` already excludes them from
+ * `writable` per party and a union of two exclusions is still an exclusion.
+ */
+function unionPartFieldAccess(
+  workflow: ReturnType<typeof workflowOf>,
+  partKey: string,
+  partFields: readonly FormField[],
+  parties: readonly WorkflowRole[],
+): { hidden: string[]; writable: string[] } {
+  const per = parties.map((p) => partFieldAccess(workflow, partKey, partFields, p));
+  const hidden = (per[0]?.hidden ?? []).filter((id) => per.every((a) => a.hidden.includes(id)));
+  const writable = [...new Set(per.flatMap((a) => a.writable))];
+  return { hidden, writable };
+}
+
+/**
+ * The MARKING SURFACE of one part — what staff may still write on an attempt
+ * that is handed in but not yet marked.
+ *
+ * A submitted attempt's ANSWERS are frozen ("submitted" means the answers stop
+ * moving while the assessor reads them), but marking a mixed part IS writing:
+ * the assessor ticks each written question's ✓/✗ against its model answer,
+ * then signs the part. So the writable set narrows to exactly the marks:
+ *
+ * - the assessor-writable `entry` fields that are SELF-ANSWERING
+ *   (`check_cross` / `boolean_yes_no`) — the unkeyed ✓/✗ cells
+ *   `assessorMarkBoxIds` left `entry`, and any practical-style tick boxes.
+ *   Self-answering by TYPE is the fence: a textarea the workflow happens to
+ *   let the assessor fill is still the candidate's evidence once handed in.
+ *   AND NOT CANDIDATE-WRITABLE: a self-answering box the workflow lets the
+ *   CANDIDATE fill is one of their answers (an unkeyed yes/no question), not
+ *   a mark — leaving it here let staff flip a candidate's own recorded answer
+ *   on a frozen attempt. Assessor-only boxes stay, which is what the builder
+ *   emits for every unkeyed question's cell (`candidate: 'view'`).
+ * - the part's own declared furniture — assessor name, signed date, further
+ *   action — which is how the assessor signs what they just marked. Declared
+ *   ids only, same doctrine as `autoSourcesFor`; each still has to be
+ *   workflow-writable, because callers INTERSECT this with the party's
+ *   writable set rather than replacing it.
+ *
+ * Served by the fill route as `writableFieldIds` in that state and enforced by
+ * the PATCH gate, so the surface and the write rule cannot disagree.
+ */
+function markingSurfaceIds(
+  workflow: ReturnType<typeof workflowOf>,
+  part: AssessmentPart,
+  partFields: readonly FormField[],
+): Set<string> {
+  const assessorWritable = new Set(
+    partFieldAccess(workflow, part.key, partFields, 'assessor').writable,
+  );
+  const candidateWritable = new Set(
+    partFieldAccess(workflow, part.key, partFields, 'candidate').writable,
+  );
+  const out = new Set<string>();
+  for (const f of partFields) {
+    if (
+      assessorWritable.has(f.id) &&
+      !candidateWritable.has(f.id) &&
+      SELF_ANSWERING_TYPES.includes(f.type)
+    ) {
+      out.add(f.id);
+    }
+  }
+  for (const id of [part.assessorNameFieldId, part.signedDateFieldId, part.furtherActionFieldId]) {
+    if (id) out.add(id);
+  }
+  return out;
+}
+
+/**
+ * What THIS case requires — the pathway's parts narrowed by the tool's
+ * per-Location rule for the case's Location. The ONE derivation every
+ * progress read shares (dashboard, case screen, fill view, marking,
+ * sign-off, export), so no two surfaces can disagree about whether a
+ * Location-excluded part is owed. A case with no Location, or one the rule
+ * does not list, requires everything — the safe direction (R75).
+ */
+function applicablePartsFor(
+  tool: { manifest: AssessmentToolManifest; locationPartKeys: LocationPartKeys | null },
+  row: { pathway: string; locationId: string | null },
+): Set<string> {
+  return casePartKeys(
+    tool.manifest,
+    row.pathway as AssessmentPathway,
+    tool.locationPartKeys ?? {},
+    row.locationId,
+  );
 }
 
 /** The repeating table a logbook part totals its hours from, on one version. */
@@ -225,7 +420,7 @@ async function carryForwardTheory(
   const fields = await fieldsForVersion(database, last.templateVersionId);
   if (!isSelfMarking(fields, input.manifest, input.part.key)) return undefined;
 
-  const { marks } = markTheory({ fields, values: last.values, part: input.part });
+  const { marks } = markTheory({ fields, values: last.values, part: input.part, manifest: input.manifest });
   const values: Record<string, SubmissionValue> = {};
   for (const mark of marks) {
     if (!mark.correct) continue;
@@ -344,6 +539,24 @@ function toAttemptFacts(rows: { partKey: string; attemptNumber: number; outcome:
   }));
 }
 
+/**
+ * Whether a case is waiting on an ASSESSOR to act — the one thing an assessor
+ * opens the case list to find.
+ *
+ * Two ways it happens: every required part has passed and the case sits in
+ * `awaiting_sign_off` for final approval, or a part has been handed in
+ * (`submittedAt` set) but not yet marked (`outcome` still null) — the marking a
+ * candidate cannot do for themselves. A part that auto-marked at hand-in already
+ * carries an outcome, so it is not a person's pending work and is not counted.
+ */
+export function caseAwaitsAssessor(
+  state: string,
+  attempts: readonly { submittedAt: unknown; outcome: string | null }[],
+): boolean {
+  if (state === 'awaiting_sign_off') return true;
+  return attempts.some((a) => a.submittedAt !== null && a.outcome === null);
+}
+
 // ── assessment tools ────────────────────────────────────────────────────────
 
 /*
@@ -362,15 +575,83 @@ const declaredMarkSchema = z.object({
   value: z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(z.string())]),
 });
 
+/*
+  Named once and used by BOTH the create body and the workflow PATCH, because
+  the two accepting different shapes is how `overallNotSatisfactory` went
+  missing: the manifest type had it, the exporter wrote it, and this schema
+  silently STRIPPED it — so every tool published over HTTP lost the "not yet
+  Competent" box while the same tool authored by script kept it.
+*/
+const signOffSchema = z.object({
+  assessorNameFieldId: z.string().optional(),
+  assessorSignatureFieldId: z.string().optional(),
+  signedDateFieldId: z.string().optional(),
+  overallSatisfactory: declaredMarkSchema.optional(),
+  overallNotSatisfactory: declaredMarkSchema.optional(),
+  moreCoachingRequiredYes: declaredMarkSchema.optional(),
+  moreCoachingRequiredNo: declaredMarkSchema.optional(),
+});
+
+const partCompletionMarkSchema = z.object({
+  partKey: z.string().min(1),
+  fieldId: z.string().min(1),
+  rowIndex: z.number().int().min(0),
+  columnKey: z.string().min(1),
+});
+
+/** The case's pathway → the printed box that says so. Partial by design. */
+const pathwayMarksSchema = z.record(z.enum(ASSESSMENT_PATHWAYS), declaredMarkSchema);
+
+/**
+ * The manifest's pointer at a hosted course package (the pre-assessment
+ * reading). Whether the id names a real, active course is checked where the
+ * link is SET — the PATCH below — not here: schema-level existence checks
+ * cannot reach the database.
+ */
+const courseLinkSchema = z.object({
+  courseId: z.string().uuid(),
+  required: z.boolean(),
+});
+
+/*
+  One printed box, answered by ANY of the listed classes. `competencyId` is the
+  legacy single-class spelling and still accepted — a manifest saved before
+  boxes took families must round-trip untouched. At-least-one is
+  `validatePrerequisiteChecks`' job, which both save paths already run.
+*/
+const prerequisiteCheckSchema = z.object({
+  fieldId: z.string().min(1),
+  competencyId: z.string().min(1).optional(),
+  competencyIds: z.array(z.string().min(1)).optional(),
+});
+
 const partSchema = z.object({
   key: z.string().min(1),
   ordinal: z.number().int().positive(),
   label: z.string().min(1),
-  kind: z.enum(['theory', 'practical', 'logbook']),
+  // From the shared constant, never a re-typed list — a kind this schema
+  // omits is silently rejected over HTTP while the shared model accepts it,
+  // which is exactly how `candidateNameFieldId` once went missing.
+  kind: z.enum(PART_KINDS),
   pathways: z.array(z.enum(ASSESSMENT_PATHWAYS)).min(1),
   startFieldId: z.string().min(1),
   minimumHours: z.number().positive().optional(),
+  // The unit the minimums and logged Duration are read in. Omitted = hours.
+  durationUnit: z.enum(['hours', 'minutes']).optional(),
   durationColumnKey: z.string().optional(),
+  taskMinimums: z
+    .object({
+      columnKey: z.string().min(1),
+      targets: z.array(z.object({ value: z.string().min(1), minimumHours: z.number().positive() })),
+    })
+    .optional(),
+  logbookRouting: z
+    .object({
+      sourceFieldId: z.string().min(1),
+      columnKey: z.string().min(1),
+      routes: z.array(z.object({ value: z.string().min(1), fieldId: z.string().min(1) })),
+    })
+    .optional(),
   checklistMark: declaredMarkSchema.optional(),
   assessorNameFieldId: z.string().optional(),
   signedDateFieldId: z.string().optional(),
@@ -477,6 +758,13 @@ interface PrerequisiteResult {
  * mid-programme shows expired the next time anyone looks — a stored verdict is
  * a verdict about the day it was written. Revocation is decisive over the date
  * (R106): a revoked grant is not a current one whatever its expiry says.
+ *
+ * A check may accept SEVERAL classes ("Driver's Licence C or higher" is a
+ * family, and the register keeps each class as its own competency): the box
+ * is satisfied by ANY current one, and the result names the class that
+ * answered it. An unsatisfied multi-class check names every accepted class,
+ * so the sign-off refusal reads "C / LR / HR: missing" rather than blaming
+ * one class the candidate never needed to hold.
  */
 async function evaluatePrerequisites(
   database: NonNullable<typeof db>,
@@ -487,7 +775,7 @@ async function evaluatePrerequisites(
   const checks = manifest.prerequisiteChecks ?? [];
   if (checks.length === 0) return [];
 
-  const ids = [...new Set(checks.map((c) => c.competencyId))];
+  const ids = [...new Set(checks.flatMap((c) => prerequisiteCompetencyIds(c)))];
   const [competencies, holders] = await Promise.all([
     database.query.competencies.findMany({
       where: and(eq(schema.competencies.orgId, orgId), inArray(schema.competencies.id, ids)),
@@ -503,16 +791,14 @@ async function evaluatePrerequisites(
   const byId = new Map(competencies.map((c) => [c.id, c]));
   const now = new Date();
 
-  return checks.map((check) => {
-    const competency = byId.get(check.competencyId);
-    const held = holders.find((h) => h.competencyId === check.competencyId);
-    const base = {
-      fieldId: check.fieldId,
-      competencyId: check.competencyId,
-      competencyName: competency?.name ?? 'Unknown competency',
-    };
+  const evaluateOne = (competencyId: string) => {
+    const competency = byId.get(competencyId);
+    const held = holders.find((h) => h.competencyId === competencyId);
+    const base = { competencyId, competencyName: competency?.name ?? 'Unknown competency' };
     if (!held) return { ...base, satisfied: false, status: 'missing' as const, expiresAt: null };
-    if (held.revokedAt) return { ...base, satisfied: false, status: 'revoked' as const, expiresAt: null };
+    if (held.revokedAt) {
+      return { ...base, satisfied: false, status: 'revoked' as const, expiresAt: null };
+    }
     const status = competencyStatus(
       { grantedAt: held.grantedAt, ...(held.expiresAt ? { expiresAt: held.expiresAt } : {}) },
       { validForMonths: competency?.validForMonths, gracePeriodDays: competency?.gracePeriodDays },
@@ -524,7 +810,14 @@ async function evaluatePrerequisites(
       status,
       expiresAt: held.expiresAt ? held.expiresAt.toISOString() : null,
     };
-  });
+  };
+
+  return checks.map((check) => ({
+    fieldId: check.fieldId,
+    // The any-of decision is shared — see `reducePrerequisiteClasses` for
+    // which class answers the box and which failure surfaces when none does.
+    ...reducePrerequisiteClasses(prerequisiteCompetencyIds(check).map(evaluateOne)),
+  }));
 }
 
 /** The tool's declared defaults for these fields — served under stored values. */
@@ -550,12 +843,51 @@ const updateToolBody = z.object({
    */
   profilePrefill: z.record(z.string(), z.enum(PROFILE_PREFILL_KEYS)).nullable().optional(),
   /** Same tri-state as profilePrefill: absent keeps, null clears, array replaces. */
-  prerequisiteChecks: z
-    .array(z.object({ fieldId: z.string().min(1), competencyId: z.string().min(1) }))
-    .nullable()
-    .optional(),
+  prerequisiteChecks: z.array(prerequisiteCheckSchema).nullable().optional(),
   /** Tool-declared default answers. Same tri-state; values stored opaque. */
   fieldDefaults: z.record(z.string(), z.unknown()).nullable().optional(),
+  /**
+   * The methods-checklist mapping: which printed row ticks when which part
+   * passes. Same tri-state — the array replaces, null clears, absent keeps —
+   * so the editor can finally SEE and CORRECT what publish only guessed at.
+   */
+  partCompletionMarks: z.array(partCompletionMarkSchema).nullable().optional(),
+  /**
+   * The front page's certification block, replaced whole. The editor seeds its
+   * draft from the stored block and sends it back with the result pair
+   * repointed, so the name/signature/date pointers and the coaching pair ride
+   * through a save untouched.
+   */
+  signOff: signOffSchema.nullable().optional(),
+  /** The pathway → printed-box map. Same tri-state as everything above. */
+  pathwayMarks: pathwayMarksSchema.nullable().optional(),
+  /**
+   * The parts' printed verdict pairs — "The Candidate's responses were:
+   * Satisfactory / Not Satisfactory" — repointed per part. An entry replaces
+   * BOTH of the named part's marks (an absent half clears it); parts not
+   * named keep theirs; null clears every part's pair. The same pair mapped on
+   * several parts is the multi-theory paper's spelling: each applicable part
+   * writes it at its own marking, so whichever papers the case sits stamp
+   * the one printed box.
+   */
+  partOutcomeMarks: z
+    .array(
+      z.object({
+        partKey: z.string().min(1),
+        outcomeSatisfactory: declaredMarkSchema.optional(),
+        outcomeNotSatisfactory: declaredMarkSchema.optional(),
+      }),
+    )
+    .nullable()
+    .optional(),
+  /**
+   * The pre-assessment course link. Same tri-state as everything above —
+   * absent keeps, null clears, an object replaces — and setting one is
+   * validated against the org's actual courses below, because a link to a
+   * course that does not exist would read as "configured" in the builder
+   * while gating nothing at runtime.
+   */
+  course: courseLinkSchema.nullable().optional(),
 });
 
 const toolBody = z.object({
@@ -575,6 +907,10 @@ const toolBody = z.object({
     */
     candidateNameFieldId: z.string().optional(),
     candidateSignatureFieldId: z.string().optional(),
+    // Named for the same reason as every optional above: an unlisted manifest
+    // property is silently STRIPPED, and a builder that appeared to save the
+    // completion mapping would publish a checklist that never ticks.
+    partCompletionMarks: z.array(partCompletionMarkSchema).optional(),
     /*
       Who does what, and when. The same trap this file warns about above: a
       manifest property this schema does not name is silently STRIPPED, so a
@@ -588,16 +924,20 @@ const toolBody = z.object({
       to save a one-question-per-screen tool would publish a stacked one.
     */
     theoryRendering: z.enum(THEORY_RENDERINGS).optional(),
-    signOff: z
-      .object({
-        assessorNameFieldId: z.string().optional(),
-        assessorSignatureFieldId: z.string().optional(),
-        signedDateFieldId: z.string().optional(),
-        overallSatisfactory: declaredMarkSchema.optional(),
-        moreCoachingRequiredYes: declaredMarkSchema.optional(),
-        moreCoachingRequiredNo: declaredMarkSchema.optional(),
-      })
-      .optional(),
+    // Named for the same reason as every optional above: an unlisted property is
+    // silently STRIPPED, so a builder that saved a pass threshold or a retry mode
+    // would publish a tool that quietly fell back to the default.
+    theoryPassPercent: z.number().int().min(1).max(100).optional(),
+    theoryAllowRetry: z.boolean().optional(),
+    theoryRetry: z.enum(THEORY_RETRY_MODES).optional(),
+    signOff: signOffSchema.optional(),
+    // The printed pathway tick, written from the case at export. Named for the
+    // same reason as every optional above: unlisted means silently STRIPPED.
+    pathwayMarks: pathwayMarksSchema.optional(),
+    // The pre-assessment course link. Named for the same reason as every
+    // optional above: unlisted means silently STRIPPED, and a republished
+    // revision would quietly stop requiring the manual be read.
+    course: courseLinkSchema.optional(),
   }),
   candidatePrerequisiteIds: z.array(z.string().uuid()).optional(),
   assessorCompetencyIds: z.array(z.string().uuid()).optional(),
@@ -609,8 +949,17 @@ const toolBody = z.object({
    * assessor needs depends on where the assessment happens.
    */
   assessorStreamCompetencyIds: z.record(z.string().min(1), z.array(z.string().uuid())).optional(),
-  /** What passing this tool AWARDS. Granted on sign-off, linked to the case. */
-  awardedCompetencyIds: z.array(z.string().uuid()).optional(),
+  /**
+   * What passing this tool AWARDS. Granted on sign-off, linked to the case.
+   *
+   * REQUIRED, and exactly ONE (U2, R1, KTD4): strictly-one rides the plural
+   * jsonb column, with the cardinality enforced here at the API boundary. A
+   * tool that awards nothing is vacuously satisfied by everyone — the engine
+   * plans no case for it and sign-off grants nothing — so an award-less
+   * create would ship an inert tool; that state now exists only on tools
+   * created before this round, and the backfill (GET /unlinked) drains it.
+   */
+  awardedCompetencyIds: z.array(z.string().uuid()).min(1).max(1),
 });
 
 /**
@@ -639,6 +988,21 @@ assessmentToolsRouter.post(
       return;
     }
     const { templateId, name, manifest } = parsed.data;
+
+    // The one award must be a competency THIS organisation defines (U2) — an
+    // id from another tenant (or thin air) would silently create a tool whose
+    // sign-off grants nothing resolvable.
+    const awardedCompetencyId = parsed.data.awardedCompetencyIds[0]!;
+    const awardedCompetency = await db.query.competencies.findFirst({
+      where: and(
+        eq(schema.competencies.id, awardedCompetencyId),
+        eq(schema.competencies.orgId, tenant.orgId),
+      ),
+    });
+    if (!awardedCompetency) {
+      res.status(400).json({ error: 'invalid_award' });
+      return;
+    }
 
     const template = await db.query.formTemplates.findFirst({
       where: and(
@@ -671,7 +1035,7 @@ assessmentToolsRouter.post(
         candidatePrerequisiteIds: parsed.data.candidatePrerequisiteIds ?? [],
         assessorCompetencyIds: parsed.data.assessorCompetencyIds ?? [],
         assessorStreamCompetencyIds: parsed.data.assessorStreamCompetencyIds ?? {},
-        awardedCompetencyIds: parsed.data.awardedCompetencyIds ?? [],
+        awardedCompetencyIds: parsed.data.awardedCompetencyIds,
         // The parts rule and the Department classification are declared later,
         // both behind the Admin gate (U9/U10, R73/R9) — never at create, which
         // runs on the authoring permission.
@@ -689,6 +1053,377 @@ assessmentToolsRouter.post(
     });
 
     res.status(201).json({ id: row.id, name: row.name, templateId: row.templateId });
+  }),
+);
+
+/*
+  The manifest as a REVISION sends it back. `toolBody.manifest` names what the
+  builder authors at create; a revised tool's manifest additionally carries the
+  workflow-editor properties added after creation (`profilePrefill`,
+  `prerequisiteChecks`, `fieldDefaults`). They must be NAMED here — an unlisted
+  manifest property is silently STRIPPED, and a republish that appeared to keep
+  the prefill would publish a tool that lost it.
+*/
+const republishManifestSchema = toolBody.shape.manifest.extend({
+  profilePrefill: z.record(z.string(), z.enum(PROFILE_PREFILL_KEYS)).optional(),
+  prerequisiteChecks: z.array(prerequisiteCheckSchema).optional(),
+  fieldDefaults: z.record(z.string(), z.unknown()).optional(),
+});
+
+const republishBody = z.object({
+  /** The revision's DRAFT version — published by this call. */
+  versionId: z.string().uuid(),
+  /**
+   * The version the revision was seeded from. Refused (`stale_revision`) when
+   * it no longer matches the template's current version — a revision of v1
+   * must not silently discard a v2 somebody else published in between.
+   */
+  seededFromVersionId: z.string().uuid(),
+  /** The resolved fields (keys + outcome links applied) to freeze into the version. */
+  fields: z.array(z.custom<FormField>()),
+  manifest: republishManifestSchema,
+  name: z.string().min(1).optional(),
+  /** The paper document's revision identity, recorded on the published version. */
+  revisionIdentity: z
+    .object({
+      code: z.string().max(REVISION_IDENTITY_LIMITS.code).optional(),
+      reviewedOn: z.string().max(REVISION_IDENTITY_LIMITS.reviewedOn).optional(),
+      note: z.string().max(REVISION_IDENTITY_LIMITS.note).optional(),
+    })
+    .strict()
+    .optional(),
+  /**
+   * The author's EXPLICIT choice to untick removed parts from every Location
+   * rule that still requires them, in the same transaction as the publish.
+   * Never defaulted on: silently changing which parts a Location requires is
+   * a policy edit nobody made. The publish step offers it as a labelled
+   * button once the refusal has named the rules.
+   */
+  dropDanglingLocationRules: z.boolean().optional(),
+});
+
+/**
+ * Publish a REVISION of an existing tool: one transaction that freezes the
+ * revised draft version and updates the tool's manifest together.
+ *
+ * This exists because the create route cannot run twice (one tool per
+ * template, enforced by `assessment_tools_template_uq`) and the PATCH cannot
+ * carry a new parts manifest — so before this, a published version with a
+ * stale tool was one failed client call away. Everything the create path
+ * would zero (`departmentId`, `locationPartKeys`, competency and prerequisite
+ * columns) is deliberately untouched here: a revision changes the document,
+ * not the tool's admin configuration.
+ *
+ * Guard order is the contract: staleness, then field validation, then
+ * open-case compatibility (R16) — an open case finishes on its pinned version
+ * and reads THIS tool's one manifest against those pinned fields, so a
+ * manifest that would dangle against any open case is refused, never
+ * published-then-broken.
+ */
+assessmentToolsRouter.post(
+  '/:id/republish',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    // Both doors this call opens, gated alike: it publishes a version
+    // (forms.edit, same as the per-version publish endpoint) and it rewrites
+    // the tool (assessments.create, same as the create path).
+    if (!(await hasPermission(tenant, 'forms', 'edit')) || !(await hasPermission(tenant, 'assessments', 'create'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = republishBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tool = await loadTool(db, req.params.id!, tenant.orgId);
+    if (!tool) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const template = await db.query.formTemplates.findFirst({
+      where: and(
+        eq(schema.formTemplates.id, tool.templateId),
+        eq(schema.formTemplates.orgId, tenant.orgId),
+      ),
+    });
+    if (!template) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const version = await db.query.formTemplateVersions.findFirst({
+      where: and(
+        eq(schema.formTemplateVersions.id, parsed.data.versionId),
+        eq(schema.formTemplateVersions.templateId, template.id),
+      ),
+    });
+    if (!version) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (version.state === 'published') {
+      res.status(409).json({ error: 'version_already_published' });
+      return;
+    }
+    if (parsed.data.seededFromVersionId !== template.currentVersionId) {
+      // Somebody published after this revision was seeded. Surface who and
+      // when so the author can judge, and stop — retrying cannot succeed.
+      const current = template.currentVersionId
+        ? await db.query.formTemplateVersions.findFirst({
+            where: eq(schema.formTemplateVersions.id, template.currentVersionId),
+          })
+        : undefined;
+      const publisher = current?.publishedBy
+        ? await db.query.users.findFirst({ where: eq(schema.users.id, current.publishedBy) })
+        : undefined;
+      res.status(409).json({
+        error: 'stale_revision',
+        currentVersionLabel: current?.versionLabel ?? null,
+        publishedAt: current?.publishedAt ? current.publishedAt.toISOString() : null,
+        publishedByName: publisher?.name ?? null,
+      });
+      return;
+    }
+
+    const manifest = parsed.data.manifest as AssessmentToolManifest;
+    const { fields } = parsed.data;
+    const { problems: workflowProblems } = validateWorkflow(workflowOf(manifest, fields), manifest, fields);
+    const problems = [
+      ...validateManifest(manifest, fields),
+      ...validateAnswerKeys(fields),
+      ...workflowProblems,
+      ...validateProfilePrefill(manifest.profilePrefill, fields),
+      ...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields),
+    ];
+    /*
+      A Location rule naming a part the revised manifest no longer declares
+      would silently dangle — the rule's own PATCH validates against the
+      manifest, so the manifest changing owes the rule the same check. Named
+      in PEOPLE'S TERMS: the rule stores a Location id and the part key is an
+      internal handle, and a refusal reading "rule 764679d8… requires
+      secnew2" tells an author nothing they can act on.
+    */
+    const partKeys = new Set(orderedParts(manifest).map((p) => p.key));
+    const oldPartLabels = new Map(orderedParts(tool.manifest).map((p) => [p.key, p.label]));
+    const ruleLocationIds = Object.keys(tool.locationPartKeys ?? {});
+    const ruleLocationNames =
+      ruleLocationIds.length > 0
+        ? await locationNamesByIdFor(db, tenant.orgId, ruleLocationIds)
+        : new Map<string, string>();
+    const danglingRules: Array<{
+      locationId: string;
+      locationName: string;
+      partKey: string;
+      partLabel: string;
+    }> = [];
+    for (const [locationId, keys] of Object.entries(tool.locationPartKeys ?? {})) {
+      for (const key of keys) {
+        if (!partKeys.has(key)) {
+          danglingRules.push({
+            locationId,
+            locationName: ruleLocationNames.get(locationId) ?? locationId,
+            partKey: key,
+            partLabel: oldPartLabels.get(key) ?? key,
+          });
+        }
+      }
+    }
+    // With the author's explicit say-so the danglings are the fix, not the
+    // refusal: the rules are trimmed in the same transaction as the publish.
+    const trimRules = parsed.data.dropDanglingLocationRules === true && danglingRules.length > 0;
+    if (!trimRules) {
+      for (const dangling of danglingRules) {
+        problems.push(
+          `${dangling.locationName} requires "${dangling.partLabel}", which this revision removes. Untick it under Where each part applies in the tool's workflow, or keep the part in this revision.`,
+        );
+      }
+    }
+
+    const cases = await db.query.assessmentCases.findMany({
+      where: and(
+        eq(schema.assessmentCases.toolId, tool.id),
+        eq(schema.assessmentCases.orgId, tenant.orgId),
+      ),
+    });
+
+    /*
+      A PART WITH RECORDED ATTEMPTS CANNOT BE REMOVED. The export selects
+      attempts by the manifest's part keys and FAILS LOUD on an attempt whose
+      part the manifest no longer declares — so a revision that drops a part
+      somebody has sat would leave every one of those cases unable to print
+      its evidence. That is discovered months later by an auditor, which is
+      why it is refused here, where the author can still keep the part.
+    */
+    const removedKeys = [...oldPartLabels.keys()].filter((k) => !partKeys.has(k));
+    const attemptedParts: Array<{ key: string; label: string }> = [];
+    const openCaseAttemptWarnings: string[] = [];
+    if (removedKeys.length > 0 && cases.length > 0) {
+      const priorAttempts = await db.query.assessmentPartAttempts.findMany({
+        where: inArray(
+          schema.assessmentPartAttempts.caseId,
+          cases.map((c) => c.id),
+        ),
+      });
+      /*
+        SIGNED EVIDENCE KEEPS ITS PART; an open case's progress is the
+        author's to spend. A CONSOLIDATION — the part's fields folded into a
+        neighbouring section, still printed, still filled — is a legitimate
+        revision, and blocking it because a live test case touched the old
+        part would freeze every tool the moment anyone tried it. So only
+        attempts on TERMINAL cases (certified or closed evidence) refuse;
+        attempts on open cases are reported as a warning on the publish.
+      */
+      const terminalCaseIds = new Set(
+        cases.filter((c) => isTerminalCaseState(c.state as AssessmentCaseState)).map((c) => c.id),
+      );
+      const touchedTerminal = new Set(
+        priorAttempts
+          .filter((a) => removedKeys.includes(a.partKey) && terminalCaseIds.has(a.caseId))
+          .map((a) => a.partKey),
+      );
+      for (const key of touchedTerminal) {
+        attemptedParts.push({ key, label: oldPartLabels.get(key) ?? key });
+        problems.push(
+          `Part "${oldPartLabels.get(key) ?? key}" has evidence on completed cases, so this revision cannot remove it — that evidence would no longer export. Keep the part (it can stop being required at any Location instead).`,
+        );
+      }
+      for (const key of new Set(
+        priorAttempts
+          .filter(
+            (a) =>
+              removedKeys.includes(a.partKey) &&
+              !terminalCaseIds.has(a.caseId) &&
+              !touchedTerminal.has(a.partKey),
+          )
+          .map((a) => a.partKey),
+      )) {
+        openCaseAttemptWarnings.push(
+          `Open cases have attempts on "${oldPartLabels.get(key) ?? key}", which this revision removes — that progress will not count against the revised parts.`,
+        );
+      }
+    }
+
+    if (problems.length > 0) {
+      /*
+        STRUCTURED alongside prose, so the publish step can OFFER the fix
+        rather than narrate it: `danglingRules` is what the one-click untick
+        resolves; `attemptedParts` is what no click can — evidence keeps its
+        part.
+      */
+      res.status(400).json({
+        error: 'invalid_manifest',
+        problems,
+        danglingRules: trimRules ? [] : danglingRules,
+        attemptedParts,
+      });
+      return;
+    }
+
+    // R16: this tool has ONE manifest, and every open case reads it against
+    // the case's PINNED version fields. Refuse a manifest that would dangle
+    // against any of them — the open case finishes on its pinned version.
+    const openCases = cases.filter((c) => !isTerminalCaseState(c.state as AssessmentCaseState));
+    const fieldsByVersion = new Map<string, FormField[]>();
+    const incompatible: Array<{ id: string; candidateUserId: string; versionId: string; problems: string[] }> = [];
+    for (const openCase of openCases) {
+      let pinnedFields = fieldsByVersion.get(openCase.currentVersionId);
+      if (!pinnedFields) {
+        pinnedFields = await fieldsForVersion(db, openCase.currentVersionId);
+        fieldsByVersion.set(openCase.currentVersionId, pinnedFields);
+      }
+      const caseProblems = validateManifest(manifest, pinnedFields);
+      if (caseProblems.length > 0) {
+        incompatible.push({
+          id: openCase.id,
+          candidateUserId: openCase.candidateUserId,
+          versionId: openCase.currentVersionId,
+          problems: caseProblems,
+        });
+      }
+    }
+    if (incompatible.length > 0) {
+      res.status(409).json({ error: 'open_cases_incompatible', cases: incompatible });
+      return;
+    }
+
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.formTemplateVersions)
+        .set({
+          fields,
+          revisionIdentity: parsed.data.revisionIdentity ?? null,
+          state: 'published',
+          publishedAt: now,
+          publishedBy: tenant.userId,
+        })
+        .where(eq(schema.formTemplateVersions.id, version.id));
+      // Publishing on an archived template restores it — same deliberate
+      // behaviour as the per-version publish endpoint; the web layer warns.
+      await tx
+        .update(schema.formTemplates)
+        .set({ currentVersionId: version.id, status: 'published', updatedAt: now })
+        .where(eq(schema.formTemplates.id, template.id));
+      await tx
+        .update(schema.assessmentTools)
+        .set({
+          manifest,
+          ...(parsed.data.name ? { name: parsed.data.name } : {}),
+          /*
+            The author's chosen untick, applied with the publish it belongs
+            to. Rules keep every part the revised manifest still declares;
+            only the removed parts' entries go — and a Location whose list
+            empties keeps an empty list, which "requires every part" does NOT
+            mean here: an explicit rule row means the author has narrowed it.
+          */
+          ...(trimRules
+            ? {
+                locationPartKeys: Object.fromEntries(
+                  Object.entries(tool.locationPartKeys ?? {}).map(([locationId, keys]) => [
+                    locationId,
+                    keys.filter((k) => partKeys.has(k)),
+                  ]),
+                ),
+              }
+            : {}),
+        })
+        .where(eq(schema.assessmentTools.id, tool.id));
+      // The revision shipped — free the one-revision-per-tool slot so next
+      // year's review seeds fresh instead of 409ing at a published draft.
+      await tx
+        .delete(schema.assessmentToolDrafts)
+        .where(
+          and(
+            eq(schema.assessmentToolDrafts.orgId, tenant.orgId),
+            eq(schema.assessmentToolDrafts.revisionOfToolId, tool.id),
+          ),
+        );
+    });
+
+    await recordAudit(db, tenant, {
+      action: 'Republished assessment tool',
+      target: `${parsed.data.name ?? tool.name} ${version.versionLabel}${
+        parsed.data.revisionIdentity?.note ? ` — ${parsed.data.revisionIdentity.note}` : ''
+      }`,
+      category: 'forms',
+      icon: 'rocket',
+    });
+
+    res.json({
+      id: tool.id,
+      templateId: tool.templateId,
+      versionId: version.id,
+      versionLabel: version.versionLabel,
+      // The same unplaced-box audit create-time publishing surfaces — a
+      // warning, never a gate (R8) — plus the open-case progress this
+      // revision's removed parts strand.
+      warnings: [...unplacedMarkDestinations(manifest, fields), ...openCaseAttemptWarnings],
+    });
   }),
 );
 
@@ -728,6 +1463,9 @@ assessmentToolsRouter.get(
         name: t.name,
         templateId: t.templateId,
         departmentId: t.departmentId,
+        // The competency this tool grants, so the new-case form can suggest a
+        // pathway from whether the candidate already holds it.
+        awardedCompetencyIds: t.awardedCompetencyIds ?? [],
         parts: orderedParts(t.manifest).map((p) => ({ key: p.key, label: p.label, kind: p.kind })),
         /*
           The organisation's Locations, offered on the new-case form so a case is
@@ -741,6 +1479,413 @@ assessmentToolsRouter.get(
     );
   }),
 );
+
+// ── award links (U2 — R1, R2, R3, R15, KTD3, KTD5, KTD10) ───────────────────
+
+/**
+ * The tools still awarding NOTHING — the backfill worklist (KTD5, R3).
+ *
+ * Admin-gated: accepting a row converts Role requirements and creates cases,
+ * so reading the worklist sits on the same gate as acting on it. Each row
+ * carries at most one SUGGESTION — an exact case-insensitive match of the
+ * tool's name against a competency's name or code — and never guesses beyond
+ * that (R3): a fuzzy match accepted by reflex would link the wrong award,
+ * which activates the wrong assignment.
+ *
+ * REGISTERED ABOVE `GET /:id`: express matches in registration order, so
+ * declared after it, "unlinked" would be captured as an :id and cast against
+ * a uuid column.
+ */
+assessmentToolsRouter.get(
+  '/unlinked',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const [tools, competencies] = await Promise.all([
+      db.query.assessmentTools.findMany({ where: eq(schema.assessmentTools.orgId, tenant.orgId) }),
+      db.query.competencies.findMany({ where: eq(schema.competencies.orgId, tenant.orgId) }),
+    ]);
+    const unlinked = tools.filter((t) => (t.awardedCompetencyIds ?? []).length === 0);
+    res.json(
+      unlinked.map((t) => {
+        const wanted = t.name.trim().toLowerCase();
+        const match = competencies.find(
+          (c) =>
+            c.name.trim().toLowerCase() === wanted ||
+            (c.code ?? '').trim().toLowerCase() === wanted,
+        );
+        return {
+          id: t.id,
+          name: t.name,
+          templateId: t.templateId,
+          suggestion: match ? { competencyId: match.id, name: match.name } : null,
+        };
+      }),
+    );
+  }),
+);
+
+const awardBody = z.object({
+  competencyId: z.string().uuid(),
+  /** Re-link only: carry the outgoing competency's required Role links across. */
+  carryRoleLinks: z.boolean().optional(),
+  /** Re-link only: the reviewed-preview acknowledgement the PUT demands (KTD10). */
+  confirm: z.boolean().optional(),
+});
+
+/**
+ * The guard the award preview and apply share, so they cannot drift on who may
+ * link an award or which competency is valid: Admin (linking converts Role
+ * requirements and creates cases — R73's blast-radius standard, not the
+ * authoring permission), the tool is the organisation's, and the competency
+ * is too (`invalid_award` mirrors the create-path check). Sends the error
+ * response and returns null on any failure.
+ */
+async function loadAwardChange(database: Database, req: Request, res: Response) {
+  const tenant = req.tenant!;
+  if (!isAdmin(tenant.role)) {
+    res.status(403).json({ error: 'forbidden' });
+    return null;
+  }
+  const parsed = awardBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return null;
+  }
+  const tool = await loadTool(database, req.params.id!, tenant.orgId);
+  if (!tool) {
+    res.status(404).json({ error: 'not_found' });
+    return null;
+  }
+  const competency = await database.query.competencies.findFirst({
+    where: and(
+      eq(schema.competencies.id, parsed.data.competencyId),
+      eq(schema.competencies.orgId, tenant.orgId),
+    ),
+  });
+  if (!competency) {
+    res.status(400).json({ error: 'invalid_award' });
+    return null;
+  }
+  return { tenant, tool, competency, body: parsed.data, current: tool.awardedCompetencyIds ?? [] };
+}
+
+/**
+ * A RE-LINK may not run over live work (KTD10): a non-terminal case was opened
+ * against the outgoing award and will grant it at sign-off; re-pointing
+ * mid-flight would make the signed evidence attest one competency and the
+ * grant another. Terminal states (competent, closed, invalidated) are history
+ * and never block. Sends the 409 and returns true when blocked.
+ */
+async function relinkBlockedByOpenCases(
+  database: Database,
+  orgId: string,
+  toolId: string,
+  res: Response,
+): Promise<boolean> {
+  const openCases = await database.query.assessmentCases.findMany({
+    where: and(
+      eq(schema.assessmentCases.orgId, orgId),
+      eq(schema.assessmentCases.toolId, toolId),
+      inArray(schema.assessmentCases.state, NON_TERMINAL_STATES),
+    ),
+  });
+  if (openCases.length > 0) {
+    res.status(409).json({ error: 'open_cases', count: openCases.length });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Preview an award link or re-link (U2, KTD10) — the SAME computation the PUT
+ * applies, writing nothing. First link answers {rolesLinked, affected,
+ * created}; re-link answers {outgoingGrants, rolesRequiringOutgoing, created}.
+ * A preview a PUT would 409 must 409 too, so the open-case guard runs here as
+ * well.
+ */
+assessmentToolsRouter.post(
+  '/:id/award/preview',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const change = await loadAwardChange(db, req, res);
+    if (!change) return;
+    const { tenant, tool, body, current } = change;
+    const now = new Date();
+
+    if (current.includes(body.competencyId)) {
+      // Already linked to this competency — a repeat converts nothing (U2).
+      res.json({ rolesLinked: 0, affected: 0, created: 0, alreadyLinked: true });
+      return;
+    }
+    if (current.length === 0) {
+      const { effects } = await computeAwardLinkChange(
+        db,
+        tenant.orgId,
+        tool.id,
+        body.competencyId,
+        now,
+      );
+      res.json(effects);
+      return;
+    }
+    if (await relinkBlockedByOpenCases(db, tenant.orgId, tool.id, res)) return;
+    const { effects } = await computeAwardRelinkChange(
+      db,
+      tenant.orgId,
+      tool.id,
+      current[0]!,
+      body.competencyId,
+      body.carryRoleLinks ?? false,
+      now,
+    );
+    res.json(effects);
+  }),
+);
+
+/**
+ * Link (or re-link) the ONE competency this tool awards (U2, R2).
+ *
+ * FIRST LINK is the backfill/conversion case (R15, KTD3): in ONE transaction
+ * the award is written, every legacy `role_required_assessments` row for this
+ * tool becomes a direct required link (upgrading an existing recommended row
+ * rather than colliding with the unique index), the legacy rows are deleted,
+ * and the activated cases are inserted — exactly the plan the preview counted.
+ *
+ * RE-LINK is guarded (KTD10): refused while the tool has non-terminal cases,
+ * and requires `confirm: true` — the caller attesting they reviewed the
+ * preview. With `carryRoleLinks` the outgoing competency's required links are
+ * re-pointed in the same transaction; grants of the outgoing competency are
+ * NEVER touched — history is state.
+ *
+ * A repeat PUT naming the already-linked competency is an idempotent no-op.
+ */
+assessmentToolsRouter.put(
+  '/:id/award',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const change = await loadAwardChange(db, req, res);
+    if (!change) return;
+    const { tenant, tool, competency, body, current } = change;
+    const now = new Date();
+
+    if (current.includes(body.competencyId)) {
+      // Idempotent: the award already stands; converting again would find no
+      // legacy rows anyway, and a retried click must not 409 or double-write.
+      res.json({ rolesLinked: 0, affected: 0, created: 0, alreadyLinked: true });
+      return;
+    }
+
+    if (current.length === 0) {
+      /*
+        ── first link: convert and activate (compute-then-apply, KTD10) ──────
+
+        THE TRANSACTION OPENS FIRST AND THE COMPUTE RUNS INSIDE IT. Computed on
+        the root client beforehand, two concurrent first-links for the same
+        tool both read an unlinked tool, both planned a full conversion, and
+        both applied it — a second set of activated cases against legacy rows
+        the first run had already drained. Re-reading the tool on `tx` puts the
+        race detection on the same snapshot as the write, at REPEATABLE READ so
+        that snapshot holds for the whole block rather than being re-taken per
+        statement.
+      */
+      const outcome = await db.transaction(
+        async (tx) => {
+          const fresh = await loadTool(tx, tool.id, tenant.orgId);
+          const freshAwards = fresh?.awardedCompetencyIds ?? [];
+          if (freshAwards.length > 0) {
+            /*
+              Another writer linked this tool between the gate's read and this
+              one. Whatever it chose, THIS call is no longer a first link:
+              converting again would re-run a conversion the winner already
+              performed. Answered with the existing idempotent already-linked
+              branch — a retried click must not 409, and the tool does hold an
+              award, which is what that branch reports. A caller that meant to
+              CHANGE the award re-issues the request and reaches the guarded
+              re-link door below, preview and confirm included.
+            */
+            return { kind: 'already' as const };
+          }
+          const plan = await computeAwardLinkChange(
+            tx,
+            tenant.orgId,
+            tool.id,
+            body.competencyId,
+            now,
+          );
+          await applyFirstLink(tx, tenant.orgId, tool.id, body.competencyId, plan);
+          return { kind: 'applied' as const, effects: plan.effects };
+        },
+        { isolationLevel: 'repeatable read' },
+      );
+      if (outcome.kind === 'already') {
+        res.json({ rolesLinked: 0, affected: 0, created: 0, alreadyLinked: true });
+        return;
+      }
+      await recordAudit(db, tenant, {
+        action: 'Linked assessment award',
+        target: `${tool.name} → ${competency.name}`,
+        category: 'settings',
+        icon: 'clipboard-check',
+      });
+      res.json(outcome.effects);
+      return;
+    }
+
+    // ── re-link: guarded correction (KTD10) ──────────────────────────────────
+    if (await relinkBlockedByOpenCases(db, tenant.orgId, tool.id, res)) return;
+    if (body.confirm !== true) {
+      // The preview names outgoing grants and orphaned requirements; the PUT
+      // demands the caller has seen it. A bare re-link is refused, not warned.
+      res.status(400).json({ error: 'confirm_required' });
+      return;
+    }
+    const carry = body.carryRoleLinks ?? false;
+    /*
+      SAME POSTURE AS THE FIRST LINK: transaction first, compute inside, tool
+      re-read on the same snapshot. The re-read also catches the case where the
+      award moved out from under this caller since the gate read it — the
+      preview they confirmed described the OLD outgoing competency, so applying
+      would carry role links the admin never saw named.
+    */
+    const outcome = await db.transaction(
+      async (tx) => {
+        const fresh = await loadTool(tx, tool.id, tenant.orgId);
+        const freshAwards = fresh?.awardedCompetencyIds ?? [];
+        if (freshAwards.includes(body.competencyId)) return { kind: 'already' as const };
+        const outgoingCompetencyId = freshAwards[0];
+        // Drained to nothing since the gate read it: this is a first link now,
+        // and a first link is not what was confirmed. The idempotent branch is
+        // the honest no-op; the caller re-issues and takes the first-link door.
+        if (!outgoingCompetencyId) return { kind: 'already' as const };
+
+        const plan = await computeAwardRelinkChange(
+          tx,
+          tenant.orgId,
+          tool.id,
+          outgoingCompetencyId,
+          body.competencyId,
+          carry,
+          now,
+        );
+        await tx
+          .update(schema.assessmentTools)
+          .set({ awardedCompetencyIds: [body.competencyId] })
+          .where(eq(schema.assessmentTools.id, tool.id));
+        if (carry) {
+          for (const step of plan.carryPlan) {
+            if (step.action === 'repoint') {
+              await tx
+                .update(schema.competencyRequirements)
+                .set({ competencyId: body.competencyId })
+                .where(eq(schema.competencyRequirements.id, step.linkId));
+            } else if (step.action === 'merge-upgrade' && step.targetLinkId) {
+              await tx
+                .update(schema.competencyRequirements)
+                .set({ tier: 'required' })
+                .where(eq(schema.competencyRequirements.id, step.targetLinkId));
+              await tx
+                .delete(schema.competencyRequirements)
+                .where(eq(schema.competencyRequirements.id, step.linkId));
+            } else {
+              // merge-delete: the role already requires the incoming competency.
+              await tx
+                .delete(schema.competencyRequirements)
+                .where(eq(schema.competencyRequirements.id, step.linkId));
+            }
+          }
+          for (const c of plan.casesToInsert) {
+            await tx.insert(schema.assessmentCases).values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
+          }
+        }
+        // Grants of the outgoing competency are deliberately untouched (KTD10):
+        // they attest what was assessed at the time, and re-pointing the award
+        // must not rewrite anyone's history.
+        return { kind: 'applied' as const, effects: plan.effects };
+      },
+      { isolationLevel: 'repeatable read' },
+    );
+    if (outcome.kind === 'already') {
+      res.json({ rolesLinked: 0, affected: 0, created: 0, alreadyLinked: true });
+      return;
+    }
+    await recordAudit(db, tenant, {
+      action: 'Linked assessment award',
+      target: `${tool.name} → ${competency.name}`,
+      category: 'settings',
+      icon: 'clipboard-check',
+    });
+    res.json(outcome.effects);
+  }),
+);
+
+/**
+ * The first link's writes, in the caller's transaction: the award, the
+ * conversion of every legacy `role_required_assessments` row into a direct
+ * required link, the drain of those rows, and the activated cases — exactly
+ * the plan the preview counted (KTD3, KTD10).
+ */
+async function applyFirstLink(
+  tx: Parameters<Parameters<Database['transaction']>[0]>[0],
+  orgId: string,
+  toolId: string,
+  competencyId: string,
+  plan: Awaited<ReturnType<typeof computeAwardLinkChange>>,
+): Promise<void> {
+  await tx
+    .update(schema.assessmentTools)
+    .set({ awardedCompetencyIds: [competencyId] })
+    .where(eq(schema.assessmentTools.id, toolId));
+  for (const step of plan.roleLinkPlan) {
+    if (step.action === 'insert') {
+      await tx.insert(schema.competencyRequirements).values({
+        orgId,
+        roleId: step.roleId,
+        competencyId,
+        tier: 'required',
+      });
+    } else if (step.action === 'upgrade' && step.existingLinkId) {
+      // A recommended row already names this pair — promote its tier;
+      // inserting would collide with competency_requirements_role_uq.
+      await tx
+        .update(schema.competencyRequirements)
+        .set({ tier: 'required' })
+        .where(eq(schema.competencyRequirements.id, step.existingLinkId));
+    }
+    // 'exists': already required — nothing to write.
+  }
+  // The legacy rows are DRAINED, not kept alongside the links: the dual read
+  // would deduplicate them, but leaving them makes every later requirement
+  // edit fingerprint-race against rows nobody owns (KTD9).
+  await tx
+    .delete(schema.roleRequiredAssessments)
+    .where(
+      and(
+        eq(schema.roleRequiredAssessments.orgId, orgId),
+        eq(schema.roleRequiredAssessments.toolId, toolId),
+      ),
+    );
+  // The activation's cases — exactly the plan the preview counted.
+  for (const c of plan.casesToInsert) {
+    await tx.insert(schema.assessmentCases).values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
+  }
+}
 
 /**
  * One tool, with everything the workflow builder needs to render.
@@ -763,6 +1908,18 @@ assessmentToolsRouter.get(
       return;
     }
     const tenant = req.tenant!;
+    /*
+      EDIT-GATED, LIKE THE PATCH BESIDE IT, because the response below is the
+      one tool read that serves UNSTRIPPED fields — answerKey and modelAnswer
+      included. The plan gate alone let any org member, a candidate-role login
+      included, fetch the complete key to an assessment they may later sit.
+      Its only consumers are authoring surfaces (the workflow builder, the
+      revision seed), and authoring is what `assessments.edit` means.
+    */
+    if (!(await hasPermission(tenant, 'assessments', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const tool = await loadTool(db, req.params.id!, tenant.orgId);
     if (!tool) {
       res.status(404).json({ error: 'not_found' });
@@ -786,6 +1943,18 @@ assessmentToolsRouter.get(
 
     const workflow = workflowOf(tool.manifest, fields);
     const { problems, warnings } = validateWorkflow(workflow, tool.manifest, fields);
+    /*
+      THE MARKS THAT PRINT NOWHERE. The exporter skips a field with no
+      geometry silently — the safe failure on the page is an invisible one
+      here, so the editor is where the silence gets named: every auto-mark
+      destination with no drawable box, from the same resolver the exporter
+      draws with.
+    */
+    warnings.push(...unplacedMarkDestinations(tool.manifest, fields));
+    // And the marking compositions that misbehave at runtime (auto-fail on
+    // hand-in, untickable table-cell marks) — same list the builder's publish
+    // step shows, so the two authoring surfaces cannot disagree.
+    warnings.push(...markingCompositionWarnings(tool.manifest, fields));
 
     res.json({
       id: tool.id,
@@ -861,7 +2030,12 @@ assessmentToolsRouter.patch(
       parsed.data.workflow !== undefined ||
       parsed.data.profilePrefill !== undefined ||
       parsed.data.prerequisiteChecks !== undefined ||
-      parsed.data.fieldDefaults !== undefined;
+      parsed.data.fieldDefaults !== undefined ||
+      parsed.data.partCompletionMarks !== undefined ||
+      parsed.data.signOff !== undefined ||
+      parsed.data.pathwayMarks !== undefined ||
+      parsed.data.partOutcomeMarks !== undefined ||
+      parsed.data.course !== undefined;
     let manifest: AssessmentToolManifest = tool.manifest;
     if (parsed.data.workflow) manifest = { ...manifest, workflow: parsed.data.workflow };
     if (parsed.data.profilePrefill !== undefined) {
@@ -883,6 +2057,77 @@ assessmentToolsRouter.patch(
       manifest = parsed.data.fieldDefaults
         ? { ...rest, fieldDefaults: parsed.data.fieldDefaults as Record<string, SubmissionValue> }
         : rest;
+    }
+    if (parsed.data.partCompletionMarks !== undefined) {
+      const { partCompletionMarks: _dropped, ...rest } = manifest;
+      manifest = parsed.data.partCompletionMarks
+        ? { ...rest, partCompletionMarks: parsed.data.partCompletionMarks }
+        : rest;
+    }
+    if (parsed.data.signOff !== undefined) {
+      const { signOff: _dropped, ...rest } = manifest;
+      manifest = parsed.data.signOff ? { ...rest, signOff: parsed.data.signOff } : rest;
+    }
+    if (parsed.data.pathwayMarks !== undefined) {
+      const { pathwayMarks: _dropped, ...rest } = manifest;
+      manifest = parsed.data.pathwayMarks
+        ? { ...rest, pathwayMarks: parsed.data.pathwayMarks }
+        : rest;
+    }
+    if (parsed.data.course !== undefined) {
+      // Setting a link is validated against the org's actual courses: a
+      // dangling id would read as "configured" in the builder while the
+      // runtime, which degrades a missing course to unenforced, gated nothing.
+      if (parsed.data.course) {
+        const courseRow = await db.query.courses.findFirst({
+          where: and(
+            eq(schema.courses.id, parsed.data.course.courseId),
+            eq(schema.courses.orgId, tenant.orgId),
+          ),
+        });
+        if (!courseRow || courseRow.status !== 'active') {
+          res.status(400).json({
+            error: 'invalid_workflow',
+            problems: ['The selected course no longer exists — refresh and pick again.'],
+          });
+          return;
+        }
+      }
+      const { course: _dropped, ...rest } = manifest;
+      manifest = parsed.data.course ? { ...rest, course: parsed.data.course } : rest;
+    }
+    const partOutcomeEntries = parsed.data.partOutcomeMarks;
+    if (partOutcomeEntries !== undefined) {
+      // An entry naming a part the tool does not have is a picker bug, not a
+      // mapping to silently drop.
+      const known = new Set(manifest.parts.map((p) => p.key));
+      const ghosts = (partOutcomeEntries ?? []).filter((e) => !known.has(e.partKey));
+      if (ghosts.length > 0) {
+        res.status(400).json({
+          error: 'invalid_workflow',
+          problems: ghosts.map((g) => `Verdict pair names part "${g.partKey}", which this tool has no part for.`),
+        });
+        return;
+      }
+      manifest = {
+        ...manifest,
+        parts: manifest.parts.map((p) => {
+          if (partOutcomeEntries === null) {
+            const { outcomeSatisfactory: _s, outcomeNotSatisfactory: _n, ...rest } = p;
+            return rest;
+          }
+          const entry = partOutcomeEntries.find((e) => e.partKey === p.key);
+          if (!entry) return p;
+          const { outcomeSatisfactory: _s, outcomeNotSatisfactory: _n, ...rest } = p;
+          return {
+            ...rest,
+            ...(entry.outcomeSatisfactory ? { outcomeSatisfactory: entry.outcomeSatisfactory } : {}),
+            ...(entry.outcomeNotSatisfactory
+              ? { outcomeNotSatisfactory: entry.outcomeNotSatisfactory }
+              : {}),
+          };
+        }),
+      };
     }
 
     const template = await db.query.formTemplates.findFirst({
@@ -906,6 +2151,10 @@ assessmentToolsRouter.patch(
       ...workflowProblems,
       ...validateProfilePrefill(manifest.profilePrefill, fields),
       ...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields),
+      ...validatePartCompletionMarks(manifest.partCompletionMarks, manifest, fields),
+      ...validatePathwayMarks(manifest.pathwayMarks, fields),
+      ...validateSignOffMarks(manifest.signOff, fields),
+      ...validatePartOutcomeMarks(manifest, fields),
     ];
     if (problems.length > 0) {
       // Nothing written. A half-applied workflow is worse than a rejected one:
@@ -929,6 +2178,8 @@ assessmentToolsRouter.patch(
       icon: 'clipboard-check',
     });
 
+    // The same unplaced-box audit the GET serves, so saving cannot hide it.
+    warnings.push(...unplacedMarkDestinations(manifest, fields));
     res.json({ id: tool.id, workflow: workflowOf(manifest, fields), warnings });
   }),
 );
@@ -1258,6 +2509,80 @@ assessmentCasesRouter.post(
 );
 
 /**
+ * Set or change WHERE an open case is assessed (R77).
+ *
+ * Exists because the Location decides what the case requires — the per-part
+ * rule, the assessor requirement, the printed stream — and cases opened
+ * before the rule was enforced (or with the picker skipped) carry none: they
+ * demand every part and keep printing attempts the Location would exclude.
+ * The fix for such a case is its Location, not a new case.
+ *
+ * STAFF ONLY, and only while the case is OPEN. A candidate must not move
+ * their own assessment to an easier rule, and a resolved or signed case is a
+ * record — where it was assessed is part of what was signed.
+ */
+assessmentCasesRouter.patch(
+  '/:id/location',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope !== 'all') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = z
+      .object({ locationId: z.string().uuid().nullable() })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (row.state !== 'open') {
+      res.status(409).json({ error: 'case_not_open' });
+      return;
+    }
+    // Chosen from the org's list, never typed (R77) — same rule as create.
+    if (parsed.data.locationId) {
+      const location = await db.query.locations.findFirst({
+        where: and(
+          eq(schema.locations.id, parsed.data.locationId),
+          eq(schema.locations.orgId, tenant.orgId),
+          eq(schema.locations.status, 'active'),
+        ),
+      });
+      if (!location) {
+        res.status(400).json({ error: 'location_not_found', locationId: parsed.data.locationId });
+        return;
+      }
+    }
+
+    await db
+      .update(schema.assessmentCases)
+      .set({ locationId: parsed.data.locationId })
+      .where(eq(schema.assessmentCases.id, row.id));
+
+    await recordAudit(db, tenant, {
+      action: 'Moved assessment case',
+      target: `${row.id} → location ${parsed.data.locationId ?? 'none'}`,
+      category: 'submissions',
+      icon: 'map-pin',
+    });
+
+    res.json({ id: row.id, locationId: parsed.data.locationId });
+  }),
+);
+
+/**
  * Cases the caller may see.
  *
  * An `own` scope filters SERVER-SIDE by candidate. Filtering in the client
@@ -1305,18 +2630,63 @@ assessmentCasesRouter.get(
     const nameById = new Map(candidates.map((u) => [u.id, u.name]));
     const caseIdentities = await loadDisplayIdentities(db, tenant.orgId, candidateIds);
 
+    /*
+      Attempts for these cases, so each row can name the STAGE it is at and
+      whether it is waiting on an assessor — the two things the case list is
+      scanned for. Loaded once for the page and bucketed by case, the same shape
+      the progress endpoint uses; the case-state computation stays server-side.
+    */
+    const caseIds = rows.map((r) => r.id);
+    const attemptRows = caseIds.length
+      ? await db.query.assessmentPartAttempts.findMany({
+          where: inArray(schema.assessmentPartAttempts.caseId, caseIds),
+          orderBy: (a, { asc }) => [asc(a.partKey), asc(a.attemptNumber)],
+        })
+      : [];
+    const attemptsByCase = new Map<string, typeof attemptRows>();
+    for (const a of attemptRows) {
+      const bucket = attemptsByCase.get(a.caseId);
+      if (bucket) bucket.push(a);
+      else attemptsByCase.set(a.caseId, [a]);
+    }
+
     res.json(
-      rows.map((c) => ({
-        id: c.id,
-        toolName: toolById.get(c.toolId)?.name ?? '',
-        candidateUserId: c.candidateUserId,
-        candidateName: identifyMember(caseIdentities, c.candidateUserId, nameById.get(c.candidateUserId) ?? '').name,
-        pathway: c.pathway,
-        state: c.state,
-        /** Null on a pooled case — the table shows it as unassigned (U13). */
-        assessorUserId: c.assessorUserId,
-        createdAt: c.createdAt,
-      })),
+      rows.map((c) => {
+        const tool = toolById.get(c.toolId);
+        const attempts = attemptsByCase.get(c.id) ?? [];
+        // The pathway's required parts with their derived states — the same
+        // computation the progress screen uses, so the two agree. Narrowed to
+        // the case's Location: an excluded part is not owed and not listed.
+        const progress = tool
+          ? caseProgress(
+              tool.manifest,
+              c.pathway as AssessmentPathway,
+              toAttemptFacts(attempts),
+              applicablePartsFor(tool, c),
+            )
+          : [];
+        // The stage: first part not yet satisfactory, and where it sits.
+        const current = progress.find((p) => p.state !== 'satisfactory');
+        return {
+          id: c.id,
+          toolName: tool?.name ?? '',
+          candidateUserId: c.candidateUserId,
+          candidateName: identifyMember(caseIdentities, c.candidateUserId, nameById.get(c.candidateUserId) ?? '').name,
+          pathway: c.pathway,
+          state: c.state,
+          /** Null on a pooled case — the table shows it as unassigned (U13). */
+          assessorUserId: c.assessorUserId,
+          createdAt: c.createdAt,
+          /** The part the case is at now — null once every required part passed. */
+          currentPartLabel: current?.part.label ?? null,
+          /** 1-based position of that part among the pathway's required parts. */
+          currentPartIndex: current ? progress.indexOf(current) + 1 : null,
+          /** How many parts this pathway requires — the "of 6" in "Part 3 of 6". */
+          requiredPartCount: progress.length,
+          /** Waiting on a person: final sign-off, or a part handed in unmarked. */
+          awaitingAssessor: caseAwaitsAssessor(c.state, attempts),
+        };
+      }),
     );
   }),
 );
@@ -1331,20 +2701,22 @@ assessmentCasesRouter.get(
  * safety threshold. It is also the attempt the threshold notification fired on
  * and the one the evidence document renders, so the dashboard agrees with both.
  *
- * Every array in the attempt's values is totalled rather than the one table the
- * manifest names, because naming it needs the pinned version's field list — a
- * read per attempt version that this endpoint otherwise never makes. A part's
- * values hold only that part's fields and only its logbook table carries the
- * duration column, so the wider sum reaches the same number.
+ * Summed across EVERY table in the attempt's values that carries the duration
+ * column, not the one table the manifest names first. A part's values hold only
+ * that part's fields, so every such table is one of this part's logs — and a
+ * part may keep several (Part 5's supervised and minimal-supervision logs both
+ * accrue against the same minimum). Totalling only the first under-reports a
+ * candidate's experience, the wrong direction against a safety threshold. Being
+ * value-based, it needs no field list, so the dashboard agrees with the meter
+ * the candidate watches and the threshold the save route fires — all three read
+ * `logbookDurationRows`.
  */
 function loggedHoursFor(
   part: AssessmentPart,
   attempts: readonly {
     attemptNumber: number;
     values: Record<string, SubmissionValue>;
-    templateVersionId: string;
   }[],
-  fieldsByVersion: ReadonlyMap<string, FormField[]>,
 ): number | null {
   if (part.kind !== 'logbook' || !part.durationColumnKey) return null;
   // Picked by attempt number rather than by position, so the answer does not
@@ -1357,10 +2729,9 @@ function loggedHoursFor(
   );
   if (!latest) return 0;
 
-  // The same rule the threshold notification and the retry carry-forward use.
-  // Three copies of "which rows are the logbook" disagreed; this is the one.
-  const rows = logbookRows(fieldsByVersion.get(latest.templateVersionId) ?? [], part, latest.values);
-  return totalLoggedHours(rows, part.durationColumnKey);
+  // The same rule the threshold notification and the candidate's progress meter
+  // use. Three copies of "which rows are the logbook" disagreed; this is the one.
+  return totalLoggedHours(logbookDurationRows(part, latest.values), part.durationColumnKey);
 }
 
 /**
@@ -1450,32 +2821,6 @@ assessmentCasesRouter.get(
       else byCase.set(row.caseId, [row]);
     }
 
-    /*
-      The fields of every version the visible attempts are pinned to, loaded ONCE
-      for the whole page.
-
-      Needed because hours come from the part's DECLARED table, and finding that
-      table means reading the version an attempt was taken against. Counting
-      every array on the attempt instead — which this endpoint used to do — made
-      it disagree with the threshold notification about the same candidate, with
-      no retry involved. See `logbookRows`.
-
-      Deduplicated by version rather than fetched per attempt: a cohort shares a
-      handful of versions, and a read per attempt is the N+1 this endpoint exists
-      to replace.
-    */
-    const versionIds = [
-      ...new Set([...byCase.values()].flat().map((a) => a.templateVersionId)),
-    ];
-    const versions = versionIds.length
-      ? await db.query.formTemplateVersions.findMany({
-          where: inArray(schema.formTemplateVersions.id, versionIds),
-        })
-      : [];
-    const fieldsByVersion = new Map<string, FormField[]>(
-      versions.map((v) => [v.id, (v.fields ?? []) as FormField[]]),
-    );
-
     res.json(
       cases.map((c) => {
         const tool = toolById.get(c.toolId);
@@ -1484,7 +2829,12 @@ assessmentCasesRouter.get(
         // if one ever did, the candidate stays on the dashboard with no parts
         // rather than disappearing from it or failing the whole request.
         const progress = tool
-          ? caseProgress(tool.manifest, c.pathway as AssessmentPathway, toAttemptFacts(attempts))
+          ? caseProgress(
+              tool.manifest,
+              c.pathway as AssessmentPathway,
+              toAttemptFacts(attempts),
+              applicablePartsFor(tool, c),
+            )
           : [];
 
         // The first required part that has not passed, in document order. Null
@@ -1516,7 +2866,6 @@ assessmentCasesRouter.get(
             loggedHours: loggedHoursFor(
               p.part,
               attempts.filter((a) => a.partKey === p.part.key),
-              fieldsByVersion,
             ),
           })),
           createdAt: c.createdAt,
@@ -1648,7 +2997,12 @@ assessmentCasesRouter.get(
     }
 
     const attempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+    const progress = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(attempts),
+      applicablePartsFor(tool, row),
+    );
 
     // Appeals AGAINST this case — the superseding record must be visible from
     // the superseded one, or a reviewer reading the original would take a
@@ -1681,6 +3035,47 @@ assessmentCasesRouter.get(
 
     const caseFields = await fieldsForVersion(db, row.currentVersionId);
 
+    // The case's reading state, when the tool links course material — enough
+    // for the case screen to show the course card and explain a gated part.
+    let courseBlock: {
+      courseId: string;
+      required: boolean;
+      missing: boolean;
+      title: string | null;
+      kind: string | null;
+      totalSlides: number | null;
+      viewedCount: number;
+      completedAt: string | null;
+    } | null = null;
+    const detailCourseLink = tool.manifest.course;
+    if (detailCourseLink) {
+      const courseRow = await db.query.courses.findFirst({
+        where: and(
+          eq(schema.courses.id, detailCourseLink.courseId),
+          eq(schema.courses.orgId, tenant.orgId),
+        ),
+      });
+      const active = courseRow && courseRow.status === 'active' ? courseRow : null;
+      const reading = active
+        ? await db.query.assessmentCaseCourseProgress.findFirst({
+            where: and(
+              eq(schema.assessmentCaseCourseProgress.caseId, row.id),
+              eq(schema.assessmentCaseCourseProgress.courseId, active.id),
+            ),
+          })
+        : null;
+      courseBlock = {
+        courseId: detailCourseLink.courseId,
+        required: detailCourseLink.required,
+        missing: !active,
+        title: active?.title ?? null,
+        kind: active?.kind ?? null,
+        totalSlides: active?.slideCount ?? null,
+        viewedCount: reading?.visitedSlides.length ?? 0,
+        completedAt: reading?.completedAt ? reading.completedAt.toISOString() : null,
+      };
+    }
+
     res.json({
       id: row.id,
       toolId: tool.id,
@@ -1698,12 +3093,14 @@ assessmentCasesRouter.get(
       currentVersionId: row.currentVersionId,
       prerequisiteWarnings: row.prerequisiteWarnings,
       appealOfCaseId: row.appealOfCaseId,
+      course: courseBlock,
       parts: progress.map((p) => ({
         key: p.part.key,
         label: p.part.label,
         kind: p.part.kind,
         ordinal: p.part.ordinal,
         minimumHours: p.part.minimumHours ?? null,
+        durationUnit: p.part.durationUnit ?? null,
         state: p.state,
         attempts: p.attempts,
         latestOutcome: p.latestOutcome,
@@ -1725,6 +3122,238 @@ assessmentCasesRouter.get(
         /** Any assessor-eligibility shortfall recorded when a person marked it (U14). */
         markingEligibilityWarnings: a.markingEligibilityWarnings,
       })),
+    });
+  }),
+);
+
+/**
+ * The case's course material, with a freshly minted content link.
+ *
+ * Split from the case detail because THIS is the route that mints a
+ * capability: opening the player is when a time-boxed token should start
+ * its clock, not every case screen render. `launchUrl` is a PATH the web
+ * app prefixes with its API base, for the same proxy reason the induction
+ * document links are paths.
+ */
+assessmentCasesRouter.get(
+  '/:id/course',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'view');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const tool = await loadTool(db, row.toolId, tenant.orgId);
+    if (!tool) {
+      res.status(409).json({ error: 'tool_missing' });
+      return;
+    }
+    const courseLink = tool.manifest.course;
+    if (!courseLink) {
+      res.json({ course: null });
+      return;
+    }
+    const courseRow = await db.query.courses.findFirst({
+      where: and(
+        eq(schema.courses.id, courseLink.courseId),
+        eq(schema.courses.orgId, tenant.orgId),
+      ),
+    });
+    if (!courseRow || courseRow.status !== 'active') {
+      res.json({
+        course: {
+          courseId: courseLink.courseId,
+          required: courseLink.required,
+          missing: true,
+          title: null,
+          kind: null,
+          totalSlides: null,
+          viewedCount: 0,
+          visitedSlides: [],
+          completedAt: null,
+          launchUrl: null,
+          expiresAt: null,
+        },
+      });
+      return;
+    }
+    const reading = await db.query.assessmentCaseCourseProgress.findFirst({
+      where: and(
+        eq(schema.assessmentCaseCourseProgress.caseId, row.id),
+        eq(schema.assessmentCaseCourseProgress.courseId, courseRow.id),
+      ),
+    });
+    const { prefix, expiresAt } = mintCourseContentPath(tenant.orgId, courseRow.id);
+    const encodedLaunch = courseRow.launchPath.split('/').map(encodeURIComponent).join('/');
+    res.json({
+      course: {
+        courseId: courseRow.id,
+        required: courseLink.required,
+        missing: false,
+        title: courseRow.title,
+        kind: courseRow.kind,
+        totalSlides: courseRow.slideCount,
+        viewedCount: reading?.visitedSlides.length ?? 0,
+        /**
+         * The indexes themselves, not just the count: the player seeds them
+         * into a reopened deck so its reading gate resumes at the frontier
+         * the server already recorded instead of re-locking from slide zero.
+         */
+        visitedSlides: reading?.visitedSlides ?? [],
+        completedAt: reading?.completedAt ? reading.completedAt.toISOString() : null,
+        launchUrl: `${prefix}/${encodedLaunch}`,
+        expiresAt,
+      },
+    });
+  }),
+);
+
+const courseProgressBody = z.object({
+  /** Zero-based slide indexes the player saw since its last report. */
+  visitedSlides: z.array(z.number().int().min(0).max(4999)).max(1000).optional(),
+  /**
+   * The read-through confirmation, for packages with no slide stream (SCORM
+   * or plain HTML). Ignored for a deck — a deck completes by being paged
+   * through, and accepting the shortcut would let one click skip the manual.
+   */
+  confirmRead: z.boolean().optional(),
+});
+
+/**
+ * Records reading progress on the case's course.
+ *
+ * Monotonic by construction: reported slides UNION into what is stored, and
+ * `completedAt`, once earned, is never recomputed away. Completion itself is
+ * derived HERE from the course's own rule — never accepted from the client —
+ * so the gate on opening attempts cannot be satisfied by a crafted request
+ * claiming totals the reading never reached... beyond the honesty of the
+ * indexes themselves, which is the same trust every filled answer gets.
+ */
+assessmentCasesRouter.patch(
+  '/:id/course-progress',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = courseProgressBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    // Reading is part of sitting the assessment, so it belongs to an OPEN
+    // case only — a resolved case's record is history, not a workbook.
+    if (row.state !== 'open') {
+      res.status(409).json({ error: 'case_not_open' });
+      return;
+    }
+    const tool = await loadTool(db, row.toolId, tenant.orgId);
+    if (!tool) {
+      res.status(409).json({ error: 'tool_missing' });
+      return;
+    }
+    const courseLink = tool.manifest.course;
+    if (!courseLink) {
+      res.status(404).json({ error: 'course_not_configured' });
+      return;
+    }
+    const courseRow = await db.query.courses.findFirst({
+      where: and(
+        eq(schema.courses.id, courseLink.courseId),
+        eq(schema.courses.orgId, tenant.orgId),
+      ),
+    });
+    if (!courseRow || courseRow.status !== 'active') {
+      res.status(404).json({ error: 'course_missing' });
+      return;
+    }
+
+    const existing = await db.query.assessmentCaseCourseProgress.findFirst({
+      where: and(
+        eq(schema.assessmentCaseCourseProgress.caseId, row.id),
+        eq(schema.assessmentCaseCourseProgress.courseId, courseRow.id),
+      ),
+    });
+
+    // Union, bounded by what the course actually has: an index past the deck
+    // is a player bug and must not be able to pad the count toward coverage.
+    const slideCount = courseRow.slideCount;
+    const visited = new Set<number>(existing?.visitedSlides ?? []);
+    if (slideCount !== null) {
+      for (const idx of parsed.data.visitedSlides ?? []) {
+        if (idx < slideCount) visited.add(idx);
+      }
+    }
+    const visitedList = [...visited].sort((a, b) => a - b);
+
+    const wasComplete = existing?.completedAt != null;
+    let complete = wasComplete;
+    if (!complete) {
+      if (courseRow.kind === 'deck' && slideCount !== null) {
+        complete = visitedList.length >= slideCount;
+      } else if (courseRow.kind !== 'deck') {
+        complete = parsed.data.confirmRead === true;
+      }
+    }
+    const completedAt = existing?.completedAt ?? (complete ? new Date() : null);
+
+    if (existing) {
+      await db
+        .update(schema.assessmentCaseCourseProgress)
+        .set({
+          visitedSlides: visitedList,
+          updatedAt: new Date(),
+          ...(complete && !wasComplete
+            ? { completedAt, completedByUserId: tenant.userId }
+            : {}),
+        })
+        .where(eq(schema.assessmentCaseCourseProgress.id, existing.id));
+    } else {
+      await db.insert(schema.assessmentCaseCourseProgress).values({
+        orgId: tenant.orgId,
+        caseId: row.id,
+        courseId: courseRow.id,
+        visitedSlides: visitedList,
+        ...(complete ? { completedAt, completedByUserId: tenant.userId } : {}),
+      });
+    }
+
+    if (complete && !wasComplete) {
+      await recordAudit(db, tenant, {
+        action: 'Completed course material',
+        target: courseRow.title,
+        category: 'submissions',
+        icon: 'book-open',
+      });
+    }
+
+    res.json({
+      viewedCount: visitedList.length,
+      totalSlides: slideCount,
+      completedAt: completedAt ? completedAt.toISOString() : null,
     });
   }),
 );
@@ -1838,7 +3467,14 @@ assessmentCasesRouter.post(
 
     const partKey = req.params.partKey!;
     const attempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+    // Narrowed to the case's Location — an excluded part is not in the list,
+    // so opening it refuses exactly as opening a part outside the pathway does.
+    const progress = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(attempts),
+      applicablePartsFor(tool, row),
+    );
     const target = progress.find((p) => p.part.key === partKey);
 
     if (!target) {
@@ -1859,6 +3495,43 @@ assessmentCasesRouter.post(
     if (open) {
       res.status(200).json({ id: open.id, attemptNumber: open.attemptNumber, reused: true });
       return;
+    }
+
+    /*
+      THE COURSE MATERIAL COMES BEFORE THE ASSESSMENT. A tool whose manifest
+      requires its course refuses to start ANY new attempt until this case's
+      reading record is complete — that is the whole meaning of "required".
+
+      Checked after the reuse return above, not before it: an attempt that was
+      already open when the requirement appeared (a mid-case workflow edit)
+      stays continuable, because refusing it would strand work in progress
+      rather than order it.
+
+      A link whose course has been archived or deleted degrades to UNENFORCED
+      rather than locking the assessment shut — a dangling pointer must never
+      be able to stop every case on the tool, and the case surface shows the
+      link as missing so someone fixes it.
+    */
+    const courseLink = tool.manifest.course;
+    if (courseLink?.required) {
+      const courseRow = await db.query.courses.findFirst({
+        where: and(
+          eq(schema.courses.id, courseLink.courseId),
+          eq(schema.courses.orgId, tenant.orgId),
+        ),
+      });
+      if (courseRow && courseRow.status === 'active') {
+        const reading = await db.query.assessmentCaseCourseProgress.findFirst({
+          where: and(
+            eq(schema.assessmentCaseCourseProgress.caseId, row.id),
+            eq(schema.assessmentCaseCourseProgress.courseId, courseRow.id),
+          ),
+        });
+        if (!reading?.completedAt) {
+          res.status(409).json({ error: 'course_not_complete', courseTitle: courseRow.title });
+          return;
+        }
+      }
     }
 
     /*
@@ -2001,11 +3674,12 @@ assessmentCasesRouter.get(
       person on the other side of this assessment", and an admin opening a case
       to fill in for an assessor is doing exactly that.
 
-      A supervisor is not yet distinguishable — nothing on the case names one —
-      so a workflow that assigns them work resolves to no writable fields rather
-      than to somebody else's. That is the safe direction: a section nobody can
-      currently fill is visible as stuck, where guessing would let the wrong
-      person sign a logbook.
+      Supervisor and SME sign-offs are applied by on-case staff as LABELLED
+      signatures when the org allows it (`fillParties`) — the assessor signing
+      on their behalf, as on paper. With that policy off, staff resolve to the
+      assessor alone, so a supervisor/SME-assigned field is left to nobody
+      rather than signed by the wrong party — the safe direction until
+      login-based attribution ships.
     */
     const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
     // The FIELDS matter here: a question's ✓/✗ cell is declared on the question,
@@ -2020,7 +3694,19 @@ assessmentCasesRouter.get(
     */
     const workflow = workflowOf(manifest, allFields);
     const partFields = fieldsInPart(allFields, manifest, attempt.partKey);
-    const access = partFieldAccess(workflow, attempt.partKey, partFields, party);
+    // The parties this caller may fill as: candidate, on-case staff (assessor
+    // plus labelled supervisor/SME), or both when self-assessing — all by org
+    // policy. `unionPartFieldAccess` over one party equals `partFieldAccess`.
+    const access = unionPartFieldAccess(
+      workflow,
+      attempt.partKey,
+      partFields,
+      fillParties({
+        party,
+        selfAssessing: await isSelfAssessing(db, tenant, row.candidateUserId),
+        labelled: await labelledSignoffAllowed(db, tenant.orgId),
+      }),
+    );
     const hidden = new Set(access.hidden);
     const visibleFields = partFields.filter((f) => !hidden.has(f.id));
 
@@ -2056,6 +3742,64 @@ assessmentCasesRouter.get(
     */
     const prereqIds = new Set((manifest.prerequisiteChecks ?? []).map((c) => c.fieldId));
     const prereqHere = visibleFields.some((f) => prereqIds.has(f.id));
+    /*
+      THE COMPLETION CHECKLIST TICKS ITSELF (manifest.partCompletionMarks).
+      Derived from the case's attempt rows on every read — the same source part
+      state itself comes from — and served over the stored value, so this
+      surface can never show a tick the progress does not back.
+    */
+    /*
+      Case progress, once — the completion ticks and the "what's next" step below
+      both read it, and it is the same derivation the part's own state comes from.
+    */
+    const caseAttempts = await attemptsFor(db, row.id);
+    // THIS case's required set — pathway narrowed by the tool's per-Location
+    // rule — read once for the progress, the "what's next" step and the
+    // completion ticks below, so all three agree about an excluded part.
+    const applicable = applicablePartsFor(tool, row);
+    const progress = caseProgress(
+      manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(caseAttempts),
+      applicable,
+    );
+
+    const completionIds = new Set((manifest.partCompletionMarks ?? []).map((m) => m.fieldId));
+    const completionValues: Record<string, SubmissionValue> = {};
+    if (visibleFields.some((f) => completionIds.has(f.id))) {
+      for (const f of visibleFields) {
+        if (!completionIds.has(f.id)) continue;
+        completionValues[f.id] = completionTickRows(
+          (manifest.partCompletionMarks ?? []).filter((m) => m.fieldId === f.id),
+          progress,
+          attempt.values?.[f.id],
+          applicable,
+        );
+      }
+    }
+
+    /*
+      WHAT COMES NEXT for whoever just finished this part — a "continue" they may
+      start, or a note that the next part is someone else's. Decided from the same
+      workflow access the open-attempt route enforces, so it never offers a step
+      the server would then refuse.
+    */
+    const nextStep = nextStepAfter(
+      progress.map((p) => {
+        const pf = fieldsInPart(allFields, manifest, p.part.key);
+        return {
+          key: p.part.key,
+          label: p.part.label,
+          state: p.state,
+          candidateFills: partFieldAccess(workflow, p.part.key, pf, 'candidate').writable.length > 0,
+          staffFills: STAFF_WORKFLOW_ROLES.some(
+            (r) => partFieldAccess(workflow, p.part.key, pf, r).writable.length > 0,
+          ),
+        };
+      }),
+      attempt.partKey,
+      party === 'candidate',
+    );
     const prereqValues: Record<string, boolean> = {};
     if (prereqHere) {
       for (const result of await evaluatePrerequisites(db, tenant.orgId, row.candidateUserId, manifest)) {
@@ -2064,6 +3808,38 @@ assessmentCasesRouter.get(
         }
       }
     }
+
+    /*
+      THE MARKING PASS: the assessor opening an attempt that is handed in but
+      not yet marked. Decided by PARTY, never by permission — a self-assessing
+      candidate is `party === 'candidate'` by identity and gets none of this,
+      because whatever else they may fill, the marks on their own paper are not
+      theirs to see early or to tick.
+
+      Two things change in that state, and only in that state:
+      - `writableFieldIds` narrows to the marking surface (the same set the
+        PATCH gate enforces, so the screen and the write rule agree), and
+      - the keyed questions' ✓/✗ are PRE-MARKED into the served values —
+        display only, merged UNDER the stored map so nothing a person recorded
+        is shadowed; they persist when the outcome is recorded, not here.
+    */
+    /*
+      A MARKER, NOT JUST A VIEWER. `party === 'assessor'` is identity — anybody
+      on the staff side of the case, a view-only role included. The marking
+      guide and the pre-marks are marking material, so they attach only for a
+      caller who could actually record a mark: the same org-wide
+      `assessments.edit` the marking-pass PATCH enforces (a candidate's
+      own-scoped grant resolves false there too). A view-only role reading a
+      case gets the stripped fields and nothing else.
+    */
+    const canMark = party === 'assessor' && (await hasPermission(tenant, 'assessments', 'edit'));
+    // Truthiness, not `!== null` — an unsubmitted attempt reads as absence,
+    // whichever of null/undefined the row happens to carry.
+    const markingPass = canMark && !!attempt.submittedAt && attempt.outcome === null;
+    const markingSurface = markingPass ? markingSurfaceIds(workflow, part, partFields) : null;
+    // Over the UNSTRIPPED visible fields — marking must see answerKey — and the
+    // STORED values, so a pre-mark reflects what the candidate actually handed in.
+    const preMarks = markingPass ? markKeyedQuestions(visibleFields, attempt.values).derivedValues : null;
 
     res.json({
       id: attempt.id,
@@ -2081,10 +3857,36 @@ assessmentCasesRouter.get(
       // Resolved, never raw: a manifest naming nothing means the default,
       // and `?? null` here spelled that as "stacked" on the fill surface.
       theoryRendering: theoryRenderingOf(manifest),
+      theoryRetry: theoryRetryOf(manifest),
+      theoryPassPercent: manifest.theoryPassPercent ?? null,
       attemptNumber: attempt.attemptNumber,
       outcome: attempt.outcome,
       submittedAt: attempt.submittedAt,
       templateVersionId: attempt.templateVersionId,
+      /*
+        Which side of the assessment this caller is on, so the screen can say
+        "marking" instead of "sitting" without re-deriving the identity rule.
+      */
+      party,
+      /*
+        THE ASSESSOR'S MARKING GUIDE — each written question's model answer,
+        served as a SEPARATE role-gated block rather than by un-stripping the
+        fields. `stripMarkingSecrets` stays unconditional above: one strip rule
+        with no branches is the property the leak tests pin, and the guide
+        travelling beside the fields means no candidate-shaped payload ever has
+        a shape that could carry a secret. Absent — not empty — for the
+        candidate, including a self-assessing one (`party` is identity), AND
+        for staff whose role cannot mark (`canMark` folds the permission in).
+      */
+      ...(canMark
+        ? {
+            markingGuide: visibleFields
+              .filter((f) => typeof f.modelAnswer === 'string' && f.modelAnswer.trim() !== '')
+              .map((f) => ({ fieldId: f.id, modelAnswer: f.modelAnswer as string })),
+          }
+        : {}),
+      /** The step after this part — a "continue", or a wait on the other party. */
+      nextStep,
       /**
        * The case's stream and the field its answer belongs in, so the renderer
        * can seed visibility exactly the way the exporter does — by answering the
@@ -2106,7 +3908,15 @@ assessmentCasesRouter.get(
         ? (allFields.find((f) => f.id === manifest.locationStreamFieldId) ?? null)
         : null,
       minimumHours: part.minimumHours ?? null,
+      // The unit the minimum and logged Duration are read in, so the fill
+      // surface labels "hrs"/"min" the same way the builder set it. Omitted =
+      // hours.
+      durationUnit: part.durationUnit ?? null,
       durationColumnKey: part.durationColumnKey ?? null,
+      // Per-task-type hour targets, so the fill surface can show live per-task
+      // progress. A soft target, like minimumHours — sent for display, never a
+      // gate on what the candidate may submit.
+      taskMinimums: part.taskMinimums ?? null,
       fields: stripMarkingSecrets(visibleFields).map((f) =>
         f.id === manifest.candidateSignatureFieldId && f.type === 'text'
           ? { ...f, type: 'signature' as const }
@@ -2134,19 +3944,30 @@ assessmentCasesRouter.get(
         to lock the box twice.
       */
       writableFieldIds: access.writable.filter(
-        (id) => !hidden.has(id) && !prefillMap[id] && !prereqIds.has(id),
+        (id) =>
+          !hidden.has(id) &&
+          !prefillMap[id] &&
+          !prereqIds.has(id) &&
+          !completionIds.has(id) &&
+          // On a marking pass only the marking surface stays writable — the
+          // candidate's answers are frozen the moment they handed in.
+          (!markingSurface || markingSurface.has(id)),
       ),
       /*
         Layering, least to most authoritative: tool DEFAULTS under everything —
         a default fills only where nothing exists, and the field stays
         writable — then the candidate's stored answers, then the derived
-        prefill and prerequisite verdicts, which nothing may shadow.
+        prefill, prerequisite and completion values, which nothing may shadow.
       */
       values: {
         ...defaultsFor(manifest, visibleFields),
+        // Display pre-marks, assessor-only, submitted-unmarked only — UNDER the
+        // stored values, so a cell anybody actually recorded always wins.
+        ...(preMarks ?? {}),
         ...(attempt.values ?? {}),
         ...prefill,
         ...prereqValues,
+        ...completionValues,
       },
     });
   }),
@@ -2220,10 +4041,78 @@ async function setSubmitted(
     return;
   }
 
+  /*
+    A DECLARATION IS CHECKED BEFORE IT IS STAMPED. It completes at hand-in with
+    nobody judging it, so hand-in is the only gate there is — and the gate has
+    to run before `submittedAt` is written, or an empty tap on Submit would
+    leave a submitted, auto-satisfied attestation with a blank signature box.
+
+    The tool is loaded on BOTH paths now: hand-in needs it for the gates and
+    the self-marking below, reopen needs it to know which stored cells were
+    the marking pass's to write (and must therefore be cleared).
+  */
+  const tool = await loadTool(db, row.toolId, tenant.orgId);
+  const part = tool ? orderedParts(tool.manifest).find((p) => p.key === attempt.partKey) : undefined;
+  if (submitting && tool && part?.kind === 'declaration') {
+    const fields = await fieldsForVersion(db, attempt.templateVersionId);
+    const missing = missingDeclarationFields(fields, tool.manifest, part.key, attempt.values);
+    if (missing.length > 0) {
+      res.status(400).json({
+        error: 'declaration_incomplete',
+        missing,
+        detail: `Fill ${missing.map((m) => `"${m.label}"`).join(', ')} before handing this in.`,
+      });
+      return;
+    }
+  }
+
   const submittedAt = submitting ? new Date() : null;
+
+  /*
+    REOPENING TAKES THE MARKING PASS'S WRITES BACK OUT.
+
+    A partial marking pass may already have ticked written questions' ✓/✗
+    cells and signed the part; the candidate taking the attempt back is about
+    to CHANGE the answers those judgments were made against, so leaving them
+    would hand the next marking pass a paper pre-labelled with verdicts on
+    prose nobody has read. Cleared, not kept: a re-mark re-ticks in minutes,
+    where a stale ✓ beside a rewritten answer is a finding nobody made.
+
+    Scoped to exactly what the marking pass owns:
+    - `assessorMarkBoxIds` — the unkeyed questions' declared ✓/✗ cells —
+      narrowed to SELF-ANSWERING fields, the same fence `markingSurfaceIds`
+      draws. A repeating-group target is skipped on purpose: the marking pass
+      cannot write tables, and deleting a shared table id would take the
+      candidate's own rows with it.
+    - the part's declared sign-off furniture (assessor name, signed date,
+      further action), which only means anything about a marked paper.
+    Practical criteria are untouched: they are plain Yes/No fields, never an
+    unkeyed question's outcomeTarget (`deriveChecklistOutcome` excludes
+    targets from its criteria for the same reason), so legitimate
+    pre-hand-in assessor ticks survive a reopen.
+  */
+  let reopenedValues: Record<string, SubmissionValue> | undefined;
+  if (!submitting && tool && part) {
+    const fields = await fieldsForVersion(db, attempt.templateVersionId);
+    const selfAnswering = new Set(
+      fields.filter((f) => SELF_ANSWERING_TYPES.includes(f.type)).map((f) => f.id),
+    );
+    const strip = new Set<string>(
+      assessorMarkBoxIds(tool.manifest, part, fields).filter((id) => selfAnswering.has(id)),
+    );
+    for (const id of [part.assessorNameFieldId, part.signedDateFieldId, part.furtherActionFieldId]) {
+      if (id) strip.add(id);
+    }
+    const stored = (attempt.values ?? {}) as Record<string, SubmissionValue>;
+    if ([...strip].some((id) => stored[id] !== undefined)) {
+      reopenedValues = { ...stored };
+      for (const id of strip) delete reopenedValues[id];
+    }
+  }
+
   await db
     .update(schema.assessmentPartAttempts)
-    .set({ submittedAt })
+    .set({ submittedAt, ...(reopenedValues ? { values: reopenedValues } : {}) })
     .where(eq(schema.assessmentPartAttempts.id, attempt.id));
 
   await recordAudit(db, tenant, {
@@ -2251,26 +4140,102 @@ async function setSubmitted(
     untouched: hand-in still just parks it for marking.
   */
   let marked: Awaited<ReturnType<typeof resolveAttemptOutcome>> | null = null;
-  if (submitting) {
-    const tool = await loadTool(db, row.toolId, tenant.orgId);
-    const part = tool ? orderedParts(tool.manifest).find((p) => p.key === attempt.partKey) : undefined;
-    if (tool && part) {
+  let theoryScore: { correctCount: number; totalCount: number } | null = null;
+  if (submitting && tool && part) {
+    /*
+      A DECLARATION COMPLETES AT HAND-IN. Signing it IS the act — there is no
+      arithmetic to run and no judgement to wait for, and parking it "for
+      marking" would queue an assessor visit whose only possible outcome is
+      pressing a button the candidate's signature already answered. The
+      completeness gate above is what makes this safe to do blind.
+    */
+    if (part.kind === 'declaration') {
+      marked = await resolveAttemptOutcome(db, tenant, {
+        row,
+        attempt,
+        manifest: tool.manifest,
+        locationPartKeys: tool.locationPartKeys ?? null,
+        outcome: 'satisfactory',
+        derivedValues: attempt.values ?? {},
+        disposition: null,
+        reason: null,
+        belowThresholdReason: null,
+        markingEligibilityWarnings: [],
+        marker: { kind: 'automatic' },
+      });
+    } else {
       // Unstripped on purpose — marking must see answerKey/outcomeTarget.
       const fields = await fieldsForVersion(db, attempt.templateVersionId);
       if (isSelfMarking(fields, tool.manifest, part.key)) {
-        const computed = markTheory({ fields, values: attempt.values, part });
+        const computed = markTheory({
+          fields,
+          values: attempt.values,
+          part,
+          passPercent: tool.manifest.theoryPassPercent,
+          manifest: tool.manifest,
+        });
+        theoryScore = { correctCount: computed.correctCount, totalCount: computed.totalCount };
+        /*
+          The part's printed verdict radio, when the author LOCKED it to
+          `auto` — same signal, same field rule as the practical's checklist
+          derivation. The quiz marking already knows the outcome; without this
+          the radio was un-typable AND unfilled, the exact gap (B) closed for
+          practicals.
+        */
+        const verdict = autoVerdictWrite(
+          fields,
+          tool.manifest,
+          part,
+          computed.outcome,
+          sectionForPart(workflowOf(tool.manifest, fields), part.key)?.fieldSource,
+        );
         marked = await resolveAttemptOutcome(db, tenant, {
           row,
           attempt,
           manifest: tool.manifest,
+          locationPartKeys: tool.locationPartKeys ?? null,
           outcome: computed.outcome,
-          derivedValues: computed.derivedValues,
+          derivedValues: verdict
+            ? { ...computed.derivedValues, [verdict.fieldId]: verdict.value }
+            : computed.derivedValues,
           disposition: computed.outcome === 'not_satisfactory' ? 'coaching_then_retry' : null,
           reason: null,
           belowThresholdReason: null,
           markingEligibilityWarnings: [],
           marker: { kind: 'automatic' },
         });
+      } else {
+        /*
+          A PRACTICAL PART WHOSE VERDICT THE AUTHOR LOCKED TO `auto` marks itself
+          from its Yes/No checklist at hand-in (B) — the assessor who ticked the
+          criteria need not also visit a marking form for a verdict the checklist
+          already states. Returns null for an ordinary judged part, which parks
+          for marking exactly as before.
+        */
+        const checklist = deriveChecklistOutcome(
+          fields,
+          tool.manifest,
+          part,
+          attempt.values,
+          sectionForPart(workflowOf(tool.manifest, fields), part.key)?.fieldSource,
+        );
+        if (checklist) {
+          marked = await resolveAttemptOutcome(db, tenant, {
+            row,
+            attempt,
+            manifest: tool.manifest,
+            locationPartKeys: tool.locationPartKeys ?? null,
+            outcome: checklist.outcome,
+            derivedValues: checklist.derivedValues,
+            disposition: checklist.outcome === 'not_satisfactory' ? 'coaching_then_retry' : null,
+            reason: null,
+            belowThresholdReason: null,
+            markingEligibilityWarnings: [],
+            // The assessor who filled the part IS the marker — a practical is
+            // judged by the person ticking it, not by nobody like a keyed paper.
+            marker: { kind: 'person', userId: tenant.userId, name: '' },
+          });
+        }
       }
     }
   }
@@ -2279,6 +4244,7 @@ async function setSubmitted(
     id: attempt.id,
     submittedAt,
     ...(marked ? { outcome: marked.outcome, caseState: marked.nextState } : {}),
+    ...(theoryScore ?? {}),
   });
 }
 
@@ -2293,6 +4259,103 @@ assessmentCasesRouter.post(
   ...GATE,
   withErrorHandling((req, res) => setSubmitted(req, res, false)),
 );
+
+/*
+  CHECK A SINGLE QUESTION — interactive theory feedback.
+
+  Returns whether one answer is correct, plus the author's hint when the
+  answer is wrong. Does NOT save the answer — that is still the save route's
+  job. The answer key never reaches the client; correctness is computed here
+  and only the boolean is returned.
+*/
+const checkQuestionBody = z.object({
+  fieldId: z.string(),
+  value: z.unknown(),
+});
+
+assessmentCasesRouter.post(
+  '/:id/attempts/:attemptId/check-question',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const attempt = await db.query.assessmentPartAttempts.findFirst({
+      where: and(
+        eq(schema.assessmentPartAttempts.id, req.params.attemptId!),
+        eq(schema.assessmentPartAttempts.caseId, row.id),
+      ),
+    });
+    if (!attempt) {
+      res.status(404).json({ error: 'attempt_not_found' });
+      return;
+    }
+    if (attempt.outcome !== null) {
+      res.status(409).json({ error: 'attempt_resolved' });
+      return;
+    }
+
+    const parsed = checkQuestionBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_body' });
+      return;
+    }
+    const { fieldId, value } = parsed.data;
+
+    // Load the UNSTRIPPED fields so answerKey is visible.
+    const fields = await fieldsForVersion(db, attempt.templateVersionId);
+    const field = fields.find((f) => f.id === fieldId);
+    if (!field || !field.answerKey || field.answerKey.length === 0) {
+      res.status(400).json({ error: 'not_a_keyed_question' });
+      return;
+    }
+
+    // Same exact-set-match as markTheory — duplicated to stay a thin check.
+    const selected = normalizeSelected(value);
+    const correct =
+      selected !== undefined && setEquals(selected, field.answerKey);
+
+    res.status(200).json({
+      correct,
+      ...(correct ? {} : { hint: field.answerHint ?? null }),
+    });
+  }),
+);
+
+function normalizeSelected(value: unknown): string[] | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (Array.isArray(value)) {
+    const opts = (value as unknown[])
+      .filter((v) => typeof v !== 'object' || v === null)
+      .map(String)
+      .filter((s) => s !== '');
+    return opts.length > 0 ? opts : undefined;
+  }
+  if (typeof value === 'boolean') return [value ? 'true' : 'false'];
+  if (typeof value === 'number') return [String(value)];
+  if (typeof value === 'string') return [value];
+  return undefined;
+}
+
+function setEquals(a: readonly string[], b: readonly string[]): boolean {
+  const left = new Set(a);
+  const right = new Set(b);
+  if (left.size !== right.size) return false;
+  for (const item of left) if (!right.has(item)) return false;
+  return true;
+}
 
 const saveValuesBody = z.object({ values: z.record(z.string(), z.unknown()) });
 
@@ -2345,10 +4408,20 @@ assessmentCasesRouter.patch(
       res.status(409).json({ error: 'attempt_resolved' });
       return;
     }
-    // Handed in, not yet marked. Refusing here is what makes "submitted" mean
-    // anything — otherwise the answers could keep moving while the assessor was
-    // reading them. The candidate can reopen it themselves; nothing is lost.
-    if (attempt.submittedAt) {
+    /*
+      Handed in, not yet marked. Refusing the CANDIDATE here is what makes
+      "submitted" mean anything — otherwise the answers could keep moving while
+      the assessor was reading them; they can reopen it themselves, nothing is
+      lost. STAFF are the exception, because on a mixed part marking IS writing:
+      the assessor ticks each written question's ✓/✗ and signs the part. Their
+      writable set narrows below to exactly that MARKING SURFACE, so the
+      candidate's frozen answers stay frozen either way. Party by identity, the
+      same rule as everywhere on this router — a self-assessing candidate is
+      the candidate, and still 409s.
+    */
+    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
+    const markingPass = !!attempt.submittedAt;
+    if (markingPass && party === 'candidate') {
       res.status(409).json({ error: 'attempt_submitted' });
       return;
     }
@@ -2395,7 +4468,6 @@ assessmentCasesRouter.patch(
       fields, whose values come from the case record or from marking and must
       not be typed over.
     */
-    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
     /*
       Read ONCE and passed to both, because `workflowOf` needs the fields too:
       a question's ✓/✗ cell is declared on the question rather than in the
@@ -2403,16 +4475,43 @@ assessmentCasesRouter.patch(
       a candidate's typed outcome would be accepted here.
     */
     const versionFields = tool ? await fieldsForVersion(db, attempt.templateVersionId) : [];
-    const allowed = tool
+    // Derived ONCE and passed to both consumers — the union below and the
+    // marking-surface narrowing — the same pattern the attempt GET uses, so
+    // the two cannot be computed from different inputs.
+    const workflow = tool ? workflowOf(tool.manifest, versionFields) : null;
+    const partFields = tool ? fieldsInPart(versionFields, tool.manifest, attempt.partKey) : [];
+    // The same union the attempt GET serves — a self-assessor must be able to
+    // SAVE every field the surface showed them as writable.
+    const selfAssessing = tool ? await isSelfAssessing(db, tenant, row.candidateUserId) : false;
+    const labelled = tool ? await labelledSignoffAllowed(db, tenant.orgId) : false;
+    const allowed = workflow
       ? new Set(
-          partFieldAccess(
-            workflowOf(tool.manifest, versionFields),
+          unionPartFieldAccess(
+            workflow,
             attempt.partKey,
-            fieldsInPart(versionFields, tool.manifest, attempt.partKey),
-            party,
+            partFields,
+            fillParties({ party, selfAssessing, labelled }),
           ).writable,
         )
       : null;
+
+    /*
+      ON A MARKING PASS THE ALLOWED SET NARROWS TO THE MARKING SURFACE — the
+      same set the fill route served as `writableFieldIds`, so the screen and
+      this gate cannot disagree. Intersection, not replacement: a furniture id
+      the workflow does not let this party write stays refused. A submitted
+      attempt whose tool or part cannot be loaded has no computable surface, so
+      it keeps the flat refusal it always had rather than falling open to the
+      whole part.
+    */
+    if (markingPass) {
+      if (!workflow || !part || !allowed) {
+        res.status(409).json({ error: 'attempt_submitted' });
+        return;
+      }
+      const surface = markingSurfaceIds(workflow, part, partFields);
+      for (const id of [...allowed]) if (!surface.has(id)) allowed.delete(id);
+    }
 
     let values: Record<string, SubmissionValue> = { ...stored };
     if (allowed) {
@@ -2439,46 +4538,38 @@ assessmentCasesRouter.patch(
       // Whatever the client sent for a derived cell is discarded: hours count
       // toward a safety threshold, so the meter arithmetic must not be
       // forgeable by editing a request body.
+      //
+      // Recomputed for EVERY repeating table in the values, each against its
+      // OWN columns — a logbook part may hold several (Part 5's supervised and
+      // minimal-supervision logs). The old code recomputed only the first table
+      // and passed the rest through untouched, which left the second table's
+      // hours exactly as forgeable as the recompute was there to prevent. The
+      // values are already this part's own fields, so matching a value key to a
+      // repeating-group field id recomputes this part's tables and nothing else.
       const fields = await fieldsForVersion(db, attempt.templateVersionId);
-      const table = fieldsInSection(fields, part.startFieldId).find(
-        (f) => f.type === 'repeating_group',
+      const columnsByTableId = new Map(
+        fields
+          .filter((f) => f.type === 'repeating_group')
+          .map((f) => [f.id, f.columns] as const),
       );
-
       const durationKey = part.durationColumnKey;
       values = Object.fromEntries(
         Object.entries(values).map(([k, v]) => {
-          if (!Array.isArray(v) || (table && k !== table.id)) return [k, v];
-          const rows = applyCalcs(table?.columns, v as RepeatingRowValue[]);
-          return [k, rows];
+          const columns = columnsByTableId.get(k);
+          if (!columns || !Array.isArray(v)) return [k, v];
+          return [k, applyCalcs(columns, v as RepeatingRowValue[])];
         }),
       );
 
-      // Shared with the progress dashboard and the retry carry-forward. The old
-      // fallback here took the first array of ANY kind, which would have counted
-      // a checkbox group's answers as logbook rows.
-      const rows: RepeatingRowValue[] = logbookRows(fields, part, values);
-
-      // A row whose duration is present but not a positive number is a
-      // mis-entry (zero, negative, or meter readings that go backwards — a
-      // calc writes '' for those). Refusing it keeps "hours that count" and
-      // "rows on the record" the same set, so the exported logbook cannot
-      // show entries the threshold quietly ignored.
-      const bad = (rows ?? []).findIndex((r) => {
-        const raw = r?.[durationKey];
-        if (raw === undefined || raw === null) return false;
-        const n = typeof raw === 'number' ? raw : Number.parseFloat(String(raw));
-        return !(Number.isFinite(n) && n > 0);
-      });
-      if (bad >= 0) {
-        res.status(400).json({
-          error: 'invalid_logbook_row',
-          row: bad,
-          message: `Row ${bad + 1} has no positive ${durationKey} — check the start and finish readings.`,
-        });
-        return;
-      }
-
-      hours = totalLoggedHours(rows ?? [], durationKey);
+      // Summed across ALL the part's tables — see `logbookDurationRows`. A
+      // half-filled or blank row (its calc duration still '') simply does not
+      // count: progressive saving is the whole point of a logbook filled a
+      // shift at a time, so a row the candidate has not finished must never
+      // reject the save. The old code refused any non-positive duration here,
+      // which meant a single in-progress row — or an empty one left ready for
+      // the next entry — made "save progress" impossible. Completeness is the
+      // minimum-hours threshold's job, judged at submit, not this route's.
+      hours = totalLoggedHours(logbookDurationRows(part, values), durationKey);
       thresholdReached =
         part.minimumHours != null && hours >= part.minimumHours && attempt.thresholdNotifiedAt === null;
     }
@@ -2559,7 +4650,40 @@ assessmentCasesRouter.post(
       return;
     }
 
-    const attempts = await attemptsFor(db, row.id);
+    const attemptRows = await attemptsFor(db, row.id);
+    /*
+      FILL THE MARKS OLDER ATTEMPTS NEVER STORED. `withDerivedMarks` re-runs
+      the marking arithmetic over each passing self-marked attempt against ITS
+      OWN version's keys, merging under the stored values — so the printed
+      ✓/✗ column, verdict pair and further-action note appear on attempts
+      marked before the marking wrote them, and nothing already recorded is
+      touched. Version fields are fetched once per distinct version.
+    */
+    const versionFieldsById = new Map<string, FormField[]>();
+    const attempts: CaseAttemptRecord[] = [];
+    for (const a of attemptRows) {
+      let versionFields = versionFieldsById.get(a.templateVersionId);
+      if (!versionFields) {
+        versionFields = await fieldsForVersion(db, a.templateVersionId);
+        versionFieldsById.set(a.templateVersionId, versionFields);
+      }
+      attempts.push(
+        withDerivedMarks(
+          {
+            partKey: a.partKey,
+            attemptNumber: a.attemptNumber,
+            outcome: a.outcome,
+            values: a.values,
+            // COLUMNS, not values. Dropping them here is why every printed
+            // "assessor name" and date box exported blank.
+            assessorName: a.assessorName,
+            signedAt: a.signedAt,
+          },
+          versionFields,
+          tool.manifest,
+        ),
+      );
+    }
     /*
       Resolved here rather than read off a filled field, because the cover page
       belongs to NO part — `fieldsInPart` slices from part 1's anchor onward, so
@@ -2585,6 +4709,9 @@ assessmentCasesRouter.post(
       const out = await exportCasePdf({
         originalPdf: original,
         fields: (version.fields ?? []) as FormField[],
+        // The PINNED version's paper identity — a case that finished on Rev 2
+        // keeps printing Rev 2 after a Rev 3 republishes.
+        revisionIdentity: version.revisionIdentity ?? null,
         manifest: tool.manifest,
         pathway: row.pathway as AssessmentPathway,
         locationStream: exportLocationName,
@@ -2601,16 +4728,7 @@ assessmentCasesRouter.post(
             (r) => [r.fieldId, r.satisfied],
           ),
         ),
-        attempts: attempts.map((a) => ({
-          partKey: a.partKey,
-          attemptNumber: a.attemptNumber,
-          outcome: a.outcome,
-          values: a.values,
-          // COLUMNS, not values. Dropping them here is why every printed
-          // "assessor name" and date box exported blank.
-          assessorName: a.assessorName,
-          signedAt: a.signedAt,
-        })),
+        attempts,
         /*
           Null until the assessor signs, which gates the whole certification
           block. A mid-programme export prints the front page blank, exactly as
@@ -2622,6 +4740,15 @@ assessmentCasesRouter.post(
         // Resolved = finished either way. The coaching pair is written on a
         // resolved case only; while it is open, neither box is ticked.
         resolved: isTerminalCaseState(row.state as AssessmentCaseState),
+        // What THIS case requires, so a multi-part completion row is judged
+        // against the parts this candidate actually sits — the other
+        // location's paper never blocks the tick.
+        applicablePartKeys: casePartKeys(
+          tool.manifest,
+          row.pathway as AssessmentPathway,
+          tool.locationPartKeys ?? {},
+          row.locationId,
+        ),
       });
       res.setHeader('Content-Type', 'application/pdf');
       res.send(Buffer.from(out));
@@ -2822,6 +4949,8 @@ async function resolveAttemptOutcome(
     row: NonNullable<Awaited<ReturnType<typeof loadCase>>>;
     attempt: { id: string; partKey: string; attemptNumber: number };
     manifest: AssessmentToolManifest;
+    /** The tool's per-Location parts rule, so case state reads what THIS case requires. */
+    locationPartKeys: LocationPartKeys | null;
     outcome: 'satisfactory' | 'not_satisfactory';
     derivedValues: Record<string, SubmissionValue>;
     disposition: (typeof NS_DISPOSITIONS)[number] | null;
@@ -2851,9 +4980,16 @@ async function resolveAttemptOutcome(
     })
     .where(eq(schema.assessmentPartAttempts.id, attempt.id));
 
-  // Recompute case state from the rows rather than incrementing a counter.
+  // Recompute case state from the rows rather than incrementing a counter —
+  // over what THIS case requires, so a Location-excluded part never holds a
+  // finished case open.
   const attempts = await attemptsFor(database, row.id);
-  const progress = caseProgress(input.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+  const progress = caseProgress(
+    input.manifest,
+    row.pathway as AssessmentPathway,
+    toAttemptFacts(attempts),
+    applicablePartsFor({ manifest: input.manifest, locationPartKeys: input.locationPartKeys }, row),
+  );
   const allPartsPassed = isCaseCompetent(progress);
   // The RESOLVED disposition, not the requested one — a computed fail that
   // defaulted to coaching keeps the case open, which is the whole point.
@@ -2982,13 +5118,63 @@ assessmentCasesRouter.post(
     // `fieldsForVersion` is UNSTRIPPED — the gate must see answerKey/outcomeTarget.
     const computed = isSelfMarking(fields, tool.manifest, part.key);
 
+    /*
+      A PRACTICAL PART WHOSE VERDICT THE AUTHOR LOCKED TO `auto` marks itself from
+      its Yes/No checklist (B): every criterion ticked Yes is satisfactory, any No
+      or untouched box is not. Like a keyed part, the SYSTEM decides it — so the
+      assessor is not asked to re-pick a verdict the checklist already states, and
+      a manual `outcome` in the request is ignored in favour of the derivation.
+    */
+    const checklist = computed
+      ? null
+      : deriveChecklistOutcome(
+          fields,
+          tool.manifest,
+          part,
+          attempt.values,
+          sectionForPart(workflowOf(tool.manifest, fields), part.key)?.fieldSource,
+        );
+
     if (computed) {
-      const marked = markTheory({ fields, values: attempt.values, part });
+      const marked = markTheory({ fields, values: attempt.values, part, manifest: tool.manifest });
       outcome = marked.outcome;
       derivedValues = marked.derivedValues;
-    } else if (!outcome) {
-      res.status(400).json({ error: 'outcome_required' });
-      return;
+    } else if (checklist) {
+      outcome = checklist.outcome;
+      derivedValues = checklist.derivedValues;
+    } else {
+      if (!outcome) {
+        res.status(400).json({ error: 'outcome_required' });
+        return;
+      }
+      /*
+        MIXED MARKING (D4): a JUDGED part still pre-marks its KEYED SUBSET.
+
+        The verdict is the assessor's — nothing above changed — but the keyed
+        choice questions' ✓/✗ are arithmetic the machine already did on the
+        fill surface, and leaving them out of the stored values printed four
+        permanently blank boxes on every mixed paper. Same discipline as the
+        computed branch: `markKeyedQuestions` over the version's UNSTRIPPED
+        fields, visibility deciding which questions count. Merged UNDER the
+        stored values (the `withDerivedMarks` precedent): a cell any person
+        recorded — every written question's assessor-ticked box, or a keyed
+        cell someone overrode before these locked — is never rewritten.
+        Deliberately NO part verdict and NO auto-locked radio write
+        (`autoVerdictWrite` stays a self-marking-branch act, the #269 line):
+        the machine holds only some of this part's evidence.
+
+        SCOPED TO THE PART'S OWN SLICE, mirroring `withDerivedMarks` in
+        case-export.ts. Marking the WHOLE version here read every OTHER part's
+        keyed questions as unanswered and wrote their ✗ into THIS attempt's
+        stored values — and the export's per-part merge then let a later
+        judged attempt's foreign ✗ overwrite the keyed part's real ✓ on the
+        certified PDF.
+      */
+      const preMarked = markKeyedQuestions(
+        fieldsInPart(fields, tool.manifest, part.key),
+        attempt.values,
+      );
+      derivedValues = { ...preMarked.derivedValues, ...(attempt.values ?? {}) };
     }
 
     let disposition = parsed.data.disposition ?? null;
@@ -3018,7 +5204,10 @@ assessmentCasesRouter.post(
       because there the assessor really did decide something.
     */
     if (outcome === 'not_satisfactory') {
-      if (computed) {
+      if (computed || checklist) {
+        // A system-decided fail — keyed arithmetic or the checklist — needs no
+        // written reason: the missed questions or the un-ticked criteria are the
+        // reason, and it defaults to coach-and-retry like any computed fail.
         disposition = disposition ?? 'coaching_then_retry';
       } else if (!(disposition && reason)) {
         res.status(400).json({ error: 'disposition_and_reason_required' });
@@ -3065,6 +5254,7 @@ assessmentCasesRouter.post(
       row,
       attempt,
       manifest: tool.manifest,
+      locationPartKeys: tool.locationPartKeys ?? null,
       outcome,
       derivedValues,
       disposition,
@@ -3094,6 +5284,11 @@ const signOffBody = z.object({
     empty signature box and nothing to explain it.
   */
   signature: z.string().regex(/^data:image\/png;base64,/),
+  /*
+    Required — and verified — only when `signature` is the signer's STORED
+    mark (see the gate in the route). A fresh drawing never carries one.
+  */
+  password: z.string().min(1).optional(),
 });
 
 /**
@@ -3155,6 +5350,59 @@ assessmentCasesRouter.post(
     }
 
     /*
+      THE STORED MARK IS A DIGITAL ID (KTD1). A submitted signature identical
+      to the signer's SAVED one is the application of a stored credential, not
+      a fresh drawing — so the request must prove its holder is at the
+      keyboard: the password, verified through the same primitive login uses
+      and throttled with /auth/confirm-password's counter. A fresh drawing
+      skips the gate entirely — drawing is itself the act. And an account with
+      no password (invite-created) cannot be asked for one it does not have,
+      so the gate stands down and the session + permission matrix remain the
+      unchanged authorization.
+    */
+    const signer = await db.query.users.findFirst({
+      where: eq(schema.users.id, tenant.userId),
+    });
+    /*
+      CANONICALISE BEFORE COMPARING. The body regex tolerates whitespace in the
+      base64 and the exporter strips it before decoding, so a space-padded copy
+      of the stored mark exports byte-identical pixels while a raw `===` reads
+      it as a different string. Comparing whitespace-stripped forms closes that
+      one-character bypass of the gate; a genuinely fresh drawing only matches
+      here if its bytes are identical, which is exactly the stored-mark case.
+    */
+    const submittedCanonical = parsed.data.signature.replace(/\s+/g, '');
+    const storedCanonical = signer?.signature?.replace(/\s+/g, '');
+    const applyingStoredMark = Boolean(
+      storedCanonical && signer?.passwordHash && submittedCanonical === storedCanonical,
+    );
+    let confirmedStoredMark = false;
+    if (applyingStoredMark) {
+      if (rejectIfLocked(res, tenant.userId)) return;
+      if (!parsed.data.password) {
+        // A UI state, not a guess — absence never counts toward the throttle.
+        res.status(401).json({
+          error: 'password_required',
+          message: 'Applying your saved signature needs your password.',
+        });
+        return;
+      }
+      // Record the attempt at admission (before the awaited compare), so
+      // concurrent requests cannot all clear the throttle first — same fix as
+      // /auth/confirm-password. Success clears the slate below.
+      recordConfirmFailure(tenant.userId);
+      const valid = await comparePassword(parsed.data.password, signer!.passwordHash);
+      if (!valid) {
+        res
+          .status(401)
+          .json({ error: 'invalid_credentials', message: 'Invalid username or password.' });
+        return;
+      }
+      recordConfirmSuccess(tenant.userId);
+      confirmedStoredMark = true;
+    }
+
+    /*
       THE HARD GATE. Unsatisfied prerequisites never blocked the assessment —
       the candidate sat it, the marks stand — but `competent` is a certificate,
       and certifying somebody whose licence is expired or missing is exactly
@@ -3182,10 +5430,19 @@ assessmentCasesRouter.post(
       res.status(409).json({ error: 'case_closed' });
       return;
     }
-    // Nobody certifies themselves, even holding an assessor role.
+    /*
+      Nobody certifies themselves — unless the ORGANISATION says its assessors
+      may. Self-assessment is a real policy that differs between registered
+      training setups, so it is the org's switch (default off), never inferred
+      from the caller holding an assessor role. The permission gate above still
+      applies: a candidate-role user cannot reach this route at all, so "self"
+      here always means a qualified person signing their own case.
+    */
     if (tenant.userId === row.candidateUserId) {
-      res.status(409).json({ error: 'candidate_cannot_sign_off' });
-      return;
+      if (!(await selfAssessmentAllowed(db, tenant.orgId))) {
+        res.status(409).json({ error: 'candidate_cannot_sign_off' });
+        return;
+      }
     }
 
     const tool = await loadTool(db, row.toolId, tenant.orgId);
@@ -3204,7 +5461,12 @@ assessmentCasesRouter.post(
       attempt.
     */
     const attempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+    const progress = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(attempts),
+      applicablePartsFor(tool, row),
+    );
     if (!isCaseCompetent(progress)) {
       res.status(409).json({
         error: 'parts_incomplete',
@@ -3253,6 +5515,27 @@ assessmentCasesRouter.post(
       .where(eq(schema.assessmentCases.id, row.id));
 
     /*
+      REMEMBER THE SIGNATURE, so the next sign-off prefills it and the assessor
+      draws it once rather than on every certification. A convenience write, not
+      part of the certification: it is wrapped so a failure to remember can never
+      sink a sign-off that has already been recorded — the same doctrine the
+      competency grant below follows.
+
+      STANDS DOWN FOR A DELIBERATE SAVE (`signature_saved_at`): a signature the
+      person chose on My signature is a decision, and a one-off drawing at this
+      sign-off must not silently replace it. Absent that marker, this remember
+      remains the only population path, exactly as before.
+    */
+    try {
+      await db
+        .update(schema.users)
+        .set({ signature: parsed.data.signature })
+        .where(and(eq(schema.users.id, tenant.userId), isNull(schema.users.signatureSavedAt)));
+    } catch {
+      // The case is signed off regardless; the signature simply is not remembered.
+    }
+
+    /*
       THIS TARGET IS THE ONLY DURABLE RECORD OF THE SIGN-OFF-TIME CHECK.
 
       The case's `prerequisiteWarnings` column is written once, at creation,
@@ -3275,6 +5558,26 @@ assessmentCasesRouter.post(
       category: 'submissions',
       icon: 'circle-check',
     });
+
+    /*
+      R8: when the certification applied the assessor's STORED mark, the
+      password confirmation that authorised it gets its own security-category
+      entry — mirroring /auth/confirm-password's — so the who/when of applying
+      a saved credential is recorded, not just the sign-off. Best-effort: a
+      failed log row never unwinds a recorded certification.
+    */
+    if (confirmedStoredMark) {
+      try {
+        await recordAudit(db, tenant, {
+          action: 'Confirmed identity to apply saved signature',
+          target: `case ${row.id}`,
+          category: 'security',
+          icon: 'pen-line',
+        });
+      } catch {
+        // The case is signed off regardless; the security note simply is not written.
+      }
+    }
 
     /*
       THE POINT OF THE WHOLE THING: passing the assessment puts the candidate on

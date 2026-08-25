@@ -25,9 +25,14 @@
  *    into anybody's data.
  */
 
-import type { AssessmentPathway, AssessmentToolManifest, TheoryRendering } from './assessment.js';
+import type {
+  AssessmentPathway,
+  AssessmentToolManifest,
+  TheoryRendering,
+  TheoryRetryMode,
+} from './assessment.js';
 import type { ExtractionResult } from './extraction.js';
-import { GLYPH_KINDS, type FormField, type GlyphKind } from './form-field.js';
+import { GLYPH_KINDS, type FieldGeometry, type FormField, type GlyphKind } from './form-field.js';
 import type { AssessmentWorkflow } from './workflow.js';
 
 /* ------------------------------------------------------------------ *
@@ -164,6 +169,17 @@ export interface SetupAnswers {
   passPercentage?: number;
   theoryRendering: TheoryRendering;
   thresholdBehaviour: ThresholdBehaviour;
+  /**
+   * @deprecated Superseded by `theoryRetry`; kept so a draft saved before the
+   * mode existed still loads. The UI migrates it to `theoryRetry` on edit.
+   */
+  theoryAllowRetry?: boolean;
+  /**
+   * When a candidate may retry a theory part they got wrong: `off`, on the spot
+   * (`immediate`, one-per-screen only), or a whole-quiz re-attempt at the end
+   * (`end`). Defaults to `end`, which is what a tool did before this existed.
+   */
+  theoryRetry?: TheoryRetryMode;
 }
 
 export const DEFAULT_SETUP_ANSWERS: SetupAnswers = {
@@ -172,6 +188,7 @@ export const DEFAULT_SETUP_ANSWERS: SetupAnswers = {
   passRule: 'mandatory_all_correct',
   theoryRendering: 'one_per_screen',
   thresholdBehaviour: 'notify',
+  theoryRetry: 'end',
 };
 
 /* ------------------------------------------------------------------ *
@@ -263,8 +280,21 @@ export type KeySource = (typeof KEY_SOURCES)[number];
 export interface DraftAnswerKey {
   /** The question field's id. */
   fieldId: string;
-  /** Option values that TOGETHER make a correct answer — exact-set, as marking. */
+  /**
+   * Option values that TOGETHER make a correct answer — exact-set, as marking.
+   *
+   * `[]` for a WRITTEN key: a text/textarea question has no options to key, so
+   * its draft carries `modelAnswer` instead and the option list stays empty.
+   * The two are mutually exclusive by shape, not by rule — the target question
+   * decides which one it can hold.
+   */
   answerKey: string[];
+  /**
+   * The assessor's marking guide for a written question — prose, judged by a
+   * person. Published onto `FormField.modelAnswer`; never auto-compared. See
+   * the contract on the field.
+   */
+  modelAnswer?: string;
   source: KeySource;
   /**
    * Who attested to this answer, and when.
@@ -352,6 +382,31 @@ export interface QuestionPlacementPair {
 }
 
 /**
+ * The paper document's own revision identity, recorded on the version that
+ * digitised it — "Rev 3, reviewed 08/2026 — annual review". All three fields
+ * are the document's words, not the system's: the internal version label
+ * (v1, v2) stays the system identity, this is what auditors recognise.
+ *
+ * Written onto a form template version only by the assessment-tool republish
+ * path; plain forms never carry one.
+ */
+export interface RevisionIdentity {
+  /** The revision code as printed on the document — "Rev 3", "v6.1". */
+  code?: string;
+  /** When the document was reviewed, verbatim ("08/2026") — free text, not a date. */
+  reviewedOn?: string;
+  /** What changed and why — the human severity signal assessors read. */
+  note?: string;
+}
+
+/**
+ * Field length ceilings for a `RevisionIdentity`, enforced at the API boundary.
+ * The note prints on evidence exports; an unbounded one would bloat every
+ * version row and overflow the identity line into mapped boxes.
+ */
+export const REVISION_IDENTITY_LIMITS = { code: 64, reviewedOn: 32, note: 2000 } as const;
+
+/**
  * Everything an in-progress assessment tool consists of.
  *
  * One row, one shape — deliberately mirroring `import_drafts` rather than
@@ -409,6 +464,39 @@ export interface BuilderDraft {
    * whose fields belong to whichever the map read last.
    */
   groupCount?: number;
+  /**
+   * Set when this draft REVISES a published tool rather than building a new
+   * one. The seed copies the published version's fields verbatim — field ids
+   * are the spine the manifest, keys and outcome targets hang off — and the
+   * publish step calls republish on this tool instead of creating one.
+   */
+  revisionOfToolId?: string;
+  /**
+   * The version the revision was seeded from. Republish compares it to the
+   * template's current version and refuses `stale_revision` when somebody
+   * else published in between — a revision of v1 must not silently discard v2.
+   */
+  seededFromVersionId?: string;
+  /** The paper revision identity captured for the version this draft publishes. */
+  revisionIdentity?: RevisionIdentity;
+  /**
+   * The tool's manifest as it stood at seed time. Republish starts from this
+   * and overlays what the builder derives, so workflow-editor extras the
+   * builder does not model survive a revision untouched.
+   */
+  revisionToolManifest?: AssessmentToolManifest;
+  /** The seeded source PDF's handle, so "revert to original" can restore it. */
+  seedAssetId?: string;
+  /**
+   * Geometry carried from the seeded version after the PDF was REPLACED,
+   * keyed by field id. These are pre-placed PROPOSALS, never confirmed
+   * geometry: a box confirmed against the old document's layout was not
+   * confirmed against the new one, and `FormField.geometry` means confirmed
+   * everywhere it is read. The placement step seeds these as needs-review
+   * proposals; confirming writes them onto the version's fields. Empty when
+   * the PDF was kept — geometry then stays on the fields, still confirmed.
+   */
+  carriedGeometry?: Record<string, FieldGeometry>;
   createdAt: string;
   updatedAt: string;
 }

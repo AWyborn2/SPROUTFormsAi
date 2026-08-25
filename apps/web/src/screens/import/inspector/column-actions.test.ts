@@ -249,4 +249,56 @@ describe('builderColumnActions', () => {
       expect(resolveAnswerSets(next).sets[0]?.columnKeys).toEqual(['ok', 'no', 'na']);
     });
   });
+
+  describe('setColumnAutoStamp', () => {
+    /** A task-log open table with a date column to stamp. */
+    const log: FormField = {
+      ...openTable,
+      columns: [
+        { key: 'date', label: 'Date', type: 'date' },
+        { key: 'task', label: 'Task', type: 'dropdown', options: ['Topsoil', 'Gravel'] },
+        { key: 'hours', label: 'Duration', type: 'number' },
+      ],
+    };
+
+    it('turns auto-stamp on for the date column', () => {
+      const next = afterAction(log, (a) => a.setColumnAutoStamp(log.id, 'date', true));
+      expect(next.columns?.find((c) => c.key === 'date')?.autoStamp).toBe(true);
+    });
+
+    it('clears the flag ENTIRELY when turned off, never storing false', () => {
+      // An unused table must carry no flag — matching how setColumnCalc clears.
+      const on = afterAction(log, (a) => a.setColumnAutoStamp(log.id, 'date', true));
+      const off = afterAction(on, (a) => a.setColumnAutoStamp(log.id, 'date', false));
+      expect('autoStamp' in (off.columns?.find((c) => c.key === 'date') ?? {})).toBe(false);
+    });
+
+    it('leaves the other columns untouched', () => {
+      const next = afterAction(log, (a) => a.setColumnAutoStamp(log.id, 'date', true));
+      expect(next.columns?.find((c) => c.key === 'task')?.autoStamp).toBeUndefined();
+      expect(next.columns?.find((c) => c.key === 'hours')?.autoStamp).toBeUndefined();
+    });
+
+    it('ignores a column that is not in the table', () => {
+      const next = afterAction(log, (a) => a.setColumnAutoStamp(log.id, 'ghost', true));
+      expect(next.columns).toEqual(log.columns);
+    });
+  });
+
+  describe('setFixedRows', () => {
+    it('replaces the checklist rows verbatim', () => {
+      const next = afterAction(table, (a) =>
+        a.setFixedRows(table.id, ['Engine oil level', 'Coolant', 'Service brake']),
+      );
+      expect(next.fixedRows).toEqual(['Engine oil level', 'Coolant', 'Service brake']);
+    });
+
+    it('normalizes an empty list to undefined — the model never stores an empty fixedRows', () => {
+      // Clearing every row is how a checklist becomes an open table again; a
+      // stored empty array would be a checklist with no items, which nothing
+      // downstream expects.
+      const next = afterAction(table, (a) => a.setFixedRows(table.id, []));
+      expect(next.fixedRows).toBeUndefined();
+    });
+  });
 });

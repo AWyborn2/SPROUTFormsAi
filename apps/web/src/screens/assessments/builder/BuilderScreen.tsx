@@ -144,6 +144,52 @@ export function BuilderScreen() {
   );
 
   /*
+    THE SAVE SIGNAL, ON EVERY STEP — Generate and Placement included.
+
+    The hint above promises "your work saves as you go". A single "Saved HH:MM"
+    stamp made that uncheckable: it appeared only on success, ticked once a
+    minute so it looked frozen, and the compact chrome the structure editor runs
+    under never showed it at all — so on the very step where an author moves
+    fields between sections there was NO save feedback. This shows the whole
+    loop instead: an edit is Unsaved, the debounce is Saving, the write is Saved
+    at a second-precise time that visibly moves. A failure simply stays on
+    Unsaved, which is the honest tell it always should have been.
+  */
+  const saveIndicator =
+    draft.hasDocument && persisted.status !== 'idle' ? (
+      <span
+        className={`inline-flex flex-none items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium ${
+          persisted.status === 'unsaved'
+            ? 'bg-warning-soft text-warning-text'
+            : 'bg-surface-sunken text-text-tertiary'
+        }`}
+        title={
+          persisted.status === 'unsaved' ? 'Edits not saved yet — they save automatically' : undefined
+        }
+      >
+        {persisted.status === 'saving' ? (
+          <>
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-text-tertiary" />
+            Saving…
+          </>
+        ) : persisted.status === 'unsaved' ? (
+          <>
+            <span className="h-1.5 w-1.5 rounded-full bg-warning" />
+            Unsaved changes
+          </>
+        ) : persisted.savedAt ? (
+          `Saved ${persisted.savedAt.toLocaleTimeString(undefined, {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })}`
+        ) : (
+          'Saved'
+        )}
+      </span>
+    ) : null;
+
+  /*
     PUT THE DRAFT'S ID IN THE URL AS SOON AS ONE EXISTS.
 
     This is what makes the CURRENT tab survivable. Autosave alone protects the
@@ -163,11 +209,12 @@ export function BuilderScreen() {
   const at = stepIndex(step);
   const canAdvance = draft.hasDocument;
   /*
-    Steps 2 and 3 own the full width: their left column is a full-height panel
+    Steps 2 and 6 own the full width: their left column is a full-height panel
     flush against the app sidebar, so the page header and the wide stepper are
-    replaced by the compact rail that sits inside the artifact column.
+    replaced by the compact rail — and the page itself stops scrolling, each
+    column scrolling internally instead.
   */
-  const compactChrome = step === 'generate';
+  const compactChrome = step === 'generate' || step === 'placement';
 
   const body = (() => {
     /*
@@ -206,7 +253,20 @@ export function BuilderScreen() {
   })();
 
   return (
-    <div className="fai-rise p-[26px_28px_60px]">
+    /*
+      THE GENERATE STEP DOES NOT SCROLL THE PAGE. Its columns scroll
+      themselves — the structure list in its panel, the preview in its column —
+      so the app bar, the builder chrome and the selection toolbar hold still
+      while an author works a 24-section document. Every other step keeps the
+      ordinary scrolling page.
+    */
+    <div
+      className={
+        compactChrome
+          ? 'fai-rise flex h-[calc(100vh-56px)] min-h-0 flex-col overflow-hidden p-[12px_28px_0]'
+          : 'fai-rise p-[26px_28px_60px]'
+      }
+    >
       {!compactChrome && (
         <>
           {!hintDismissed && (
@@ -247,23 +307,7 @@ export function BuilderScreen() {
             {draft.hasDocument && (
               <div className="flex flex-none items-center gap-2 pb-0.5">
                 {undoRedoControls}
-                {/*
-                  THE HINT ABOVE PROMISES "your work saves as you go", which was
-                  untrue until autosave existed. Showing when the last write
-                  landed is what makes the promise checkable rather than
-                  something an author has to take on faith — and it is the only
-                  signal that a save is failing, since a failed autosave is
-                  deliberately silent so it cannot interrupt authoring.
-                */}
-                {persisted.savedAt && (
-                  <span className="rounded-full bg-surface-sunken px-2.5 py-1 text-[12px] font-medium text-text-tertiary">
-                    Saved{' '}
-                    {persisted.savedAt.toLocaleTimeString(undefined, {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
-                  </span>
-                )}
+                {saveIndicator}
                 <span className="rounded-full bg-surface-sunken px-2.5 py-1 text-[12px] font-medium text-text-secondary">
                   {draft.pageCount} pages
                 </span>
@@ -297,13 +341,18 @@ export function BuilderScreen() {
             Draft
           </span>
           {undoRedoControls}
+          {saveIndicator}
           <BuilderMiniSteps current={step} onGo={go} disabled={blocked} />
         </div>
       )}
 
-      {body}
+      {compactChrome ? <div className="min-h-0 flex-1">{body}</div> : body}
 
-      <div className="relative z-[1] mx-auto mt-[26px] flex max-w-[1000px] items-center justify-between">
+      <div
+        className={`relative z-[1] mx-auto flex max-w-[1000px] items-center justify-between ${
+          compactChrome ? 'w-full flex-none py-2.5' : 'mt-[26px]'
+        }`}
+      >
         {at > 0 ? (
           <button
             type="button"

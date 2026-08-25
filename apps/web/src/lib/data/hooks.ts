@@ -13,7 +13,9 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import type {
+  AssessmentCourseLink,
   AssessmentPathway,
+  PartCompletionMark,
   PrerequisiteCheck,
   ProfilePrefillKey,
   AssessmentToolManifest,
@@ -31,10 +33,12 @@ import { store } from './store.js';
 import {
   assessmentsApi,
   type CreateCaseInput,
+  type PartOutcomeMarkEntry,
   type RecordOutcomeInput,
 } from './assessments.js';
 import type {
   FormDetail,
+  AuditFormInput,
   FormSummary,
   OrgBilling,
   PermAction,
@@ -45,6 +49,8 @@ import type {
   SubmissionDetail,
   SubmissionRow,
   TaxonomySettings,
+  RequirementScopeRef,
+  RequirementTiers,
 } from './types.js';
 import type { TaxonomyStatus } from '@formai/shared';
 
@@ -112,8 +118,22 @@ export const keys = {
    */
   competencyHolders: (id: string) => ['competencies', id, 'holders'] as const,
   assessmentTools: ['assessmentTools'] as const,
-  /** A Role's required-assessment list (U10). Keyed by role so each editor caches apart. */
-  roleRequiredAssessments: (roleId: string) => ['roleRequiredAssessments', roleId] as const,
+  /**
+   * The backfill worklist — tools awarding nothing (U4, R3, KTD5). A SIBLING
+   * of `assessmentTools`, not nested under it: the worklist is admin-only and
+   * must be invalidatable (and skippable) on its own, without sweeping the
+   * tool list every role can read.
+   */
+  unlinkedTools: ['unlinkedTools'] as const,
+  /**
+   * ONE scope's requirement list (U6 of the inheritance round — R1, KTD6).
+   * Keyed by (scope, scopeId) so each of the four editors caches apart AND so
+   * an editor's read-only inherited context (a role editor reading the org
+   * and its department, U6/R9) shares the cache entry of the scope it mirrors:
+   * a save at any scope invalidates exactly the editors displaying it.
+   */
+  scopeRequirements: (ref: RequirementScopeRef) =>
+    ['scopeRequirements', ref.scope, ref.scopeId ?? ''] as const,
   /** The people a Department tightening still has to resolve (U17). Keyed by department. */
   tighteningReview: (departmentId: string) => ['tighteningReview', departmentId] as const,
   /** The people still holding any retired value (U18). */
@@ -126,6 +146,20 @@ export const keys = {
   workingList: ['workingList'] as const,
   /** How the workforce stands, for compliance reporting (U20). */
   compliance: ['compliance'] as const,
+  /**
+   * The workforce × competency grid (U5). TOP-LEVEL on purpose — nesting it
+   * under `members`, `compliance`, or `competencies` would make it a prefix
+   * match of those invalidations and sweep this whole (large) payload on every
+   * roster or register write.
+   */
+  trainingMatrix: ['training-matrix'] as const,
+  /**
+   * The KPI roll-up (U6). TOP-LEVEL for the same reason as `trainingMatrix`,
+   * and a SIBLING of it — `['training-matrix', …]` would make every summary a
+   * prefix match of the grid's invalidation. Keyed by (scope, axis) because
+   * each combination is a distinct server computation.
+   */
+  trainingSummary: (scope: string, axis: string) => ['training-summary', scope, axis] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
    * The shared assessor queue (U13). A SIBLING of assessmentCases — it shares no
@@ -143,11 +177,22 @@ export const keys = {
   formVersion: (formId: string, versionId: string) => ['forms', formId, 'versions', versionId] as const,
   assessmentAttempt: (caseId: string, attemptId: string) =>
     ['assessmentCases', caseId, 'attempts', attemptId] as const,
+  /** The org's uploaded course packages (the builder's picker). */
+  courses: ['courses'] as const,
+  /**
+   * One case's course view. Under the case's prefix on purpose — but every
+   * progress-driven invalidation of the case detail passes `exact: true`,
+   * because refetching THIS key mints a new content token and reloads the
+   * player's iframe mid-read.
+   */
+  caseCourse: (caseId: string) => ['assessmentCases', caseId, 'course'] as const,
   competencyRules: ['competencyRules'] as const,
   fillForm: (token: string) => ['fillForm', token] as const,
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
   invite: (token: string) => ['invite', token] as const,
   apiKeys: ['apiKeys'] as const,
+  correctionCandidates: (minCount: number) => ['correctionCandidates', minCount] as const,
+  placementInsights: ['placementInsights'] as const,
   taxonomy: ['taxonomy'] as const,
   formBrands: ['formBrands'] as const,
   memberPlacement: (id: string) => ['members', id, 'placement'] as const,
@@ -157,10 +202,19 @@ export const keys = {
   myProfileMembership: ['profiles', 'mine'] as const,
   /** One import run's report, addressable long after the page closed (U24). */
   importRun: (runId: string) => ['workforceImport', 'run', runId] as const,
+  /** Whether an import is in flight for this organisation, asked on load (U24). */
+  activeImportRun: ['workforceImport', 'active'] as const,
   /** What an induction submission would seed onto a profile (U40). */
   profileSeed: (submissionId: string) => ['profiles', 'seed', submissionId] as const,
   /** One person's held competencies, keyed on the USER the grants belong to. */
   heldCompetencies: (userId: string) => ['competencies', 'held', userId] as const,
+  /**
+   * The caller's OWN recommended competencies (U7, R12). Nested under the
+   * `competencies` prefix on purpose: granting or creating a competency can
+   * change `held` and the rows themselves, and the register invalidations
+   * already sweep that prefix.
+   */
+  myRecommended: ['competencies', 'recommended', 'mine'] as const,
 };
 
 /**
@@ -173,6 +227,35 @@ export function useSession() {
   return useQuery({
     queryKey: keys.session,
     queryFn: () => apiClient.get<SessionInfo>('/auth/me'),
+  });
+}
+
+/**
+ * Deliberately save (or clear, with null) the caller's signature. The route
+ * returns the refreshed session, which replaces the cached one directly — so
+ * `session.signature` is current everywhere the moment the save lands, with
+ * no refetch round-trip.
+ */
+export function useSaveSignature() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { signature: string | null; password?: string }) =>
+      apiClient.put<SessionInfo>('/auth/signature', input),
+    onSuccess: (session) => qc.setQueryData(keys.session, session),
+  });
+}
+
+/**
+ * The signing step-up: verify the caller's password at the moment they apply
+ * their STORED signature to a document. 204 on success; the caller applies the
+ * mark only then. Context names what is being signed, for the audit row.
+ */
+export function useConfirmPassword() {
+  return useMutation({
+    mutationFn: (input: {
+      password: string;
+      context?: { caseId?: string; attemptId?: string; fieldId?: string };
+    }) => apiClient.post<void>('/auth/confirm-password', input),
   });
 }
 
@@ -271,8 +354,20 @@ export function useSetSubmissionStatus() {
   });
 }
 
-export function useDashboard() {
-  return useQuery({ queryKey: keys.dashboard, queryFn: () => store.dashboard() });
+/*
+  The `enabled` option on this and the three reads below exists for the shell:
+  nav badges and the dashboard tile reuse these exact query keys (KTD1), but
+  must not fire the fetch for readers whose role the API would 403 — the
+  screens themselves only mount for readers the nav already admits, so every
+  existing call site passes nothing and keeps `enabled: true`.
+*/
+export function useDashboard(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.dashboard,
+    queryFn: () => store.dashboard(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
 }
 
 /** Publish a builder session as a brand-new template (first version, published). */
@@ -350,12 +445,23 @@ export function useCreateDraftForm() {
   });
 }
 
-/** Create the assessment tool once its template version has published. */
+/**
+ * Create the assessment tool once its template version has published.
+ *
+ * `awardedCompetencyIds` is required with exactly one element (U5, R1): the
+ * API 400s `invalid_award` without it, so every path that creates a tool —
+ * the fresh publish AND the deleted-form recovery — must have asked the
+ * author what this assessment awards before calling this.
+ */
 export function useCreateAssessmentTool() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { templateId: string; name: string; manifest: AssessmentToolManifest }) =>
-      store.createAssessmentTool(input),
+    mutationFn: (input: {
+      templateId: string;
+      name: string;
+      manifest: AssessmentToolManifest;
+      awardedCompetencyIds: string[];
+    }) => store.createAssessmentTool(input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.forms });
     },
@@ -388,7 +494,8 @@ export function useSaveVersionFields(formId: string, versionId: string) {
 export function useForkDraftVersion() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { formId: string; fields: FormField[] }) => store.forkDraftVersion(input),
+    mutationFn: (input: { formId: string; fields: FormField[]; sourcePdfAssetId?: string }) =>
+      store.forkDraftVersion(input),
     onSuccess: (_r, input) => {
       void qc.invalidateQueries({ queryKey: keys.form(input.formId) });
       void qc.invalidateQueries({ queryKey: keys.forms });
@@ -560,6 +667,17 @@ export function useSaveBuilderDraft() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.builderDrafts });
     },
+  });
+}
+
+/**
+ * The secondary-extraction pass — a review-only lookup, so it caches nothing
+ * and invalidates nothing. The author runs it, reads the result, and adds any
+ * genuinely-missed field by hand; there is no server state to keep in sync.
+ */
+export function useAuditForm() {
+  return useMutation({
+    mutationFn: async (input: AuditFormInput) => store.auditForm(input),
   });
 }
 
@@ -766,6 +884,22 @@ export function useAuditLog() {
 
 export function useApiKeys() {
   return useQuery({ queryKey: keys.apiKeys, queryFn: () => store.listApiKeys() });
+}
+
+/** Recurring extraction-correction shapes surfaced as candidate rules (admin). */
+export function useCorrectionCandidates(minCount = 3) {
+  return useQuery({
+    queryKey: keys.correctionCandidates(minCount),
+    queryFn: () => store.listCorrectionCandidates(minCount),
+  });
+}
+
+/** The auto-place hit-rate metric and recurring placement shapes (admin). */
+export function usePlacementInsights() {
+  return useQuery({
+    queryKey: keys.placementInsights,
+    queryFn: () => store.getPlacementInsights(),
+  });
 }
 
 export function useCreateApiKey() {
@@ -1009,6 +1143,50 @@ export function useGrantCompetency(competencyId: string) {
   });
 }
 
+/**
+ * Renew ONE held competency on a person's record — the lapsed-licence path a
+ * sign-off dead-ends on when a prerequisite reads "expired".
+ *
+ * Two independent moves, either or both: a new expiry date (re-granting redates
+ * the holding and clears the lapse, so the prerequisite it gates passes again),
+ * and a fresh evidence file (the renewed licence, filed against the same
+ * holding). The holder id is stable across the re-grant — granting is an upsert
+ * keyed on (competency, person) — so uploading after granting is safe.
+ */
+export function useRenewCompetency(ctx: {
+  competencyId: string;
+  userId: string;
+  holderId: string;
+}) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      expiresAt?: string | null;
+      evidenceFile?: File | null;
+      onProgress?: (percent: number) => void;
+    }) => {
+      if (input.expiresAt) {
+        await store.grantCompetency({
+          competencyId: ctx.competencyId,
+          userId: ctx.userId,
+          expiresAt: input.expiresAt,
+        });
+      }
+      if (input.evidenceFile) {
+        await store.uploadCompetencyEvidence(ctx.holderId, input.evidenceFile, input.onProgress);
+      }
+    },
+    // onSettled, not onSuccess: the two moves are independent, so if the re-grant
+    // lands but the evidence upload then fails, the card must still refresh to
+    // show the new expiry that DID persist rather than a stale "expired".
+    // ['competencies'] is a prefix of ['competencies','held',userId], so one
+    // sweep refreshes the held card the renewal is shown on.
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: keys.competencies });
+    },
+  });
+}
+
 /** Set, change or clear how long a competency stays valid. */
 export function useSetCompetencyValidity() {
   const qc = useQueryClient();
@@ -1024,6 +1202,71 @@ export function useSetCompetencyValidity() {
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.competencies });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/* ── Award backfill (U4 — R3, KTD5) ──────────────────────────────────────── */
+
+/**
+ * The tools still awarding nothing — the one-time backfill worklist.
+ *
+ * `enabled` matters here more than on most reads: the endpoint is admin-only
+ * (accepting a row converts Role requirements and creates cases), so a screen
+ * mounted for an assessor or candidate must pass `enabled: false` rather than
+ * fire a request the API would 403.
+ */
+export function useUnlinkedTools(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.unlinkedTools,
+    queryFn: () => store.listUnlinkedTools(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
+}
+
+/**
+ * Preview a first award link (U4, KTD10). Read-only on the server — the
+ * effects are shown for the admin to confirm, so there is nothing to
+ * invalidate. A mutation rather than a query because it runs per click, on
+ * a (tool, competency) pair the admin is actively considering.
+ */
+export function usePreviewAwardLink() {
+  return useMutation({
+    mutationFn: (input: { toolId: string; competencyId: string }) =>
+      store.previewAwardLink(input.toolId, input.competencyId),
+  });
+}
+
+/**
+ * Apply a first award link — the previewed conversion (U4, R3, R15).
+ *
+ * The invalidation sweep is wide because the write is: the tool gains its
+ * award (worklist + tool list), Roles gain direct links (every open role
+ * editor's cache), and the activation creates real cases (case list, queue,
+ * the admin working list, and the compliance numbers standing derives).
+ */
+export function useApplyAwardLink() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { toolId: string; competencyId: string }) =>
+      store.applyAwardLink(input.toolId, input.competencyId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.unlinkedTools });
+      qc.invalidateQueries({ queryKey: keys.assessmentTools });
+      // Prefix match reaches every scope editor cache — the conversion moved
+      // a role's requirement from the legacy rows to a direct link, and the
+      // role editors' inherited displays read the same keys (KTD6/U6).
+      qc.invalidateQueries({ queryKey: ['scopeRequirements'] });
+      qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      qc.invalidateQueries({ queryKey: keys.assessorQueue });
+      qc.invalidateQueries({ queryKey: keys.workingList });
+      qc.invalidateQueries({ queryKey: keys.compliance });
+      // The training matrix and summary read the same standing the compliance
+      // report does; the bare summary prefix sweeps every (scope, axis) cache.
+      qc.invalidateQueries({ queryKey: keys.trainingMatrix });
+      qc.invalidateQueries({ queryKey: ['training-summary'] });
       qc.invalidateQueries({ queryKey: keys.auditLog });
     },
   });
@@ -1113,6 +1356,11 @@ export function useSaveWorkflow(toolId: string) {
       profilePrefill?: Record<string, ProfilePrefillKey> | null;
       prerequisiteChecks?: PrerequisiteCheck[] | null;
       fieldDefaults?: Record<string, SubmissionValue> | null;
+      partCompletionMarks?: PartCompletionMark[] | null;
+      signOff?: AssessmentToolManifest['signOff'] | null;
+      pathwayMarks?: AssessmentToolManifest['pathwayMarks'] | null;
+      partOutcomeMarks?: PartOutcomeMarkEntry[] | null;
+      course?: AssessmentCourseLink | null;
     }) =>
       assessmentsApi.saveWorkflow(
         toolId,
@@ -1120,6 +1368,11 @@ export function useSaveWorkflow(toolId: string) {
         input.profilePrefill,
         input.prerequisiteChecks,
         input.fieldDefaults,
+        input.partCompletionMarks,
+        input.signOff,
+        input.pathwayMarks,
+        input.partOutcomeMarks,
+        input.course,
       ),
     onSuccess: () => {
       // Prefix invalidation, so the detail AND the list refresh: the list
@@ -1127,6 +1380,62 @@ export function useSaveWorkflow(toolId: string) {
       // candidate is shown.
       qc.invalidateQueries({ queryKey: keys.assessmentTools });
       qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** The org's active course packages — the builder's picker. */
+export function useCourses() {
+  return useQuery({
+    queryKey: keys.courses,
+    queryFn: () => assessmentsApi.listCourses(),
+  });
+}
+
+/** Import a course package zip. Resolves with the created course's summary. */
+export function useUploadCourse() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { title: string; zipBase64: string }) =>
+      assessmentsApi.uploadCourse(input.title, input.zipBase64),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.courses });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** One case's course material, with a freshly minted content link. */
+export function useCaseCourse(caseId: string) {
+  return useQuery({
+    queryKey: keys.caseCourse(caseId),
+    queryFn: () => assessmentsApi.getCaseCourse(caseId),
+    enabled: caseId !== '',
+    /*
+      The result embeds the iframe's content token: a routine background
+      refetch would mint a new URL and RELOAD the deck out from under the
+      reader, losing their place. The token far outlives any reading session,
+      so once fetched it stays.
+    */
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** Report reading progress on a case's course. */
+export function useSaveCourseProgress(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { visitedSlides?: number[]; confirmRead?: boolean }) =>
+      assessmentsApi.saveCourseProgress(caseId, input),
+    onSuccess: (result) => {
+      // Only a COMPLETION is news the rest of the app needs: the case screen's
+      // course card flips and the part gate opens. `exact` keeps the player's
+      // own course query (and its iframe) out of the sweep — see keys.caseCourse.
+      if (result.completedAt) {
+        void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId), exact: true });
+        void qc.invalidateQueries({ queryKey: keys.auditLog });
+      }
     },
   });
 }
@@ -1144,13 +1453,23 @@ export function useSetLocationParts(toolId: string) {
   });
 }
 
-export function useAssessmentCases() {
-  return useQuery({ queryKey: keys.assessmentCases, queryFn: () => assessmentsApi.listCases() });
+export function useAssessmentCases(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.assessmentCases,
+    queryFn: () => assessmentsApi.listCases(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
 }
 
 /** The shared assessor queue — unowned cases the reader is eligible for (U13). */
-export function useAssessorQueue() {
-  return useQuery({ queryKey: keys.assessorQueue, queryFn: () => assessmentsApi.listQueue() });
+export function useAssessorQueue(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.assessorQueue,
+    queryFn: () => assessmentsApi.listQueue(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
 }
 
 /**
@@ -1167,6 +1486,20 @@ export function useExportCasePdf() {
 /** Every case's progress in one read — the dashboard's only query. */
 export function useAssessmentProgress() {
   return useQuery({ queryKey: keys.assessmentProgress, queryFn: () => assessmentsApi.listProgress() });
+}
+
+/** Move an open case to a Location (staff only) — see the route's rules. */
+export function useSetCaseLocation(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (locationId: string | null) =>
+      assessmentsApi.setCaseLocation(caseId, locationId),
+    onSuccess: () => {
+      // The Location decides which parts the case requires, so everything
+      // derived from progress refreshes with it.
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    },
+  });
 }
 
 export function useAssessmentCase(id: string | undefined) {
@@ -1237,6 +1570,13 @@ export function useSetAttemptSubmitted(caseId: string) {
   });
 }
 
+export function useCheckQuestion(caseId: string, attemptId: string | undefined) {
+  return useMutation({
+    mutationFn: (input: { fieldId: string; value: SubmissionValue }) =>
+      assessmentsApi.checkQuestion(caseId, attemptId!, input.fieldId, input.value),
+  });
+}
+
 export function useRecordOutcome(caseId: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -1255,7 +1595,7 @@ export function useRecordOutcome(caseId: string) {
 export function useSignOffCase(caseId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { assessorName: string; signature: string }) =>
+    mutationFn: (input: { assessorName: string; signature: string; password?: string }) =>
       assessmentsApi.signOffCase({ caseId, ...input }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
@@ -1424,13 +1764,52 @@ export function useTransferRole() {
 }
 
 /** Everything waiting on an Admin, from all sources, on one list (U19). */
-export function useWorkingList() {
-  return useQuery({ queryKey: keys.workingList, queryFn: () => store.getWorkingList() });
+export function useWorkingList(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.workingList,
+    queryFn: () => store.getWorkingList(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
 }
 
-/** How the workforce stands — expired, never-held, unreachable (U20). */
-export function useComplianceReport() {
-  return useQuery({ queryKey: keys.compliance, queryFn: () => store.getComplianceReport() });
+/** How the workforce stands — expired, expiring, never-held, unreachable (U20). */
+export function useComplianceReport(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.compliance,
+    queryFn: () => store.getComplianceReport(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
+}
+
+/** The workforce × competency grid — admin/owner + assessments feature (U5). */
+export function useTrainingMatrix() {
+  return useQuery({
+    queryKey: keys.trainingMatrix,
+    queryFn: () => store.getTrainingMatrix(),
+  });
+}
+
+/**
+ * The one-page KPI roll-up — admin/owner + assessments feature (U6). At most
+ * one of `location`/`department` narrows the scope; neither means org-wide.
+ * The key serialises the scope so each (scope, axis) pairing caches apart.
+ */
+export function useTrainingSummary(params: {
+  location?: string;
+  department?: string;
+  axis: 'location' | 'department' | 'role';
+}) {
+  const scope = params.location
+    ? `location:${params.location}`
+    : params.department
+      ? `department:${params.department}`
+      : 'org';
+  return useQuery({
+    queryKey: keys.trainingSummary(scope, params.axis),
+    queryFn: () => store.getTrainingSummary(params),
+  });
 }
 
 /** The caller's own expiry notices — the login delivery route (U21, R98). */
@@ -1493,38 +1872,102 @@ export function useUpdateTaxonomySettings() {
   );
 }
 
-/** A Role's required assessments (U10). `configured` distinguishes never-set from emptied. */
-export function useRoleRequiredAssessments(roleId: string | undefined) {
+/**
+ * ONE scope's requirements in COMPETENCY terms (R1, KTD6): two tiers, the
+ * fingerprint every write must echo, and — at role scope only — `configured`
+ * (never-set vs emptied, R50) and the legacy `awaitingLink` rows. Serves both
+ * the scope being EDITED and the read-only inherited context another editor
+ * displays (U6/R9): `enabled` lets the editor keep its lazy-on-expand posture
+ * while the key stays stable, so a collapsed row keeps showing the summary it
+ * already fetched (KTD9's pragmatic collapsed-summary choice).
+ */
+export function useScopeRequirements(
+  ref: RequirementScopeRef | undefined,
+  options?: { enabled?: boolean },
+) {
   return useQuery({
-    queryKey: keys.roleRequiredAssessments(roleId ?? ''),
-    queryFn: () => store.getRoleRequiredAssessments(roleId!),
-    enabled: Boolean(roleId),
+    queryKey: ref ? keys.scopeRequirements(ref) : (['scopeRequirements', 'none', ''] as const),
+    queryFn: () => store.getScopeRequirements(ref!),
+    enabled:
+      (options?.enabled ?? true) && Boolean(ref && (ref.scope === 'org' || ref.scopeId)),
   });
 }
 
-/** Project a proposed change's blast radius without committing it (U12). */
-export function usePreviewRoleRequiredAssessments(roleId: string) {
+/**
+ * Project a proposed change's blast radius without committing it (R6, KTD5) —
+ * at any scope; an org preview counts every active membership (AE3). Takes
+ * both tiers plus optional legacy removals (role scope only — the
+ * awaitingLink exit previews through this same door).
+ */
+export function usePreviewScopeRequirements(ref: RequirementScopeRef) {
   return useMutation({
-    mutationFn: (toolIds: string[]) => store.previewRoleRequiredAssessments(roleId, toolIds),
+    mutationFn: (body: RequirementTiers & { removeLegacyToolIds?: string[] }) =>
+      store.previewScopeRequirements(ref, body),
   });
 }
 
-export function useSetRoleRequiredAssessments(roleId: string) {
+/** The invalidation sweep both requirement writes share — what a save or legacy removal goes stale. */
+function useRequirementWriteInvalidation(ref: RequirementScopeRef) {
   const qc = useQueryClient();
+  return () => {
+    // The written scope's own key — which is ALSO every other editor's
+    // inherited display of this scope (same cache entry, KTD6/U6), so a
+    // department save refreshes the role editors showing it as context.
+    void qc.invalidateQueries({ queryKey: keys.scopeRequirements(ref) });
+    // The taxonomy read carries each Role's configured flag; a new case can
+    // reach the case list AND the progress dashboard (a deliberate sibling key,
+    // so it must be swept explicitly); the audit feed logs the change. The
+    // recommended surfaces derive from the same links, and standing feeds
+    // the compliance numbers, so both refetch too (as shipped — the sweep
+    // survives the scope generalisation unchanged, R11).
+    void qc.invalidateQueries({ queryKey: keys.taxonomy });
+    void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    void qc.invalidateQueries({ queryKey: keys.assessorQueue });
+    void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
+    void qc.invalidateQueries({ queryKey: keys.myRecommended });
+    void qc.invalidateQueries({ queryKey: keys.compliance });
+    // The training matrix and summary read the same standing the compliance
+    // report does; the bare summary prefix sweeps every (scope, axis) cache.
+    void qc.invalidateQueries({ queryKey: keys.trainingMatrix });
+    void qc.invalidateQueries({ queryKey: ['training-summary'] });
+    void qc.invalidateQueries({ queryKey: keys.auditLog });
+  };
+}
+
+/**
+ * Replace both tiers at one scope, echoing the fingerprint (a stale echo 409s
+ * `requirements_changed`; fingerprints are scope-local, KTD7).
+ */
+export function useSetScopeRequirements(ref: RequirementScopeRef) {
+  const invalidate = useRequirementWriteInvalidation(ref);
   return useMutation({
-    mutationFn: (toolIds: string[]) => store.setRoleRequiredAssessments(roleId, toolIds),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: keys.roleRequiredAssessments(roleId) });
-      // The taxonomy read carries each Role's configured flag; a new case can
-      // reach the case list AND the progress dashboard (a deliberate sibling key,
-      // so it must be swept explicitly); the audit feed logs the change.
-      void qc.invalidateQueries({ queryKey: keys.taxonomy });
-      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
-      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
-      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
-      void qc.invalidateQueries({ queryKey: keys.auditLog });
-    },
+    mutationFn: (body: RequirementTiers & { fingerprint: string }) =>
+      store.setScopeRequirements(ref, body),
+    onSuccess: invalidate,
   });
+}
+
+/**
+ * Remove ONE awaitingLink legacy row — the exit for a tool that will never be
+ * linked. ROLE SCOPE ONLY (KTD6). Fingerprint-guarded like the PUT, and
+ * confirmed through the same preview before the editor calls this.
+ */
+export function useRemoveLegacyRequirement(roleId: string) {
+  const invalidate = useRequirementWriteInvalidation({ scope: 'role', scopeId: roleId });
+  return useMutation({
+    mutationFn: (input: { toolId: string; fingerprint: string }) =>
+      store.removeLegacyRequirement(roleId, input.toolId, input.fingerprint),
+    onSuccess: invalidate,
+  });
+}
+
+/**
+ * The caller's OWN recommended competencies (U7, R12) — powers the candidate
+ * record and dashboard. Self-scope, so no admin gate and no `enabled` dance:
+ * mounting the surface IS the decision to ask.
+ */
+export function useMyRecommended() {
+  return useQuery({ queryKey: keys.myRecommended, queryFn: () => store.listMyRecommended() });
 }
 
 export function useMemberPlacement(membershipId: string | undefined) {
@@ -1627,10 +2070,12 @@ export function useValidateWorkforceImport() {
 }
 
 /**
- * Confirm and run the import.
+ * Confirm and START the import.
  *
- * Invalidates the team list and the working list: a run creates members and can
- * leave rows flagged, so both are stale the moment it returns.
+ * Resolves with the run id as soon as the run exists, NOT when it finishes — the
+ * work continues server-side either way. Invalidates the team list and the
+ * working list because both go stale as rows land, and the active-run query
+ * because there is now one in flight.
  */
 export function useRunWorkforceImport() {
   const qc = useQueryClient();
@@ -1640,22 +2085,41 @@ export function useRunWorkforceImport() {
       void qc.invalidateQueries({ queryKey: keys.members });
       void qc.invalidateQueries({ queryKey: keys.workingList });
       void qc.invalidateQueries({ queryKey: keys.auditLog });
+      void qc.invalidateQueries({ queryKey: keys.activeImportRun });
     },
   });
 }
 
 /**
- * One run's report.
+ * One run's report: progress while it runs, the whole thing after.
  *
- * Polls while the run is in progress — `completedAt` is null until it finishes —
- * and stops the moment it is done, so a finished report costs nothing to keep on
- * screen.
+ * Polls on STATUS rather than on `completedAt`, which is the difference between
+ * a screen that stops and one that spins forever. A failed run — including one
+ * whose process died and was reaped — is finished, and polling it would be
+ * asking a question already answered.
  */
 export function useWorkforceImportRun(runId: string | undefined) {
   return useQuery({
     queryKey: keys.importRun(runId ?? ''),
     queryFn: () => store.getWorkforceImportRun(runId!),
     enabled: !!runId,
-    refetchInterval: (query) => (query.state.data?.completedAt ? false : 1000),
+    refetchInterval: (query) => (query.state.data?.status === 'running' ? 1000 : false),
+  });
+}
+
+/**
+ * Whether this organisation has an import in flight.
+ *
+ * ASKED BEFORE THE SCREEN OFFERS TO START ONE. Without it, a page loaded after a
+ * timeout has no idea a run exists and shows an upload form beside a live
+ * confirm button — which is exactly what nearly put a 191-person file through
+ * production twice. `staleTime: 0` because the whole value here is being
+ * current at the moment the form would otherwise be drawn.
+ */
+export function useActiveWorkforceImport() {
+  return useQuery({
+    queryKey: keys.activeImportRun,
+    queryFn: () => store.getActiveWorkforceImport(),
+    staleTime: 0,
   });
 }

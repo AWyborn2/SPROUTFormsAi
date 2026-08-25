@@ -22,6 +22,7 @@ import {
   markPlacement,
   matchAnchorsFor,
   matchSides,
+  PNG_DATA_URL_RE,
   resolveAnswerSets,
   selectedOption,
   visibleFields,
@@ -226,7 +227,11 @@ function verdictOf(value: SubmissionValue | undefined): boolean | undefined {
  */
 function pngDataUrlBytes(value: SubmissionValue | undefined): Uint8Array | null {
   if (typeof value !== 'string') return null;
-  const match = /^data:image\/png;base64,([A-Za-z0-9+/=\s]+)$/.exec(value);
+  // The SHARED shape (`PNG_DATA_URL_RE`) — the same contract the profile save
+  // validates against, so what a user can store and what this can draw cannot
+  // drift apart. The byte-level magic check below stays local because this
+  // function needs the decoded bytes anyway.
+  const match = PNG_DATA_URL_RE.exec(value);
   if (!match) return null;
   try {
     const bytes = Buffer.from(match[1]!.replace(/\s+/g, ''), 'base64');
@@ -344,6 +349,29 @@ export interface RoundTripInput {
   originalPdf: Uint8Array;
   fields: FormField[];
   values: Record<string, SubmissionValue>;
+  /**
+   * The paper document's revision identity, drawn once as a small line at the
+   * very bottom edge of page 1 — below any printed content, where auditors
+   * expect a document-control mark. Absent on plain forms and on versions
+   * that predate revisions, which export exactly as before.
+   */
+  revisionIdentity?: { code?: string; reviewedOn?: string; note?: string } | null;
+}
+
+/**
+ * The identity line's text — "Rev 3 (reviewed 08/2026) — Annual review", or
+ * whichever of the three parts exist. Empty when none do, so the caller can
+ * skip drawing entirely.
+ */
+export function revisionIdentityLine(identity: {
+  code?: string;
+  reviewedOn?: string;
+  note?: string;
+}): string {
+  const head = [identity.code, identity.reviewedOn ? `(reviewed ${identity.reviewedOn})` : '']
+    .filter(Boolean)
+    .join(' ');
+  return [head, identity.note].filter(Boolean).join(' — ');
 }
 
 /**
@@ -355,6 +383,7 @@ export async function roundTripExport({
   originalPdf,
   fields,
   values,
+  revisionIdentity,
 }: RoundTripInput): Promise<Uint8Array> {
   const doc = await PDFDocument.load(originalPdf);
   const font = await doc.embedFont(StandardFonts.Helvetica);
@@ -375,7 +404,7 @@ export async function roundTripExport({
     const value = values[field.id];
 
     if (field.type === 'repeating_group' && Array.isArray(value)) {
-      drawRepeatingGroup(pages, font, field, value as RepeatingRowValue[], segments);
+      await drawRepeatingGroup(doc, pages, font, field, value as RepeatingRowValue[], segments);
       continue;
     }
 
@@ -604,6 +633,24 @@ export async function roundTripExport({
       color: INK,
       maxWidth: Math.max(20, pos.width - 6),
     });
+  }
+
+  /*
+    The revision identity, at the very bottom edge of page 1. 6pt at y=3 sits
+    below any printed margin, so it cannot overlap a mapped box; the width is
+    truncated to the page rather than wrapped, because a wrapped footer would
+    climb into content on a certified record.
+  */
+  const identityText = revisionIdentity ? revisionIdentityLine(revisionIdentity) : '';
+  if (identityText && pages[0]) {
+    const page = pages[0];
+    const size = 6;
+    const maxWidth = page.getWidth() - 12;
+    let text = winAnsiSafe(identityText);
+    while (text.length > 1 && font.widthOfTextAtSize(text, size) > maxWidth) {
+      text = `${text.slice(0, -4)}...`;
+    }
+    page.drawText(text, { x: 6, y: 3, size, font, color: INK });
   }
 
   return doc.save();
@@ -889,13 +936,14 @@ function drawCheckboxOptions(
  * continue across a page break — each segment draws the rows its own bands
  * describe.
  */
-function drawRepeatingGroup(
+async function drawRepeatingGroup(
+  doc: import('pdf-lib').PDFDocument,
   pages: import('pdf-lib').PDFPage[],
   font: import('pdf-lib').PDFFont,
   field: FormField,
   rows: RepeatingRowValue[],
   segments: PageBox[],
-): void {
+): Promise<void> {
   const cols = field.columns ?? [];
   if (cols.length === 0 || rows.length === 0) return;
 
@@ -998,6 +1046,30 @@ function drawRepeatingGroup(
         // free text drawn as-is.
         if (typeof raw === 'boolean') {
           if (raw) markTick(col.key);
+          continue;
+        }
+        // A drawn signature arrives as a PNG data URL — draw the IMAGE into the
+        // cell, never the data-URL string. Type-agnostic like the scalar path:
+        // extraction folds signature boxes into text columns, so the blob turns
+        // up typed `text` as often as `signature`.
+        const png = pngDataUrlBytes(raw);
+        if (png) {
+          const band = columnBandFor(segment, col.key);
+          if (band) {
+            const image = await doc.embedPng(png);
+            page.drawImage(
+              image,
+              fitInside(
+                {
+                  x: band.start,
+                  y: rowBand.start,
+                  width: band.end - band.start,
+                  height: rowBand.end - rowBand.start,
+                },
+                image,
+              ),
+            );
+          }
           continue;
         }
         const text = raw === null || raw === undefined ? '' : String(raw);

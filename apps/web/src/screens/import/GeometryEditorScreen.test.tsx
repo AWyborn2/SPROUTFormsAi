@@ -64,6 +64,20 @@ vi.mock('@formai/ui', async () => {
 });
 
 /**
+ * The placement learning loop's fire-and-forget sender (U6). Mocked so the
+ * suite can assert WHAT a successful save emits without a network; the
+ * sender's own contract (a rejected POST is swallowed, an empty slice sends
+ * nothing) is proven in `lib/data/placement-outcomes.test.ts` — this file
+ * only checks the wiring routes through the recorder into it.
+ */
+const { sendPlacementOutcomesMock } = vi.hoisted(() => ({
+  sendPlacementOutcomesMock: vi.fn(),
+}));
+vi.mock('../../lib/data/placement-outcomes.js', () => ({
+  sendPlacementOutcomes: sendPlacementOutcomesMock,
+}));
+
+/**
  * `PdfViewer` does real pdf.js canvas rendering — irrelevant here and
  * impractical to run under jsdom. Stubbed to a component that feeds
  * `onTextLayer` one page. Both `selectField` and the panel's own proposal
@@ -79,16 +93,33 @@ vi.mock('@formai/ui', async () => {
  * (defaulting to none), so a snap-target test can assert the value fed to
  * `PdfViewer` was actually derived from this page's own text.
  */
-const { pdfViewerPropsSpy, stubTextLayerItems } = vi.hoisted(() => ({
-  pdfViewerPropsSpy: vi.fn<(props: MockPdfViewerProps) => void>(),
-  stubTextLayerItems: { current: [] as { text: string; x: number; y: number; width: number }[] },
-}));
+const { pdfViewerPropsSpy, stubTextLayerItems, stubTextLayerPageCount, stubTextLayerRects } =
+  vi.hoisted(() => ({
+    pdfViewerPropsSpy: vi.fn<(props: MockPdfViewerProps) => void>(),
+    stubTextLayerItems: { current: [] as { text: string; x: number; y: number; width: number }[] },
+    // How many pages the stub feeds (page 0 carries `stubTextLayerItems`, the
+    // rest are blank). One suffices almost everywhere; the page-scoped-scan
+    // tests need a second page because a TextPage's index IS its page number.
+    stubTextLayerPageCount: { current: 1 },
+    // Page 0's printed rectangles (U6). Default null — the property is simply
+    // absent, matching the NOT MEASURED convention every existing test ran under.
+    stubTextLayerRects: {
+      current: null as { x: number; y: number; width: number; height: number }[] | null,
+    },
+  }));
 
 vi.mock('./PdfViewer.js', () => ({
   PdfViewer: (props: MockPdfViewerProps) => {
     pdfViewerPropsSpy(props);
     useEffect(() => {
-      props.onTextLayer([{ width: 595, height: 842, items: stubTextLayerItems.current }]);
+      props.onTextLayer(
+        Array.from({ length: stubTextLayerPageCount.current }, (_, i) => ({
+          width: 595,
+          height: 842,
+          items: i === 0 ? stubTextLayerItems.current : [],
+          ...(i === 0 && stubTextLayerRects.current ? { rects: stubTextLayerRects.current } : {}),
+        })),
+      );
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [props.onTextLayer]);
     return null;
@@ -261,6 +292,8 @@ afterEach(() => {
   version.data = undefined;
   version.isLoading = false;
   stubTextLayerItems.current = [];
+  stubTextLayerPageCount.current = 1;
+  stubTextLayerRects.current = null;
 });
 
 describe('GeometryEditorScreen — batched "Place all N" (U2/KTD3)', () => {
@@ -551,6 +584,108 @@ describe('GeometryEditorScreen — needs-review queue: bulk confirm and step-thr
   });
 });
 
+describe('GeometryEditorScreen — the extraction window reaches the engine (sourcePages)', () => {
+  /**
+   * The window logic itself (capping, notes, refusals) is proven at the pure
+   * level in `geometry-actions.test.ts`; derivation is stubbed here. What
+   * these tests pin is the WIRING — which calls hand the engine a window and
+   * which deliberately do not (R8) — by asserting the third argument the
+   * stubbed deriver received.
+   */
+  const windowedField = (): FormField => ({
+    ...choiceField('f1', 'Windowed field', ['Yes', 'No', 'Maybe']),
+    sourcePages: { from: 1, to: 1 },
+  });
+
+  it('selectField resolves the field window and hands it to the deriver', () => {
+    renderWithField(windowedField());
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(null);
+    deriveOptionCellsAcrossPagesMock.mockClear();
+
+    fireEvent.click(screen.getByText('Windowed field'));
+
+    // One page in the stub, stamped {1,1}: 0-based bounds 0..0 after clamped
+    // dilation. Both `selectField` and the panel's own preview memo derive,
+    // and each must pass the same resolved window.
+    const windows = deriveOptionCellsAcrossPagesMock.mock.calls.map((c) => c[2]);
+    expect(windows.length).toBeGreaterThan(0);
+    for (const w of windows) expect(w).toEqual({ first: 0, last: 0, from: 1, to: 1 });
+  });
+
+  it('a field with no sourcePages takes the unscoped path — the deriver gets null (R6)', () => {
+    renderWithField(choiceField('f1', 'Legacy field', ['Yes', 'No', 'Maybe']));
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(null);
+    deriveOptionCellsAcrossPagesMock.mockClear();
+
+    fireEvent.click(screen.getByText('Legacy field'));
+
+    expect(deriveOptionCellsAcrossPagesMock.mock.calls.length).toBeGreaterThan(0);
+    for (const c of deriveOptionCellsAcrossPagesMock.mock.calls) expect(c[2]).toBeNull();
+  });
+
+  it('the whole-document bulk pass passes each field its own window', async () => {
+    renderWithField(windowedField());
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(null);
+    deriveOptionCellsAcrossPagesMock.mockClear();
+
+    await clickAutoPlace();
+
+    const call = deriveOptionCellsAcrossPagesMock.mock.calls.find(
+      (c) => (c[0] as { label: string }).label === 'Windowed field',
+    );
+    expect(call).toBeDefined();
+    expect(call![2]).toEqual({ first: 0, last: 0, from: 1, to: 1 });
+  });
+
+  it('AE6: the page-scoped scan passes NO window, and its unique hit still auto-confirms', async () => {
+    // Two stub pages so a scoped page index is expressible. The field carries
+    // a perfectly valid window; the author pointing at a page must outrank it
+    // (R8) — the engine is handed null, so a stale or boundary-shifted window
+    // cannot downgrade the scoped scan's auto-confirm.
+    stubTextLayerPageCount.current = 2;
+    renderWithField(windowedField());
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(1));
+
+    fireEvent.change(screen.getByLabelText('Page'), { target: { value: '2' } });
+    deriveOptionCellsAcrossPagesMock.mockClear();
+    fireEvent.click(screen.getByText('Scan'));
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+
+    const call = deriveOptionCellsAcrossPagesMock.mock.calls.find(
+      (c) => (c[0] as { label: string }).label === 'Windowed field',
+    );
+    expect(call).toBeDefined();
+    expect(call![2]).toBeNull();
+    // The scoped scan's unique hit auto-confirms exactly as today.
+    expect(screen.getByText(/3\/3 placed/)).toBeDefined();
+  });
+
+  it('a window-capped proposal parks as needs-review — never auto-confirmed — and shows its note', async () => {
+    renderWithField(windowedField());
+    // What the real windowed deriver returns for a window-disambiguated hit:
+    // capped strictly below 1, note naming the excluded pages (KTD2/R5).
+    deriveOptionCellsAcrossPagesMock.mockReturnValue({
+      ...proposal(0.95),
+      notes: ['Matched on page 7; pages 12 and 17 excluded by the extraction window (pages 5–8).'],
+    });
+
+    await clickAutoPlace();
+
+    // Parked, not placed: the cap kept it out of the auto-confirm tier.
+    expect(screen.getByText(/0\/3 placed/)).toBeDefined();
+    expect(screen.getByText('1 field need review')).toBeDefined();
+
+    // Opening the field surfaces the reviewer-facing story through the
+    // existing notes channel — no new UI.
+    fireEvent.click(screen.getByLabelText('Review Windowed field'));
+    expect(
+      screen.getByText('Matched on page 7; pages 12 and 17 excluded by the extraction window (pages 5–8).'),
+    ).toBeDefined();
+  });
+});
+
 describe('GeometryEditorScreen — review-fix regressions (P1 findings from code review)', () => {
   it('regression: selecting an unrelated field from the plain sidebar list does not clear other fields\' parked needs-review proposals', async () => {
     renderWithFields([
@@ -599,6 +734,88 @@ describe('GeometryEditorScreen — review-fix regressions (P1 findings from code
     expect(screen.getByText(/3\/3 placed/)).toBeDefined();
     const mark = pdfViewerPropsSpy.mock.calls.at(-1)![0].placements?.find((p) => p.slot === 'f1#Yes');
     expect(mark?.box.x).toBe(999);
+  });
+});
+
+describe('GeometryEditorScreen — column-evidence caption (rect-columns U6, R7)', () => {
+  /** The Mine Site shape: label column, ONE answer column, five printed rows. */
+  function headerlessChecklist(id: string, label: string): FormField {
+    return {
+      id,
+      type: 'repeating_group',
+      label,
+      required: false,
+      source: 'imported',
+      columns: [
+        { key: 'method', label: 'Method', type: 'text' },
+        { key: 'used', label: 'Used', type: 'check_cross' },
+      ],
+      fixedRows: ['Observation', 'Practical', 'Verbal', 'Written', 'Portfolio'],
+    };
+  }
+
+  /** A dozer-shaped header table: header glyphs, four label rows, no rects. */
+  function headerTable(id: string, label: string): FormField {
+    return {
+      id,
+      type: 'repeating_group',
+      label,
+      required: false,
+      source: 'imported',
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'tick', label: '✓', type: 'boolean_yes_no' },
+        { key: 'cross', label: '×', type: 'boolean_yes_no' },
+        { key: 'na', label: 'N/A', type: 'boolean_yes_no' },
+      ],
+      fixedRows: ['r0', 'r1', 'r2', 'r3'],
+    };
+  }
+
+  it('captions a rect-anchored grid as measured from printed boxes', () => {
+    // Five labels at one margin, five 9pt squares on the measured 28.4pt
+    // pitch, no header glyphs — the rect-anchored derivation, whose whole
+    // point is that the columns were measured, and the caption says so.
+    stubTextLayerItems.current = [0, 1, 2, 3, 4].map((i) => ({
+      text: `Method ${i}`,
+      x: 40,
+      y: 762 - i * 28.4,
+      width: 200,
+    }));
+    stubTextLayerRects.current = [0, 1, 2, 3, 4].map((i) => ({
+      x: 500,
+      y: 760 - i * 28.4,
+      width: 9,
+      height: 9,
+    }));
+    renderWithField(headerlessChecklist('t1', 'Methods table'));
+
+    fireEvent.click(screen.getByText('Methods table'));
+
+    expect(screen.getByText('Columns measured from printed boxes.')).toBeDefined();
+  });
+
+  it('captions a text-derived grid as inferred from header text', () => {
+    // The measured dozer header with no rects on the page: the columns come
+    // from header glyphs, and the caption must not claim otherwise — its
+    // wording is the visible tell for the historic silent-zero rect
+    // extractor regression.
+    stubTextLayerItems.current = [
+      { text: 'N/A', x: 539.9, y: 648.6, width: 13.3 },
+      { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7, width: 192 },
+      { text: '', x: 502.6, y: 647.7, width: 7.1 },
+      { text: '/ ×', x: 512.1, y: 647.7, width: 10.3 },
+      { text: 'Receive and interpret work instructions', x: 37.5, y: 630.8, width: 258.1 },
+      { text: 'Identify and report potential hazards', x: 37.5, y: 614, width: 143.6 },
+      { text: 'Communicate with other personnel', x: 37.5, y: 597.1, width: 198.6 },
+      { text: 'Wearing correct PPE', x: 37.5, y: 580.3, width: 84 },
+    ];
+    renderWithField(headerTable('t2', 'Practical table'));
+
+    fireEvent.click(screen.getByText('Practical table'));
+
+    expect(screen.getByText('Columns inferred from header text.')).toBeDefined();
+    expect(screen.queryByText('Columns measured from printed boxes.')).toBeNull();
   });
 });
 
@@ -1299,5 +1516,199 @@ describe('GeometryEditorScreen — reaching an outcome box', () => {
 
     expect(screen.queryByText('Assessment Result outcome')).toBeNull();
     expect(screen.getByText('The Candidate’s responses were')).toBeDefined();
+  });
+});
+
+/*
+  THE PLACEMENT LEARNING LOOP'S EMIT (U6).
+
+  The session rules themselves — upsert-on-re-propose, drain-once, the
+  prior-refusal guard, bucket boundaries — are the pure recorder's regression
+  coverage (placement-recorder.test.ts). These tests are the
+  does-the-wiring-route-through-it check: every placement action feeds the
+  recorder, and ONLY a successful save drains it into `sendPlacementOutcomes`.
+*/
+describe('GeometryEditorScreen — placement outcomes emit on save (U6)', () => {
+  type SentPayload = {
+    documentType?: string;
+    formId?: string;
+    versionId?: string;
+    context: string;
+    fieldCount: number;
+    events: { kind: string; fieldId: string; [key: string]: unknown }[];
+  };
+
+  function lastSentPayload(): SentPayload {
+    return sendPlacementOutcomesMock.mock.calls.at(-1)![0] as SentPayload;
+  }
+
+  function saveSucceeds() {
+    saveMutate.mockImplementation((_fields: FormField[], opts: { onSuccess: () => void }) =>
+      opts.onSuccess(),
+    );
+  }
+
+  it('auto-place then save sends one payload carrying the proposed and accepted:auto events', async () => {
+    saveSucceeds();
+    renderWithField(choiceField('f1', 'Multi-option field', ['Yes', 'No', 'Maybe']));
+
+    await clickAutoPlace();
+    fireEvent.click(screen.getByText('Save placement'));
+
+    expect(sendPlacementOutcomesMock).toHaveBeenCalledTimes(1);
+    const payload = lastSentPayload();
+    expect(payload).toMatchObject({
+      context: 'standalone',
+      formId: 'form1',
+      versionId: 'v1',
+      fieldCount: 1,
+    });
+    // The standalone mount knows no document type — the key is absent, so the
+    // aggregator buckets it as `unspecified` (KTD6).
+    expect('documentType' in payload).toBe(false);
+    expect(payload.events).toContainEqual({
+      kind: 'proposed',
+      fieldId: 'f1',
+      method: 'option-cells',
+      tier: 'auto-confirm',
+    });
+    expect(payload.events).toContainEqual({
+      kind: 'accepted',
+      fieldId: 'f1',
+      method: 'option-cells',
+      via: 'auto',
+    });
+  });
+
+  it('confirm and reject from the review queue produce their events in the saved slice', async () => {
+    saveSucceeds();
+    renderWithFields([
+      choiceField('f1', 'Field A', ['Yes', 'No', 'Maybe']),
+      choiceField('f2', 'Field B', ['Yes', 'No', 'Maybe']),
+    ]);
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(0.6));
+
+    await clickAutoPlace();
+    fireEvent.click(screen.getByLabelText('Confirm Field A'));
+    fireEvent.click(screen.getByLabelText('Reject Field B'));
+    fireEvent.click(screen.getByText('Save placement'));
+
+    const { events } = lastSentPayload();
+    expect(events).toContainEqual({ kind: 'proposed', fieldId: 'f1', method: 'option-cells', tier: 'needs-review' });
+    expect(events).toContainEqual({ kind: 'accepted', fieldId: 'f1', method: 'option-cells', via: 'confirm' });
+    expect(events).toContainEqual({ kind: 'rejected', fieldId: 'f2', method: 'option-cells' });
+  });
+
+  it('a save with no recorded events sends nothing', () => {
+    // A glyph pick dirties the draft without touching the engine: the field is
+    // already placed, so nothing was proposed, accepted or drawn.
+    saveSucceeds();
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'draft',
+      isCurrent: false,
+      fields: [
+        {
+          id: 'sig',
+          type: 'text',
+          label: 'Assessor signature',
+          required: false,
+          source: 'imported',
+          geometry: {
+            segments: [
+              { page: 0, x: 10, y: 10, width: 80, height: 14, pageWidth: 595, pageHeight: 842 },
+            ],
+          },
+        },
+      ],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: 'asset-1',
+    };
+    render(<GeometryEditorScreen />);
+    fireEvent.click(screen.getByText('Assessor signature'));
+    fireEvent.click(screen.getByLabelText('Print PASS'));
+    fireEvent.click(screen.getByText('Save placement'));
+
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'success' }));
+    expect(sendPlacementOutcomesMock).not.toHaveBeenCalled();
+  });
+
+  it('AE5: the save toast is already shown before the send is even attempted', async () => {
+    // The emit sits after the toast and is never awaited, so however the POST
+    // later fails, the save's acknowledgement cannot be blocked or undone.
+    // (That a rejected POST is swallowed is the sender's own tested contract.)
+    saveSucceeds();
+    renderWithField(choiceField('f1', 'Multi-option field', ['Yes', 'No', 'Maybe']));
+
+    await clickAutoPlace();
+    fireEvent.click(screen.getByText('Save placement'));
+
+    const toastOrder = toast.mock.invocationCallOrder[0]!;
+    const sendOrder = sendPlacementOutcomesMock.mock.invocationCallOrder[0]!;
+    expect(toastOrder).toBeLessThan(sendOrder);
+  });
+
+  it('a failed save sends nothing — an unsaved session is not ground truth (AE4)', async () => {
+    saveMutate.mockImplementation((_fields: FormField[], opts: { onError: () => void }) =>
+      opts.onError(),
+    );
+    renderWithField(choiceField('f1', 'Multi-option field', ['Yes', 'No', 'Maybe']));
+
+    await clickAutoPlace();
+    fireEvent.click(screen.getByText('Save placement'));
+
+    expect(sendPlacementOutcomesMock).not.toHaveBeenCalled();
+  });
+
+  it('a second save after more edits sends only the NEW events (drain-once)', async () => {
+    saveSucceeds();
+    renderWithFields([
+      choiceField('f1', 'Auto field', ['Yes', 'No', 'Maybe']),
+      choiceField('f2', 'Review field', ['Yes', 'No', 'Maybe']),
+    ]);
+    deriveOptionCellsAcrossPagesMock.mockImplementation((field: { label: string }) =>
+      field.label === 'Review field' ? proposal(0.6) : proposal(1),
+    );
+
+    await clickAutoPlace();
+    fireEvent.click(screen.getByText('Save placement'));
+    expect(sendPlacementOutcomesMock).toHaveBeenCalledTimes(1);
+    expect(lastSentPayload().events.length).toBeGreaterThan(1);
+
+    // The parked proposal is confirmed AFTER the first save; the second slice
+    // carries just that accept — with the method remembered across the drain.
+    fireEvent.click(screen.getByLabelText('Confirm Review field'));
+    fireEvent.click(screen.getByText('Save placement'));
+
+    expect(sendPlacementOutcomesMock).toHaveBeenCalledTimes(2);
+    expect(lastSentPayload().events).toEqual([
+      { kind: 'accepted', fieldId: 'f2', method: 'option-cells', via: 'confirm' },
+    ]);
+  });
+
+  it('the builder mount threads documentType and context into the payload (R9/KTD6)', () => {
+    saveSucceeds();
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'draft',
+      isCurrent: false,
+      fields: [choiceField('q1', 'Question one', ['Yes', 'No'])],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: 'asset-1',
+    };
+    render(<GeometryEditorScreen embedded documentType="assessment" />);
+
+    // Selecting the field auto-applies the confident default proposal.
+    fireEvent.click(screen.getByText('Question one'));
+    fireEvent.click(screen.getByText('Save placement'));
+
+    expect(lastSentPayload()).toMatchObject({
+      documentType: 'assessment',
+      context: 'builder',
+    });
   });
 });

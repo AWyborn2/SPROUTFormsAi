@@ -73,29 +73,30 @@ export const FIELD_META: Record<string, { icon: string; label: string }> = {
 };
 
 /**
- * Types that are IMPORTED, never authored. Each one carries payload that only
- * extraction can supply — a `repeating_group` needs columns, a `checkbox_group`
- * needs options that mean something — so conjuring one from a scalar field
- * produces a field that renders nothing and, if required, can never be
- * satisfied.
+ * The one type that is IMPORTED, never authored from another field:
+ * `repeating_group` needs COLUMNS only extraction supplies, and `retypeField`
+ * cannot seed them — so conjuring a table from a scalar produces one that
+ * renders nothing and, if required, can never be satisfied. It stays out of the
+ * authorable list, while still appearing for a field that already IS a table
+ * (see `typeOptionsFor`), so an imported table is editable without being
+ * creatable from thin air.
  *
- * `check_cross` USED TO BE ON THIS LIST and should not have been. It was added
- * as "a table CELL affordance, offered by `ColumnInspector`'s own list" — true
- * of a repeating-group column, and false of the field type, which is what an
- * assessment paper's printed outcome box is extracted as. It carries no payload
- * extraction has to supply: it is a bare ✓/✗ cell and nothing else.
+ * `checkbox_group` and `boolean_yes_no` USED TO BE ON THIS LIST and should not
+ * have been. Neither needs payload extraction alone can supply: `retypeField`
+ * seeds a choice field's options (a `checkbox_group` arrives with two, exactly
+ * as a radio or dropdown does) and defaults its `selectionType` to multiple, and
+ * a Yes/No carries nothing at all. Excluding them left an author unable to say
+ * "this multiple-choice question actually takes several answers" — the exact
+ * correction the type picker exists for — because the one target type that means
+ * it was the one type the picker refused to offer.
  *
- * The cost was concrete. Extraction misses outcome boxes on a dense paper, and
- * a missed one is exactly the case `addField` exists for — but the field it
- * added could never BE an outcome box, because the only type that draws a
- * verdict was the one type the palette refused to offer. The author was left
- * with a text box where a tick belongs, on the cell an auditor reads first.
+ * `check_cross` came off this list first, for the same reason: it is a bare ✓/✗
+ * cell with no payload, and keeping it off is what lets an author add the
+ * outcome box a dense paper's extraction missed. Extraction predicting a type is
+ * a starting point, never a lock — every type but the genuinely un-seedable
+ * table is the author's to choose.
  */
-const STRUCTURAL_TYPES: ReadonlySet<FormFieldType> = new Set([
-  'repeating_group',
-  'checkbox_group',
-  'boolean_yes_no',
-]);
+const STRUCTURAL_TYPES: ReadonlySet<FormFieldType> = new Set(['repeating_group']);
 
 /**
  * Does this type answer from `options`?
@@ -161,7 +162,17 @@ export function retypeField(f: FormField, type: FormFieldType): FormField {
     delete nf.options;
   }
 
-  if (type !== 'checkbox_group') delete nf.selectionType;
+  if (type === 'checkbox_group') {
+    // A field retyped to a checkbox group is almost always a "select all that
+    // apply" — a single-answer question is a radio. Default to multiple so the
+    // answer-key step, which reads `selectionType` to decide whether keys
+    // accumulate, lets the author record several correct answers — the whole
+    // reason to make this change. An existing choice (an imported group being
+    // re-confirmed) is kept.
+    if (nf.selectionType === undefined) nf.selectionType = 'multiple';
+  } else {
+    delete nf.selectionType;
+  }
   // `printSelectedValue` is a choice-field-only output mode; a field that stops
   // being a choice field cannot carry it.
   if (!isChoiceField(type)) delete nf.printSelectedValue;

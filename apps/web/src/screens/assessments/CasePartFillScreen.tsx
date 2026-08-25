@@ -1,17 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { SubmissionValue } from '@formai/shared';
-import { Button, Icon, useToast } from '@formai/ui';
+import type { CaseNextStep, SubmissionValue } from '@formai/shared';
+import { durationUnitLong, logbookDurationRows } from '@formai/shared';
+import { Button, Icon, todayISODate, useToast } from '@formai/ui';
+import { ApiError } from '../../lib/data/api-client.js';
+import { applyAssessorSignoff, dateFieldToStamp } from './signature-date-stamp.js';
+import { LogbookProgress } from './LogbookProgress.js';
 import {
   useAssessmentAttempt,
+  useCheckQuestion,
   useOpenAttempt,
   useSaveAttempt,
+  useSession,
   useSetAttemptSubmitted,
 } from '../../lib/data/hooks.js';
 import { partVisibility } from '../../lib/assessment-fill.js';
 import { fillSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
-import { answeredPages, theoryPages } from '../../lib/theory-pages.js';
+import { ConfirmSignatureDialog } from '../fields/ConfirmSignatureDialog.js';
+import { answeredPages, quizFields, theoryPages } from '../../lib/theory-pages.js';
+import { TheoryQuiz } from './TheoryQuiz.js';
 
 /**
  * Completing one part of an assessment case — the candidate's working surface.
@@ -39,9 +47,15 @@ export function CasePartFillScreen() {
   const save = useSaveAttempt(caseId ?? '');
   const setSubmitted = useSetAttemptSubmitted(caseId ?? '');
   const openAttempt = useOpenAttempt(caseId ?? '');
+  const checkQuestion = useCheckQuestion(caseId ?? '', attemptId);
+  // The acting user, to prefill their own name into an assessor sign-off block.
+  const { data: session } = useSession();
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   const [dirty, setDirty] = useState(false);
+  // The signature field awaiting a password confirmation, when the person
+  // chose "Use saved signature" — the dialog applies the mark only on a 204.
+  const [signatureField, setSignatureField] = useState<string | null>(null);
   /**
    * Seeded once PER ATTEMPT. Re-seeding on every fetch would discard whatever
    * the candidate had typed since — a background refetch mid-answer must not
@@ -49,9 +63,13 @@ export function CasePartFillScreen() {
    * the new attempt would render the old one's answers.
    */
   const seeded = useRef(false);
+  // The assessor sign-off prefill below runs once per attempt too, but AFTER the
+  // seed, on its own latch — it depends on the session, which can resolve later.
+  const signoffFilled = useRef(false);
 
   useEffect(() => {
     seeded.current = false;
+    signoffFilled.current = false;
   }, [attemptId]);
 
   useEffect(() => {
@@ -59,6 +77,35 @@ export function CasePartFillScreen() {
     setValues(attempt.values ?? {});
     seeded.current = true;
   }, [attempt]);
+
+  /*
+    ASSESSOR SIGN-OFF PREFILL. When the assessor opens a part they are marking,
+    fill their own name (from the account) and today's date into that part's
+    assessor sign-off block — the same sign-once convenience the certification
+    dialog gives, brought to the marking form so neither is transcribed by hand.
+    This covers the case a signature draw cannot: a practical whose outcome the
+    checklist auto-marks (B) is completed by ticking and handing in, with no
+    signature stroke for the companion-date stamp to fire on.
+
+    Only where the box is the caller's to fill (`writable`) and still blank, so
+    the candidate's own record is untouched and an edited value is never
+    re-clobbered. Once per attempt, after the seed, waiting for the session so
+    the name lands in the same pass as the date.
+  */
+  useEffect(() => {
+    if (!attempt || !seeded.current || signoffFilled.current) return;
+    // Only an OPEN attempt: a marked or handed-in one is a record, and stamping
+    // today's date onto it would claim a sign-off day that never happened.
+    if (attempt.outcome !== null || attempt.submittedAt !== null) {
+      signoffFilled.current = true;
+      return;
+    }
+    const name = session?.userName;
+    if (name === undefined) return; // session still resolving; the name needs it
+    signoffFilled.current = true;
+    const writable = new Set(attempt.writableFieldIds ?? []);
+    setValues((prev) => applyAssessorSignoff(attempt.fields, writable, prev, name, todayISODate()));
+  }, [attempt, session]);
 
   /*
     A MARKED ATTEMPT SHOWS THE SERVER'S COPY. Hand-in can mark on the spot now,
@@ -114,8 +161,31 @@ export function CasePartFillScreen() {
     before this existed.
   */
   const paged = attempt?.theoryRendering === 'one_per_screen' && attempt?.partKind === 'theory';
-  const pages = useMemo(() => (paged ? theoryPages(rendered) : []), [paged, rendered]);
+  /*
+    QUIZ PAGES CARRY ONLY WHAT THE CANDIDATE ANSWERS. A question's ✓/✗ outcome
+    cell is marking's print box — the server refuses writes to it — so it must
+    not render under the question it belongs to; see `quizFields`.
+  */
+  const pages = useMemo(
+    () =>
+      paged
+        ? theoryPages(quizFields(rendered, new Set(attempt?.writableFieldIds ?? [])))
+        : [],
+    [paged, rendered, attempt?.writableFieldIds],
+  );
   const [pageIndex, setPageIndex] = useState(0);
+
+  /*
+    The assessor's marking guide, keyed for the per-field callout below. Present
+    only on an assessor payload — the server sends the property ABSENT for a
+    candidate, so an empty map here is also the proof nothing leaked. Memoized
+    (and above the early returns, like every hook here) because `values` is
+    keystroke-hot state — rebuilding the map every render is waste.
+  */
+  const modelAnswers = useMemo(
+    () => new Map((attempt?.markingGuide ?? []).map((g) => [g.fieldId, g.modelAnswer])),
+    [attempt?.markingGuide],
+  );
 
   if (isLoading) {
     return <div className="p-[30px_28px] text-sm text-text-tertiary">Loading…</div>;
@@ -146,15 +216,34 @@ export function CasePartFillScreen() {
   // take it back until it is marked.
   const marked = attempt.outcome !== null;
   const handedIn = attempt.submittedAt !== null;
-  const readOnly = marked || handedIn;
+  /*
+    THE MARKING PASS: the assessor on a handed-in, not-yet-marked attempt. The
+    server already narrowed `writableFieldIds` to the marking surface — the
+    per-question ✓/✗ boxes and the sign-off block — so the screen opens for
+    editing and the field gate below does the rest: the candidate's prose stays
+    disabled because it is no longer in the writable set. `party` is identity,
+    decided server-side, so a self-assessing candidate is `candidate` here and
+    keeps today's frozen view of their own handed-in paper.
+  */
+  const markingPass = attempt.party === 'assessor' && handedIn && !marked;
+  const readOnly = marked || (handedIn && attempt.party === 'candidate');
 
   /*
     Clamped on READ rather than reset on change: a question answered on the last
     page can make an earlier one visible or hidden, and snapping the candidate
     back to page one every time the list resized would lose their place.
   */
-  const page = pages[Math.min(pageIndex, Math.max(0, pages.length - 1))];
-  const answered = paged ? answeredPages(pages, answers) : 0;
+  /*
+    THE QUIZ WINDOW IS THE CANDIDATE'S. `pages` is built from `quizFields`,
+    which keeps only the writable set — right for a sitting, where marking's
+    print boxes must not render under the questions. But on the marking pass
+    `writableFieldIds` IS the narrow marking surface, so paging there would
+    hand the assessor screens of bare ✓/✗ boxes with no questions and no
+    guide. The marker always gets the full stacked surface instead.
+  */
+  const windowed = paged && !markingPass;
+  const page = windowed ? pages[Math.min(pageIndex, Math.max(0, pages.length - 1))] : undefined;
+  const answered = windowed ? answeredPages(pages, answers) : 0;
   const shown = page ? page.fields : rendered;
   /*
     Which fields this caller may change, as the server decided. A tool with no
@@ -162,16 +251,52 @@ export function CasePartFillScreen() {
     read-only until somebody configures it.
   */
   const writable = new Set(attempt.writableFieldIds ?? []);
+  // Captured so the closure below keeps the non-null narrowing from the early
+  // return above — TS widens `attempt` back to possibly-undefined inside a
+  // nested function.
+  const partFields = attempt.fields;
 
   function setValue(fieldId: string, v: SubmissionValue) {
-    setValues((prev) => ({ ...prev, [fieldId]: v }));
+    setValues((prev) => {
+      const next = { ...prev, [fieldId]: v };
+      // Drawing a sign-off signature stamps the date it was signed on — but only
+      // a date this party may fill, so a companion the workflow made read-only is
+      // left to whoever owns it.
+      const dateId = dateFieldToStamp(partFields, prev, fieldId, v);
+      if (dateId && writable.has(dateId)) next[dateId] = todayISODate();
+      return next;
+    });
     setDirty(true);
   }
 
+  /*
+    The logbook's rows as they stand right now, so the progress panel moves as
+    the candidate types. `logbookDurationRows` totals EVERY table that carries
+    the duration column — a part may hold more than one — by the same rule the
+    server threshold uses, so what the candidate sees accruing is what the
+    threshold reads.
+  */
+  const logbookHourRows = attempt.durationColumnKey
+    ? logbookDurationRows({ durationColumnKey: attempt.durationColumnKey }, values)
+    : [];
+
   function onSave() {
     if (!attemptId || readOnly) return;
+    /*
+      ON THE MARKING PASS, SAVE ONLY WHAT IS OURS TO WRITE. The served values
+      include the keyed questions' PRE-MARKS, merged in for display at cells the
+      workflow keeps `auto` — not writable by anybody. The candidate flow PATCHes
+      its whole map back and the server tolerates unchanged echoes, but a
+      pre-mark is NOT in the stored map yet, so echoing it reads as writing a
+      foreign field and the whole save is refused. Filtering to the server's own
+      writable set sends exactly the marking surface; candidates keep today's
+      whole-map echo untouched.
+    */
+    const payload = markingPass
+      ? Object.fromEntries(Object.entries(values).filter(([id]) => writable.has(id)))
+      : values;
     save.mutate(
-      { attemptId, values },
+      { attemptId, values: payload },
       {
         onSuccess: () => {
           setDirty(false);
@@ -182,8 +307,74 @@ export function CasePartFillScreen() {
     );
   }
 
+  // Never the quiz on a marking pass: the quiz is the CANDIDATE'S sitting
+  // presentation (check-answer, retry, hand-in) — the assessor gets the stacked
+  // marking surface with the model answers beside each written question.
+  if (paged && !readOnly && !markingPass && pages.length > 0) {
+    return (
+      <TheoryQuiz
+        pages={pages}
+        values={values}
+        writable={writable}
+        retryMode={attempt.theoryRetry ?? 'end'}
+        passPercent={attempt.theoryPassPercent ?? 100}
+        partLabel={attempt.partLabel}
+        partKey={attempt.partKey}
+        caseId={caseId!}
+        attemptId={attemptId!}
+        onValueChange={setValue}
+        onCheckQuestion={(fieldId, value) => checkQuestion.mutateAsync({ fieldId, value })}
+        onSave={() =>
+          new Promise<void>((resolve, reject) =>
+            save.mutate(
+              { attemptId: attemptId!, values },
+              { onSuccess: () => { setDirty(false); resolve(); }, onError: reject },
+            ),
+          )
+        }
+        onSubmit={() =>
+          new Promise((resolve, reject) =>
+            setSubmitted.mutate(
+              { attemptId: attemptId!, submitted: true },
+              {
+                onSuccess: (r) => {
+                  setDirty(false);
+                  const outcome = 'outcome' in r ? (r.outcome as string) : undefined;
+                  const correctCount = 'correctCount' in r ? (r.correctCount as number) : undefined;
+                  const totalCount = 'totalCount' in r ? (r.totalCount as number) : undefined;
+                  resolve({ outcome, correctCount, totalCount });
+                },
+                onError: reject,
+              },
+            ),
+          )
+        }
+        onTryAgain={() =>
+          openAttempt.mutate(attempt.partKey, {
+            onSuccess: (r) => navigate(`/app/assessments/${caseId}/attempts/${r.id}`),
+            onError: () =>
+              toast({
+                variant: 'warning',
+                message: "Couldn't open another attempt — your assessor may need to.",
+              }),
+          })
+        }
+        onBack={() => navigate(`/app/assessments/${caseId}`)}
+        submitting={setSubmitted.isPending}
+        saving={save.isPending}
+      />
+    );
+  }
+
+  // A part with a repeating table (a logbook) needs the room for all its
+  // columns, so it lays out wider than an ordinary question part where a
+  // narrow measure keeps text readable.
+  const wideTable = attempt.fields.some((f) => f.type === 'repeating_group');
+
   return (
-    <div className="fai-rise mx-auto max-w-[820px] p-[30px_28px_60px]">
+    <div
+      className={`fai-rise mx-auto ${wideTable ? 'max-w-[1180px]' : 'max-w-[820px]'} p-[30px_28px_60px]`}
+    >
       <button
         type="button"
         onClick={() => navigate(`/app/assessments/${caseId}`)}
@@ -197,7 +388,9 @@ export function CasePartFillScreen() {
         <h1 className="font-heading text-xl font-semibold">{attempt.partLabel}</h1>
         <p className="mt-1 text-[13px] text-text-secondary">
           Attempt {attempt.attemptNumber}
-          {attempt.minimumHours !== null && <> · {attempt.minimumHours} hours minimum</>}
+          {attempt.minimumHours !== null && (
+            <> · {attempt.minimumHours} {durationUnitLong(attempt.durationUnit ?? 'hours')} minimum</>
+          )}
           {attempt.locationStream && <> · {attempt.locationStream}</>}
         </p>
       </header>
@@ -232,7 +425,39 @@ export function CasePartFillScreen() {
         </div>
       )}
 
-      {handedIn && !marked && (
+      {/*
+        WHERE TO GO AFTER PASSING. A signed declaration used to dead-end on the
+        "locked record" banner with no way onward; now it names the next part —
+        a button when the candidate may start it, a note when it is the
+        assessor's. Shown only once THIS part has passed, so a part still waiting
+        on a mark is not told to move on.
+      */}
+      {marked && attempt.outcome === 'satisfactory' && (
+        <NextStepPanel
+          nextStep={attempt.nextStep}
+          opening={openAttempt.isPending}
+          onContinue={(partKey) =>
+            openAttempt.mutate(partKey, {
+              onSuccess: (r) => navigate(`/app/assessments/${caseId}/attempts/${r.id}`),
+              onError: () =>
+                toast({
+                  variant: 'warning',
+                  message: "Couldn't open the next part — your assessor may need to.",
+                }),
+            })
+          }
+        />
+      )}
+
+      {/*
+        THE REOPEN BANNER IS THE CANDIDATE'S, BY PARTY. "You can still take it
+        back" is candidate-voiced, and the button beside it reopened the
+        attempt LIVE — on the assessor's marking pass that gesture un-hands-in
+        the paper they are mid-way through marking, which is the candidate's
+        act, never the marker's. The marking pass gets its own one-liner
+        instead, so the state is still named without offering the wrong verb.
+      */}
+      {handedIn && !marked && attempt.party === 'candidate' && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5">
           <p className="text-[13px] text-text-secondary">
             Handed in — your assessor will mark this. You can still take it back until they do.
@@ -258,7 +483,15 @@ export function CasePartFillScreen() {
         </div>
       )}
 
-      {paged && pages.length > 1 && (
+      {markingPass && (
+        <div className="mb-4 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5">
+          <p className="text-[13px] text-text-secondary">
+            Marking — tick against the guide and save; the candidate's answers are frozen.
+          </p>
+        </div>
+      )}
+
+      {windowed && pages.length > 1 && (
         <div className="flex items-center gap-3">
           <span
             className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-sunken"
@@ -279,6 +512,14 @@ export function CasePartFillScreen() {
         </div>
       )}
 
+      <LogbookProgress
+        rows={logbookHourRows}
+        taskMinimums={attempt.taskMinimums}
+        durationColumnKey={attempt.durationColumnKey}
+        minimumHours={attempt.minimumHours}
+        unit={attempt.durationUnit}
+      />
+
       <div className="grid grid-cols-12 gap-[16px]">
         {shown.map((f) => (
           <div key={f.id} className={fillSpanClass(resolveFillSpan(f, false))}>
@@ -294,7 +535,36 @@ export function CasePartFillScreen() {
               */
               disabled={readOnly || !writable.has(f.id)}
               onChange={(v) => setValue(f.id, v)}
+              /*
+                Offered only when the whole act can complete: a saved mark on
+                the session, a password to confirm it with (R6 hides it for
+                invite-created accounts that never set one), and a field this
+                party may write. The confirmation dialog below owns the rest.
+              */
+              onUseSavedSignature={
+                session?.signature && session.hasPassword && !readOnly && writable.has(f.id)
+                  ? (fieldId) => setSignatureField(fieldId)
+                  : undefined
+              }
             />
+            {/*
+              MODEL ANSWER — assessor guide. Rendered BESIDE the field rather
+              than inside it: `FieldInput` stays unforked, and the candidate
+              never has this block because the guide itself is absent from
+              their payload — there is nothing here to hide, only to render.
+              Whitespace-preserving because the answer key's prose arrives with
+              its own line breaks and losing them mangles multi-part answers.
+            */}
+            {modelAnswers.has(f.id) && (
+              <div className="mt-1.5 rounded-[10px] border border-warning bg-warning-soft p-[8px_10px]">
+                <p className="mb-1 text-[10.5px] font-semibold uppercase tracking-wide text-warning-text">
+                  Model answer — assessor guide
+                </p>
+                <p className="whitespace-pre-wrap text-[12.5px] leading-snug text-warning-text">
+                  {modelAnswers.get(f.id)}
+                </p>
+              </div>
+            )}
           </div>
         ))}
         {shown.length === 0 && (
@@ -304,7 +574,7 @@ export function CasePartFillScreen() {
         )}
       </div>
 
-      {paged && pages.length > 1 && (
+      {windowed && pages.length > 1 && (
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -347,6 +617,13 @@ export function CasePartFillScreen() {
           {/* Handing in is the signal an assessor waits on. Saving first means a
               candidate cannot submit a version of their answers that differs
               from the one still sitting unsaved on screen. */}
+          {/* A DECLARATION is not marked — signing it IS the act, so the button
+              says what actually happens and nobody is told to wait for a
+              marking that will never occur. */}
+          {/* NOT ON THE MARKING PASS: the attempt is already handed in — the
+              assessor saves ticks and records the outcome from the case screen;
+              a second "hand in" here would be an act with no meaning. */}
+          {!markingPass && (
           <Button
             leadingIcon="send"
             disabled={save.isPending || setSubmitted.isPending}
@@ -365,7 +642,13 @@ export function CasePartFillScreen() {
                       // union has to be narrowed before the outcome is read.
                       const outcome = 'outcome' in r ? r.outcome : undefined;
                       if (outcome === 'satisfactory') {
-                        toast({ variant: 'success', message: 'Marked satisfactory — this part is done.' });
+                        toast({
+                          variant: 'success',
+                          message:
+                            attempt?.partKind === 'declaration'
+                              ? 'Declaration signed — you can start the assessment.'
+                              : 'Marked satisfactory — this part is done.',
+                        });
                       } else if (outcome === 'not_satisfactory') {
                         toast({
                           variant: 'warning',
@@ -375,8 +658,21 @@ export function CasePartFillScreen() {
                         toast({ variant: 'success', message: 'Handed in for marking.' });
                       }
                     },
-                    onError: () =>
-                      toast({ variant: 'danger', message: "Couldn't hand in — try again." }),
+                    onError: (err) => {
+                      // The one refusal with its own next step: the declaration
+                      // names the boxes still empty, so say them.
+                      const body =
+                        err instanceof ApiError && err.body && typeof err.body === 'object'
+                          ? (err.body as { error?: string; detail?: string })
+                          : null;
+                      toast({
+                        variant: 'danger',
+                        message:
+                          body?.error === 'declaration_incomplete' && body.detail
+                            ? body.detail
+                            : "Couldn't hand in — try again.",
+                      });
+                    },
                   },
                 );
               if (!dirty) return handOff();
@@ -390,10 +686,82 @@ export function CasePartFillScreen() {
               );
             }}
           >
-            {setSubmitted.isPending ? 'Handing in…' : 'Hand in for marking'}
+            {setSubmitted.isPending
+              ? attempt?.partKind === 'declaration'
+                ? 'Signing…'
+                : 'Handing in…'
+              : attempt?.partKind === 'declaration'
+                ? 'Sign and continue'
+                : 'Hand in for marking'}
           </Button>
+          )}
         </div>
       )}
+
+      <ConfirmSignatureDialog
+        open={signatureField !== null}
+        context={{ caseId, attemptId, fieldId: signatureField ?? undefined }}
+        onClose={() => setSignatureField(null)}
+        onConfirmed={() => {
+          // The 204 is the act; writing the mark is its result. Routed through
+          // setValue so the companion date-stamp fires exactly as it does for
+          // a drawn signature.
+          if (signatureField && session?.signature) setValue(signatureField, session.signature);
+          setSignatureField(null);
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * Where the candidate goes after a part passes.
+ *
+ * A signed declaration used to leave them on a "locked record" banner with no
+ * way onward. Now: a button to start the next part they may fill, or a plain
+ * note that it is the assessor's to complete. Which one comes off the server's
+ * `nextStep`, decided from the same workflow access the open-attempt route
+ * enforces — so a "Continue" is never offered for a part the server would refuse.
+ */
+function NextStepPanel({
+  nextStep,
+  opening,
+  onContinue,
+}: {
+  nextStep: CaseNextStep;
+  opening: boolean;
+  onContinue: (partKey: string) => void;
+}) {
+  if (nextStep.kind === 'continue') {
+    return (
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-border-accent bg-surface-accent-soft px-3 py-3">
+        <p className="text-[13px] text-text-secondary">
+          Next: <strong className="text-text-primary">{nextStep.label}</strong>
+        </p>
+        <Button leadingIcon="arrow-right" disabled={opening} onClick={() => onContinue(nextStep.partKey)}>
+          {opening ? 'Opening…' : `Continue to ${nextStep.label}`}
+        </Button>
+      </div>
+    );
+  }
+
+  if (nextStep.kind === 'awaiting_other') {
+    return (
+      <div className="mb-4 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-3">
+        <p className="text-[13px] text-text-secondary">
+          The next part — <strong className="text-text-primary">{nextStep.label}</strong> — is
+          completed by {nextStep.filledBy}. Please arrange to complete the next part.
+        </p>
+      </div>
+    );
+  }
+
+  // 'done' — nothing further for this party; the case moves to sign-off.
+  return (
+    <div className="mb-4 rounded-[10px] border border-success bg-success-soft px-3 py-3">
+      <p className="text-[13px] text-success-text">
+        That’s every part you needed to complete — your assessor will finish the sign-off from here.
+      </p>
     </div>
   );
 }

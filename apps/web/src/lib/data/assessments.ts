@@ -12,12 +12,18 @@
  * had ever been sent the rest.
  */
 import type {
+  DeclaredMark,
+  PartCompletionMark,
   PrerequisiteCheck,
   ProfilePrefillKey,
   TheoryRendering,
+  TheoryRetryMode,
+  AssessmentCourseLink,
   AssessmentPathway,
   AssessmentToolManifest,
   AssessmentWorkflow,
+  CaseNextStep,
+  DurationUnit,
   FormField,
   NotSatisfactoryDisposition,
   AssessmentCaseState,
@@ -28,10 +34,23 @@ import type {
 } from '@formai/shared';
 import { apiClient } from './api-client.js';
 
+/** One part's printed verdict pair, as the workflow PATCH carries it. */
+export interface PartOutcomeMarkEntry {
+  partKey: string;
+  outcomeSatisfactory?: DeclaredMark;
+  outcomeNotSatisfactory?: DeclaredMark;
+}
+
 export interface AssessmentToolSummary {
   id: string;
   name: string;
   templateId: string;
+  /**
+   * The competency this tool grants (constrained to one at authoring time). Used
+   * on the new-case form to suggest a pathway: a candidate who already holds it
+   * is `experienced`, one who never has is `new`.
+   */
+  awardedCompetencyIds: string[];
   parts: { key: string; label: string; kind: PartKind }[];
   /**
    * Location streams whose assessor requirements differ, if any.
@@ -53,6 +72,14 @@ export interface AssessmentCaseRow {
   /** Null on a pooled case — shown as unassigned (U13). */
   assessorUserId: string | null;
   createdAt: string;
+  /** The part the case is at now — first not-yet-satisfactory. Null once competent. */
+  currentPartLabel: string | null;
+  /** 1-based position of that part among the pathway's required parts. */
+  currentPartIndex: number | null;
+  /** How many parts this pathway requires — the "of 6" in "Part 3 of 6". */
+  requiredPartCount: number;
+  /** Waiting on a person: a part handed in unmarked, or the final sign-off. */
+  awaitingAssessor: boolean;
 }
 
 /** One unowned case an eligible assessor may pull from the shared queue (U13). */
@@ -76,6 +103,8 @@ export interface CasePartView {
   kind: PartKind;
   ordinal: number;
   minimumHours: number | null;
+  /** The unit the minimum is read in; null reads as hours. */
+  durationUnit: DurationUnit | null;
   state: PartState;
   attempts: number;
   latestOutcome: PartOutcome | null;
@@ -115,8 +144,46 @@ export interface AssessmentCaseDetail {
   currentVersionId: string;
   prerequisiteWarnings: string[];
   appealOfCaseId: string | null;
+  /** The tool's course material and this case's reading state, or null. */
+  course: CaseCourseState | null;
   parts: CasePartView[];
   attempts: CaseAttemptView[];
+}
+
+/** The case's course-material state, as the case detail carries it. */
+export interface CaseCourseState {
+  courseId: string;
+  /** Whether part attempts stay shut until the reading record completes. */
+  required: boolean;
+  /** True when the linked course was archived or deleted — shown, not enforced. */
+  missing: boolean;
+  title: string | null;
+  kind: string | null;
+  totalSlides: number | null;
+  viewedCount: number;
+  completedAt: string | null;
+}
+
+/** The player's view: the state plus a freshly minted content link. */
+export interface CaseCourseView extends CaseCourseState {
+  /** API path the iframe loads — null when the course is missing. */
+  launchUrl: string | null;
+  expiresAt: string | null;
+  /** Slide indexes already recorded — seeded into a reopened deck to resume. */
+  visitedSlides: number[];
+}
+
+/** One uploaded course package, as the builder's picker lists them. */
+export interface CourseSummary {
+  id: string;
+  title: string;
+  kind: string;
+  launchPath: string;
+  slideCount: number | null;
+  fileCount: number;
+  totalBytes: number;
+  status: string;
+  createdAt: string;
 }
 
 /** One part of a case as the progress dashboard sees it. */
@@ -178,11 +245,33 @@ export interface AttemptFillView {
    * part rendered as before this existed.
    */
   theoryRendering?: TheoryRendering | null;
+  /** When a candidate may retry a wrong theory part — resolved by the server. */
+  theoryRetry?: TheoryRetryMode;
+  /** Pass threshold percentage (1–100), or null for mandatory-all-correct. */
+  theoryPassPercent?: number | null;
   attemptNumber: number;
   outcome: PartOutcome | null;
   /** Null until the candidate hands it in. */
   submittedAt: string | null;
   templateVersionId: string;
+  /**
+   * Which side of this assessment the caller is on, decided by the server from
+   * the case (the candidate on the case is the candidate; anyone else with
+   * access is acting as the assessor). A self-assessing candidate is
+   * `candidate` — identity, not permission — which is what keeps the marking
+   * guide off their own paper.
+   */
+  party: 'candidate' | 'assessor';
+  /**
+   * The assessor's marking guide: each written question's model answer, served
+   * as a separate role-gated block ONLY when `party === 'assessor'`. `fields`
+   * above stay stripped for everyone — this never rides on a field — and the
+   * property is ABSENT (not empty) on a candidate payload, so no
+   * candidate-shaped response has anywhere a secret could sit.
+   */
+  markingGuide?: { fieldId: string; modelAnswer: string }[];
+  /** The step after this part — a "continue", or a wait on the other party. */
+  nextStep: CaseNextStep;
   /**
    * The case's stream and the manifest question it answers. Either being null
    * fails OPEN: every location set renders rather than none.
@@ -192,7 +281,15 @@ export interface AttemptFillView {
   /** The stream question, for condition lookup — often outside this part. */
   streamField: FormField | null;
   minimumHours: number | null;
+  /** The unit the minimum and logged Duration are read in; null reads as hours. */
+  durationUnit: DurationUnit | null;
   durationColumnKey: string | null;
+  /**
+   * Per-task-type hour targets, when this logbook part declares them. Drives
+   * the live per-task progress on the fill surface; a soft target, never a
+   * gate.
+   */
+  taskMinimums: NonNullable<AssessmentToolManifest['parts'][number]['taskMinimums']> | null;
   /** Everything this caller may SEE. Hidden fields are already absent. */
   fields: FormField[];
   /**
@@ -257,6 +354,37 @@ export const assessmentsApi = {
   listTools: () => apiClient.get<AssessmentToolSummary[]>('/assessment-tools'),
 
   /**
+   * Publish a REVISION: one transaction that freezes the revised draft version
+   * and updates this tool's manifest together. Refused with `stale_revision`
+   * when the tool was republished after the revision was seeded, and with
+   * `open_cases_incompatible` when the new manifest would dangle against an
+   * open case's pinned fields (R14, R16).
+   */
+  republishTool: (input: {
+    toolId: string;
+    versionId: string;
+    seededFromVersionId: string;
+    fields: FormField[];
+    manifest: AssessmentToolManifest;
+    name?: string;
+    revisionIdentity?: { code?: string; reviewedOn?: string; note?: string };
+    /** The author's explicit untick of removed parts from Location rules. */
+    dropDanglingLocationRules?: boolean;
+  }) =>
+    apiClient.post<{ id: string; templateId: string; versionId: string; versionLabel: string; warnings: string[] }>(
+      `/assessment-tools/${input.toolId}/republish`,
+      {
+        versionId: input.versionId,
+        seededFromVersionId: input.seededFromVersionId,
+        fields: input.fields,
+        manifest: input.manifest,
+        ...(input.name ? { name: input.name } : {}),
+        ...(input.revisionIdentity ? { revisionIdentity: input.revisionIdentity } : {}),
+        ...(input.dropDanglingLocationRules ? { dropDanglingLocationRules: true } : {}),
+      },
+    ),
+
+  /**
    * One tool with everything the workflow builder renders.
    *
    * The manifest AND the version's fields in one response — the builder draws
@@ -280,6 +408,11 @@ export const assessmentsApi = {
     profilePrefill?: Record<string, ProfilePrefillKey> | null,
     prerequisiteChecks?: PrerequisiteCheck[] | null,
     fieldDefaults?: Record<string, SubmissionValue> | null,
+    partCompletionMarks?: PartCompletionMark[] | null,
+    signOff?: AssessmentToolManifest['signOff'] | null,
+    pathwayMarks?: AssessmentToolManifest['pathwayMarks'] | null,
+    partOutcomeMarks?: PartOutcomeMarkEntry[] | null,
+    course?: AssessmentCourseLink | null,
   ) =>
     apiClient.patch<{ id: string; workflow: AssessmentWorkflow; warnings: string[] }>(
       `/assessment-tools/${id}`,
@@ -290,6 +423,11 @@ export const assessmentsApi = {
         ...(profilePrefill !== undefined ? { profilePrefill } : {}),
         ...(prerequisiteChecks !== undefined ? { prerequisiteChecks } : {}),
         ...(fieldDefaults !== undefined ? { fieldDefaults } : {}),
+        ...(partCompletionMarks !== undefined ? { partCompletionMarks } : {}),
+        ...(signOff !== undefined ? { signOff } : {}),
+        ...(pathwayMarks !== undefined ? { pathwayMarks } : {}),
+        ...(partOutcomeMarks !== undefined ? { partOutcomeMarks } : {}),
+        ...(course !== undefined ? { course } : {}),
       },
     ),
 
@@ -302,6 +440,43 @@ export const assessmentsApi = {
    * document is worded. The map holds only the exceptions: a Location left out
    * requires every part (R75).
    */
+  /**
+   * Set or change WHERE an open case is assessed (R77). Staff only, open
+   * cases only — the Location decides what the case requires, so a case
+   * opened without one is corrected here rather than reopened.
+   */
+  setCaseLocation: (caseId: string, locationId: string | null) =>
+    apiClient.patch<{ id: string; locationId: string | null }>(
+      `/assessment-cases/${caseId}/location`,
+      { locationId },
+    ),
+
+  /** The org's active course packages, newest first. */
+  listCourses: () => apiClient.get<{ courses: CourseSummary[] }>('/courses'),
+
+  /**
+   * Import a course package. A whole zipped manual rides in one request, so
+   * the default 30-second ceiling would abort a slow site connection mid-way.
+   */
+  uploadCourse: (title: string, zipBase64: string) =>
+    apiClient.post<CourseSummary>('/courses', { title, zipBase64 }, { timeoutMs: 180_000 }),
+
+  archiveCourse: (id: string) => apiClient.delete<{ ok: boolean }>(`/courses/${id}`),
+
+  /** The case's course material plus a freshly minted content link. */
+  getCaseCourse: (caseId: string) =>
+    apiClient.get<{ course: CaseCourseView | null }>(`/assessment-cases/${caseId}/course`),
+
+  /** Report reading progress; the server derives completion, never the client. */
+  saveCourseProgress: (
+    caseId: string,
+    input: { visitedSlides?: number[]; confirmRead?: boolean },
+  ) =>
+    apiClient.patch<{ viewedCount: number; totalSlides: number | null; completedAt: string | null }>(
+      `/assessment-cases/${caseId}/course-progress`,
+      input,
+    ),
+
   setLocationParts: (id: string, locationPartKeys: Record<string, string[]>) =>
     apiClient.patch<{ id: string; locationPartKeys: Record<string, string[]> }>(
       `/assessment-tools/${id}/location-parts`,
@@ -354,12 +529,20 @@ export const assessmentsApi = {
       submittedAt: string | null;
       outcome?: PartOutcome;
       caseState?: AssessmentCaseState;
+      correctCount?: number;
+      totalCount?: number;
     }>(`/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {}),
 
   reopenAttempt: (caseId: string, attemptId: string) =>
     apiClient.post<{ id: string; submittedAt: string | null }>(
       `/assessment-cases/${caseId}/attempts/${attemptId}/reopen`,
       {},
+    ),
+
+  checkQuestion: (caseId: string, attemptId: string, fieldId: string, value: SubmissionValue) =>
+    apiClient.post<{ correct: boolean; hint?: string | null }>(
+      `/assessment-cases/${caseId}/attempts/${attemptId}/check-question`,
+      { fieldId, value },
     ),
 
   /** Opens a new attempt, or returns the one already open for that part. */
@@ -404,7 +587,16 @@ export const assessmentsApi = {
    * an assessor missing a competency of their own, or a grant that could not be
    * made. The date is server-stamped and is not sent.
    */
-  signOffCase: ({ caseId, ...body }: { caseId: string; assessorName: string; signature: string }) =>
+  signOffCase: ({
+    caseId,
+    ...body
+  }: {
+    caseId: string;
+    assessorName: string;
+    signature: string;
+    /** Required by the API when `signature` is the caller's STORED mark. */
+    password?: string;
+  }) =>
     apiClient.post<{
       state: AssessmentCaseState;
       signedOffAt: string;

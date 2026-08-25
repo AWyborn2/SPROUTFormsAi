@@ -51,7 +51,7 @@ export function TemplatesScreen() {
   const { toast } = useToast();
   const { data: forms = [] } = useForms();
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
-  const [showArchived, setShowArchived] = useState(false);
+  const [statusTab, setStatusTab] = useState<'all' | TemplateStatus>('all');
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
   const [driftOpen, setDriftOpen] = useState(false);
@@ -59,7 +59,6 @@ export function TemplatesScreen() {
   const [query, setQuery] = useState('');
   const [ownerFilter, setOwnerFilter] = useState('');
   const [deptFilter, setDeptFilter] = useState('');
-  const archivedCount = forms.filter((f) => f.status === 'archived').length;
 
   /*
     The filter options come from the documents themselves rather than a second
@@ -71,10 +70,15 @@ export function TemplatesScreen() {
   const filtersActive = query !== '' || ownerFilter !== '' || deptFilter !== '';
 
   const q = query.trim().toLowerCase();
-  // Archived forms leave the active list by default; the toggle brings them back.
+  /*
+    "All" still excludes archived — an archived document is out of circulation
+    and would otherwise pad the everyday list forever. Its own tab is the way
+    back in, replacing the old "Show archived" toggle with the same pattern the
+    submissions table uses.
+  */
   const visibleForms = forms.filter(
     (f) =>
-      (showArchived || f.status !== 'archived') &&
+      (statusTab === 'all' ? f.status !== 'archived' : f.status === statusTab) &&
       (!ownerFilter || f.owner === ownerFilter) &&
       (!deptFilter || f.dept === deptFilter) &&
       (!q ||
@@ -82,6 +86,18 @@ export function TemplatesScreen() {
         f.dept.toLowerCase().includes(q) ||
         (f.owner ?? '').toLowerCase().includes(q)),
   );
+
+  /*
+    Counts come from the WHOLE library, not the filtered view: the tab row is a
+    map of what exists, and a search that happens to match nothing archived
+    must not make the Archived tab read as empty when it is not.
+  */
+  const STATUS_TABS: Array<{ key: 'all' | TemplateStatus; label: string; count: number }> = [
+    { key: 'all', label: 'All', count: forms.filter((f) => f.status !== 'archived').length },
+    { key: 'published', label: 'Published', count: forms.filter((f) => f.status === 'published').length },
+    { key: 'draft', label: 'Drafts', count: forms.filter((f) => f.status === 'draft').length },
+    { key: 'archived', label: 'Archived', count: forms.filter((f) => f.status === 'archived').length },
+  ];
   // Auto-select the first VISIBLE form until the user picks one (the fallback
   // must run against the filtered array, so selection degrades when the
   // selected form gets archived away or deleted); a hardcoded id would fire
@@ -427,28 +443,44 @@ export function TemplatesScreen() {
         )}
       </div>
 
+      {/* Status tabs — the same pattern as the submissions table. */}
+      <div className="mb-4 flex gap-0.5 border-b border-border">
+        {STATUS_TABS.map((t) => {
+          const active = statusTab === t.key;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setStatusTab(t.key)}
+              className="relative flex items-center gap-2 px-3.5 py-2.5 text-[13.5px] font-semibold"
+              style={{ color: active ? 'var(--text-primary)' : 'var(--text-tertiary)' }}
+            >
+              {t.label}
+              <span
+                className="rounded-pill px-[7px] py-px font-mono text-[11px]"
+                style={{ background: active ? 'var(--surface-accent-soft)' : 'var(--surface-sunken)' }}
+              >
+                {t.count}
+              </span>
+              {active && <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-t bg-accent" />}
+            </button>
+          );
+        })}
+      </div>
+
       <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1.7fr)_minmax(230px,1fr)]">
         {/* Document list */}
         <div className="overflow-hidden rounded-lg border border-border bg-surface-card shadow-xs">
           <div className="flex items-center gap-[14px] border-b border-border-subtle p-[11px_20px] font-mono text-[10.5px] uppercase tracking-wider text-text-tertiary">
             <span className="flex-1">Document</span>
-            {archivedCount > 0 && (
-              <button
-                onClick={() => setShowArchived((s) => !s)}
-                aria-pressed={showArchived}
-                className="flex items-center gap-1 font-mono text-[10.5px] uppercase tracking-wider text-text-tertiary hover:text-text-secondary"
-              >
-                <Icon name={showArchived ? 'eye-off' : 'archive'} size={12} />
-                {showArchived ? 'Hide archived' : `Show archived (${archivedCount})`}
-              </button>
-            )}
             <span>Fills</span>
           </div>
           {visibleForms.length === 0 && (
             <p className="p-[18px_20px] text-[13px] text-text-tertiary">
               {filtersActive
                 ? 'No documents match these filters.'
-                : 'No documents yet — import a PDF or build a form to get started.'}
+                : statusTab !== 'all'
+                  ? `No ${statusTab} documents.`
+                  : 'No documents yet — import a PDF or build a form to get started.'}
             </p>
           )}
           {visibleForms.map((f) => {
@@ -741,6 +773,21 @@ export function TemplatesScreen() {
                       </>
                     ) : null}
                   </div>
+                  {/* The paper document's own identity, where a revision
+                      recorded one — the code and review date auditors match
+                      against the printed document, ahead of the change note. */}
+                  {v.revisionIdentity && (v.revisionIdentity.code || v.revisionIdentity.reviewedOn) && (
+                    <div className="mt-[3px] font-mono text-[11px] uppercase tracking-[0.05em] text-text-secondary">
+                      {[
+                        v.revisionIdentity.code,
+                        v.revisionIdentity.reviewedOn
+                          ? `reviewed ${v.revisionIdentity.reviewedOn}`
+                          : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
+                  )}
                   {v.note && (
                     <div className="mt-[3px] text-[12.5px] leading-snug text-text-secondary">{v.note}</div>
                   )}

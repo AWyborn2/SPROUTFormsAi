@@ -18,13 +18,20 @@ export {
 export {
   assembleCaseValues,
   exportCasePdf,
+  withDerivedMarks,
   CaseExportError,
   type AssembledCase,
   type AssembleCaseInput,
   type CaseAttemptRecord,
   type ExportCaseInput,
 } from './case-export.js';
-export { extractFormFieldsTool, EXTRACT_TOOL_NAME } from './tool-schema.js';
+export { auditForm, parseAuditResponse, AUDIT_MAX_TOKENS, type AuditOptions } from './audit.js';
+export {
+  extractFormFieldsTool,
+  EXTRACT_TOOL_NAME,
+  reportMissedFieldsTool,
+  AUDIT_TOOL_NAME,
+} from './tool-schema.js';
 export {
   matchAnswerGuide,
   resolveOption,

@@ -2,10 +2,19 @@ import { Icon } from '@formai/ui';
 import {
   ASSESSMENT_PATHWAYS,
   PART_KINDS,
+  convertDurationValue,
+  durationUnitLong,
+  durationUnitShort,
   type AssessmentPathway,
+  type DurationUnit,
   type PartKind,
 } from '@formai/shared';
-import { logbookColumnsFor } from '../builder-manifest.js';
+import {
+  logbookChoiceColumnsFor,
+  logbookColumnsFor,
+  taskMinimumsFromColumn,
+  withTaskTargetHours,
+} from '../builder-manifest.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
 
 /**
@@ -35,6 +44,7 @@ const KIND_LABELS: Record<PartKind, string> = {
   theory: 'Theory',
   practical: 'Practical',
   logbook: 'Logbook',
+  declaration: 'Declaration',
 };
 
 const PATHWAY_LABELS: Record<AssessmentPathway, string> = {
@@ -105,6 +115,70 @@ export function UnitsStep({ draft }: UnitsStepProps) {
 
       {parts.map((part, i) => {
         const columns = logbookColumnsFor(part, fields);
+        const choiceColumns = logbookChoiceColumnsFor(part, fields);
+        const taskMin = part.taskMinimums ?? null;
+        const taskColumn = taskMin ? choiceColumns.find((c) => c.key === taskMin.columnKey) : undefined;
+
+        // The part's duration unit; omitted means hours (every prior tool).
+        const unit: DurationUnit = part.durationUnit ?? 'hours';
+        const unitShort = durationUnitShort(unit);
+        // Once any per-task minimum is set, the overall target IS their sum —
+        // the author asked not to keep it in step by hand. Rounded so 12×0.25
+        // reads 3, not 3.0000000001.
+        const targetSum =
+          taskMin && taskMin.targets.length > 0
+            ? Math.round(taskMin.targets.reduce((n, t) => n + t.minimumHours, 0) * 100) / 100
+            : null;
+        const overallAuto = targetSum !== null;
+        const overallValue = overallAuto ? targetSum : (part.minimumHours ?? '');
+
+        /*
+          Every per-task edit writes the targets AND the overall together, so
+          the summed minimum the manifest carries never lags the tasks it is
+          summed from. When the last target is cleared the overall goes back to
+          whatever the author last typed by hand.
+        */
+        const applyTaskMinimums = (next: typeof taskMin) => {
+          const sum =
+            next && next.targets.length > 0
+              ? Math.round(next.targets.reduce((n, t) => n + t.minimumHours, 0) * 100) / 100
+              : null;
+          partOps.update(part.key, {
+            taskMinimums: next ?? undefined,
+            ...(sum !== null ? { minimumHours: sum } : {}),
+          });
+        };
+
+        /*
+          Flipping the unit converts the figures rather than the digits — 0.25
+          hours becomes 15 minutes — so the author's intent survives the switch.
+          Both the overall and every task target move together, because they
+          share the one unit the logged Duration column is read in.
+        */
+        const setUnit = (nextUnit: DurationUnit) => {
+          if (nextUnit === unit) return;
+          const nextTargets = taskMin
+            ? {
+                ...taskMin,
+                targets: taskMin.targets.map((t) => ({
+                  ...t,
+                  minimumHours: convertDurationValue(t.minimumHours, unit, nextUnit),
+                })),
+              }
+            : null;
+          const nextOverall =
+            nextTargets && nextTargets.targets.length > 0
+              ? Math.round(nextTargets.targets.reduce((n, t) => n + t.minimumHours, 0) * 100) / 100
+              : part.minimumHours !== undefined
+                ? convertDurationValue(part.minimumHours, unit, nextUnit)
+                : undefined;
+          partOps.update(part.key, {
+            durationUnit: nextUnit === 'hours' ? undefined : nextUnit,
+            ...(nextTargets ? { taskMinimums: nextTargets } : {}),
+            ...(nextOverall !== undefined ? { minimumHours: nextOverall } : {}),
+          });
+        };
+
         return (
           <div key={part.key} className="rounded-[14px] border border-border bg-surface-card p-4">
             <div className="flex items-start gap-2">
@@ -191,23 +265,45 @@ export function UnitsStep({ draft }: UnitsStepProps) {
             {part.kind === 'logbook' && (
               <div className="mt-2.5 flex flex-wrap items-center gap-2">
                 <label className="inline-flex items-center gap-1.5 text-[11.5px] text-text-secondary">
-                  Minimum hours
-                  <input
-                    type="number"
-                    min={0}
-                    aria-label={`Minimum hours for ${part.label}`}
-                    value={part.minimumHours ?? ''}
-                    onChange={(e) =>
-                      partOps.update(part.key, {
-                        minimumHours: e.target.value === '' ? undefined : Number(e.target.value),
-                      })
-                    }
-                    className="h-[28px] w-20 rounded-lg border border-border bg-surface-page px-2 text-[11.5px]"
-                  />
+                  Unit
+                  <select
+                    aria-label={`Duration unit for ${part.label}`}
+                    value={unit}
+                    onChange={(e) => setUnit(e.target.value as DurationUnit)}
+                    className="h-[28px] rounded-lg border border-border bg-surface-page px-2 text-[11.5px]"
+                  >
+                    <option value="hours">Hours</option>
+                    <option value="minutes">Minutes</option>
+                  </select>
                 </label>
 
                 <label className="inline-flex items-center gap-1.5 text-[11.5px] text-text-secondary">
-                  Hours column
+                  {`Minimum ${durationUnitLong(unit)}`}
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    aria-label={`Minimum ${durationUnitLong(unit)} for ${part.label}`}
+                    value={overallValue}
+                    readOnly={overallAuto}
+                    onChange={(e) =>
+                      overallAuto
+                        ? undefined
+                        : partOps.update(part.key, {
+                            minimumHours: e.target.value === '' ? undefined : Number(e.target.value),
+                          })
+                    }
+                    className={`h-[28px] w-20 rounded-lg border border-border px-2 text-[11.5px] ${
+                      overallAuto ? 'bg-surface-sunken text-text-tertiary' : 'bg-surface-page'
+                    }`}
+                  />
+                  {overallAuto && (
+                    <span className="text-[10.5px] text-text-tertiary">= total of the tasks</span>
+                  )}
+                </label>
+
+                <label className="inline-flex items-center gap-1.5 text-[11.5px] text-text-secondary">
+                  Duration column
                   <select
                     aria-label={`Duration column for ${part.label}`}
                     value={part.durationColumnKey ?? ''}
@@ -232,9 +328,91 @@ export function UnitsStep({ draft }: UnitsStepProps) {
 
                 {columns.length === 0 && (
                   <span className="text-[11px] text-warning-text">
-                    This part has no table with columns to total hours from.
+                    This part has no table with columns to total {durationUnitLong(unit)} from.
                   </span>
                 )}
+              </div>
+            )}
+
+            {part.kind === 'logbook' && (
+              <div className="mt-2.5 rounded-lg border border-border-subtle bg-surface-sunken p-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11.5px] font-semibold text-text-secondary">
+                    Per-task minimums
+                  </span>
+                  <label className="ml-auto inline-flex items-center gap-1.5 text-[11px] text-text-tertiary">
+                    Task type column
+                    <select
+                      aria-label={`Task type column for ${part.label}`}
+                      value={taskMin?.columnKey ?? ''}
+                      onChange={(e) => {
+                        const key = e.target.value;
+                        if (!key) {
+                          applyTaskMinimums(null);
+                          return;
+                        }
+                        const col = choiceColumns.find((c) => c.key === key);
+                        // Picking a column seeds a target for every option whose
+                        // label already declares "(min N hours)" — the Scraper's
+                        // paper writes them in, so the author confirms rather than
+                        // re-keys.
+                        applyTaskMinimums(taskMinimumsFromColumn(key, col?.options ?? []));
+                      }}
+                      className="h-[28px] rounded-lg border border-border bg-surface-page px-2 text-[11.5px]"
+                    >
+                      <option value="">— none —</option>
+                      {choiceColumns.map((c) => (
+                        <option key={c.key} value={c.key}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                {choiceColumns.length === 0 ? (
+                  <p className="mt-1.5 text-[11px] text-text-tertiary">
+                    Add a dropdown column to the table — the “Task type” the candidate picks per row —
+                    to set a {durationUnitLong(unit)} target per task.
+                  </p>
+                ) : taskColumn ? (
+                  <div className="mt-2 flex flex-col gap-1.5">
+                    <p className="text-[11px] text-text-tertiary">
+                      A minimum per task; the overall target above is their total. Leave a task blank
+                      if it has no {durationUnitLong(unit)} target. Targets never block hand-in — they
+                      guide the candidate and the assessor.
+                    </p>
+                    {taskColumn.options.map((opt) => (
+                      <label
+                        key={opt}
+                        className="flex items-center gap-2 text-[11.5px] text-text-secondary"
+                      >
+                        <span className="min-w-0 flex-1 truncate">{opt}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          aria-label={`Minimum ${durationUnitLong(unit)} for ${opt}`}
+                          value={taskMin?.targets.find((t) => t.value === opt)?.minimumHours ?? ''}
+                          onChange={(e) =>
+                            applyTaskMinimums(
+                              withTaskTargetHours(
+                                taskMin ?? { columnKey: taskColumn.key, targets: [] },
+                                taskColumn.options,
+                                opt,
+                                e.target.value === '' ? Number.NaN : Number(e.target.value),
+                              ),
+                            )
+                          }
+                          className="h-[26px] w-16 flex-none rounded-lg border border-border bg-surface-page px-2 text-[11.5px]"
+                        />
+                        <span className="w-8 flex-none text-[10.5px] text-text-tertiary">
+                          {unitShort}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             )}
           </div>

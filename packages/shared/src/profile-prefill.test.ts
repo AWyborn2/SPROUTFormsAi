@@ -13,10 +13,15 @@ import { describe, expect, it } from 'vitest';
 import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import {
+  missingDeclarationFields,
+  prerequisiteCompetencyIds,
   profilePrefillValues,
+  reducePrerequisiteClasses,
+  unplacedMarkDestinations,
   validateManifest,
   validatePrerequisiteChecks,
   validateProfilePrefill,
+  type PrerequisiteClassState,
 } from './assessment.js';
 import { canWrite, sectionForPart, workflowFromFields, workflowOf } from './workflow.js';
 
@@ -189,6 +194,62 @@ describe('workflowFromFields', () => {
     expect(w.sections[0]!.label).toBe('Front page');
     expect(w.sections[0]!.fieldIds).toEqual(['loose']);
   });
+
+  it('a MIXED part: the written question’s cell is assessor-fill / candidate-view; the keyed cell is auto', () => {
+    /*
+      The written-model-answers shape: a keyed choice question (its cell the
+      machine's, locked `auto` for everyone) beside an unkeyed written question
+      whose declared cell the ASSESSOR ticks and the candidate may only see.
+    */
+    const mixed: FormField[] = [
+      header('h-mix', 'Mixed Theory'),
+      { ...field('qk', 'checkbox_group'), answerKey: ['a'], outcomeTarget: { fieldId: 'qk-out' } },
+      field('qk-out', 'check_cross'),
+      { ...field('qw', 'textarea'), modelAnswer: 'the guide', outcomeTarget: { fieldId: 'qw-out' } },
+      field('qw-out', 'check_cross'),
+    ];
+    const m: AssessmentToolManifest = {
+      parts: [
+        { key: 'mix', ordinal: 1, label: 'Mixed', kind: 'theory', pathways: ['new'], startFieldId: 'qk' },
+      ],
+    };
+
+    const section = workflowFromFields(mixed, m).sections.find((s) => s.partKey === 'mix')!;
+
+    // The written cell: the assessor's pen, the candidate's eyes only.
+    expect(canWrite(section, 'qw-out', 'assessor')).toBe(true);
+    expect(canWrite(section, 'qw-out', 'candidate')).toBe(false);
+    expect(section.fieldAccess).toEqual({ 'qw-out': { candidate: 'view' } });
+    // The keyed cell is marking's to write — nobody types it.
+    expect(canWrite(section, 'qk-out', 'assessor')).toBe(false);
+    expect(canWrite(section, 'qk-out', 'candidate')).toBe(false);
+  });
+
+  it('an ALL-KEYED part emits no fieldAccess key at all — the pre-model-answer shape, byte-identical', () => {
+    const section = rebuilt.sections.find((s) => s.partKey === 'p_theory')!;
+
+    expect('fieldAccess' in section).toBe(false);
+  });
+
+  it('skips headers with no fields beneath them', () => {
+    const withEmpties: FormField[] = [
+      header('h-details', 'Candidate Details'),
+      field('name'),
+      header('h-empty1', 'Empty Section A'),
+      header('h-empty2', 'Empty Section B'),
+      header('h-theory', 'Theory'),
+      { ...field('q1', 'checkbox_group'), answerKey: ['a'], outcomeTarget: { fieldId: 'q1-out' } },
+      field('q1-out', 'check_cross'),
+    ];
+    const w = workflowFromFields(withEmpties, manifest);
+
+    expect(w.sections.map((s) => s.label)).toEqual([
+      'Candidate Details',
+      'Theory',
+    ]);
+    expect(w.sections[0]!.ordinal).toBe(1);
+    expect(w.sections[1]!.ordinal).toBe(2);
+  });
 });
 
 describe('validatePrerequisiteChecks', () => {
@@ -234,6 +295,90 @@ describe('validatePrerequisiteChecks', () => {
       ),
     ).toHaveLength(1);
   });
+
+  it('accepts the plural spelling, and refuses it empty', () => {
+    // "C or higher" is a family of classes; any listed one answers the box.
+    expect(
+      validatePrerequisiteChecks([{ fieldId: 'prereq', competencyIds: ['c1', 'c2'] }], fields),
+    ).toEqual([]);
+    expect(
+      validatePrerequisiteChecks([{ fieldId: 'prereq', competencyIds: [] }], fields),
+    ).toHaveLength(1);
+  });
+});
+
+describe('prerequisiteCompetencyIds', () => {
+  it('reads either spelling, deduplicated, empty ids dropped', () => {
+    expect(prerequisiteCompetencyIds({ competencyId: 'c1' })).toEqual(['c1']);
+    expect(prerequisiteCompetencyIds({ competencyIds: ['c1', 'c2', 'c1', ''] })).toEqual(['c1', 'c2']);
+    // The plural wins when both are present — it is what the editor writes.
+    expect(prerequisiteCompetencyIds({ competencyId: 'c1', competencyIds: ['c2'] })).toEqual(['c2']);
+    expect(prerequisiteCompetencyIds({})).toEqual([]);
+  });
+});
+
+/**
+ * Which class answers a multi-class box, and which failure surfaces when none
+ * does — the "Driver's Licence C or higher" rule.
+ */
+describe('reducePrerequisiteClasses', () => {
+  const cls = (
+    id: string,
+    over: Partial<PrerequisiteClassState> = {},
+  ): PrerequisiteClassState => ({
+    competencyId: id,
+    competencyName: id,
+    satisfied: false,
+    status: 'missing',
+    expiresAt: null,
+    ...over,
+  });
+
+  it('a higher class the candidate holds satisfies the box the C-class alone would fail', () => {
+    const out = reducePrerequisiteClasses([
+      cls('c-class', { status: 'expired', expiresAt: '2026-01-01T00:00:00.000Z' }),
+      cls('hr-class', { satisfied: true, status: 'held', expiresAt: '2027-06-30T00:00:00.000Z' }),
+    ]);
+
+    expect(out.satisfied).toBe(true);
+    expect(out.competencyId).toBe('hr-class');
+  });
+
+  it('leans on the class that lasts longest — undated beats every dated one', () => {
+    const out = reducePrerequisiteClasses([
+      cls('short', { satisfied: true, status: 'expiring', expiresAt: '2026-09-01T00:00:00.000Z' }),
+      cls('long', { satisfied: true, status: 'held', expiresAt: '2028-01-01T00:00:00.000Z' }),
+      cls('permanent', { satisfied: true, status: 'undated' }),
+    ]);
+
+    expect(out.competencyId).toBe('permanent');
+  });
+
+  it('surfaces the most actionable failure and names every accepted class', () => {
+    const out = reducePrerequisiteClasses([
+      cls('c-class', { competencyName: 'Licence C' }),
+      cls('hr-class', { competencyName: 'Licence HR', status: 'expired', expiresAt: '2026-01-01T00:00:00.000Z' }),
+    ]);
+
+    expect(out.satisfied).toBe(false);
+    // Expired over missing — a renewal is a next step; "missing" says the least.
+    expect(out.status).toBe('expired');
+    expect(out.competencyName).toBe('Licence C / Licence HR');
+  });
+
+  it('keeps the single-class shape exactly as before', () => {
+    const out = reducePrerequisiteClasses([
+      cls('only', { competencyName: 'Licence C', status: 'expired' }),
+    ]);
+    expect(out.competencyName).toBe('Licence C');
+    expect(out.status).toBe('expired');
+  });
+
+  it('reads an empty check as unsatisfied, never as vacuously met', () => {
+    const out = reducePrerequisiteClasses([]);
+    expect(out.satisfied).toBe(false);
+    expect(out.status).toBe('missing');
+  });
 });
 
 describe('manifest.fieldDefaults validation', () => {
@@ -252,5 +397,154 @@ describe('manifest.fieldDefaults validation', () => {
     const problems = validateManifest(manifest, [field('a')]);
 
     expect(problems.some((p) => p.includes('Default answer names field "ghost"'))).toBe(true);
+  });
+});
+
+describe('unplacedMarkDestinations', () => {
+  /*
+    The exporter skips a field with no geometry SILENTLY — the right failure on
+    the page, and an invisible one everywhere else. Thirty ✓/✗ cells can carry
+    thirty computed verdicts that print nowhere, and nothing says so. This is
+    the audit that says so, with the exporter's own resolver deciding what
+    "placed" means.
+  */
+  const box = { page: 0, x: 40, y: 60, width: 20, height: 14, pageWidth: 600, pageHeight: 800 };
+  const placed = (id: string, type: FormField['type'] = 'check_cross'): FormField => ({
+    ...field(id, type),
+    geometry: { segments: [box] },
+  });
+  const keyed = (id: string, target: string): FormField => ({
+    ...placed(id, 'checkbox_group'),
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: target },
+  });
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      { key: 'p1', ordinal: 1, label: 'Theory', kind: 'theory', pathways: ['new'], startFieldId: 'q' },
+    ],
+  };
+
+  it('names the ✓/✗ box a question would mark into but nobody placed', () => {
+    const warnings = unplacedMarkDestinations(manifest, [keyed('q', 'q-out'), field('q-out', 'check_cross')]);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('✓/✗ box');
+    expect(warnings[0]).toContain('prints nowhere');
+  });
+
+  it('is silent when the box is placed', () => {
+    expect(unplacedMarkDestinations(manifest, [keyed('q', 'q-out'), placed('q-out')])).toEqual([]);
+  });
+
+  it('treats a legacy sourcePosition as placed — the exporter draws it', () => {
+    const legacy: FormField = { ...field('q-out', 'check_cross'), sourcePosition: box };
+
+    expect(unplacedMarkDestinations(manifest, [keyed('q', 'q-out'), legacy])).toEqual([]);
+  });
+
+  it('reports a shared unplaced cell once, not once per question', () => {
+    const warnings = unplacedMarkDestinations(manifest, [
+      keyed('q', 'shared-out'),
+      keyed('q2', 'shared-out'),
+      field('shared-out', 'check_cross'),
+    ]);
+
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('says nothing about a ghost id — that is validateManifest’s problem', () => {
+    expect(unplacedMarkDestinations(manifest, [keyed('q', 'ghost')])).toEqual([]);
+  });
+
+  it('covers the manifest’s own destinations — verdicts, sign-off, prerequisites', () => {
+    const withMarks: AssessmentToolManifest = {
+      parts: [
+        {
+          ...manifest.parts[0]!,
+          outcomeSatisfactory: { fieldId: 'v-yes', value: true },
+          outcomeNotSatisfactory: { fieldId: 'v-no', value: true },
+        },
+      ],
+      signOff: { overallSatisfactory: { fieldId: 'competent', value: true } },
+      prerequisiteChecks: [{ fieldId: 'prereq', competencyId: 'c1' }],
+      profilePrefill: { company: 'company_name' },
+    };
+    const fields = [
+      keyed('q', 'q-out'),
+      placed('q-out'),
+      field('v-yes', 'check_cross'),
+      placed('v-no'),
+      field('competent', 'check_cross'),
+      field('prereq', 'check_cross'),
+      placed('company', 'text'),
+    ];
+
+    const warnings = unplacedMarkDestinations(withMarks, fields);
+
+    expect(warnings).toHaveLength(3);
+    expect(warnings.some((w) => w.includes('Satisfactory verdict'))).toBe(true);
+    expect(warnings.some((w) => w.includes('Candidate Competent'))).toBe(true);
+    expect(warnings.some((w) => w.includes('prerequisite'))).toBe(true);
+  });
+});
+
+describe('missingDeclarationFields', () => {
+  /*
+    A declaration completes at hand-in with nobody judging it, so hand-in is
+    the only gate — and "signed" must mean the required boxes actually hold
+    something, or an empty tap on Submit auto-completes an attestation nobody
+    made.
+  */
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      {
+        key: 'pd',
+        ordinal: 1,
+        label: 'Candidate declaration',
+        kind: 'declaration',
+        pathways: ['new'],
+        startFieldId: 'h-decl',
+      },
+    ],
+  };
+  const fields: FormField[] = [
+    { id: 'h-decl', type: 'section_header', label: 'Candidate declaration', required: false, source: 'imported' },
+    { ...field('sig', 'signature', 'Candidate signature'), required: true },
+    field('date', 'date', 'Date'),
+  ];
+
+  it('names the required boxes still empty', () => {
+    expect(missingDeclarationFields(fields, manifest, 'pd', {})).toEqual([
+      { id: 'sig', label: 'Candidate signature' },
+    ]);
+  });
+
+  it('is satisfied once the signature holds a drawing', () => {
+    expect(
+      missingDeclarationFields(fields, manifest, 'pd', { sig: 'data:image/png;base64,iVBOR' }),
+    ).toEqual([]);
+  });
+
+  it('treats whitespace as unsigned', () => {
+    expect(missingDeclarationFields(fields, manifest, 'pd', { sig: '   ' })).toHaveLength(1);
+  });
+
+  it('never demands a box a condition hides', () => {
+    const gated: FormField[] = [
+      ...fields,
+      {
+        ...field('extra', 'text', 'Union rep name'),
+        required: true,
+        visibleWhen: { fieldId: 'date', op: 'equals', value: 'union' },
+      },
+    ];
+
+    const missing = missingDeclarationFields(gated, manifest, 'pd', {
+      sig: 'data:image/png;base64,iVBOR',
+    });
+
+    // 'extra' is hidden — its emptiness is not the candidate's to fix.
+    expect(missing).toEqual([]);
   });
 });

@@ -11,9 +11,16 @@
  * mark in the wrong box asserts that somebody was assessed as safe on something
  * nobody checked.
  */
+import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import type { AssessmentToolManifest, FormField, PageBox } from '@formai/shared';
-import { assembleCaseValues, CaseExportError, exportCasePdf, type CaseAttemptRecord } from './case-export.js';
+import {
+  assembleCaseValues,
+  CaseExportError,
+  exportCasePdf,
+  withDerivedMarks,
+  type CaseAttemptRecord,
+} from './case-export.js';
 import { makeTwoPageFlatPdf } from './test-pdfs.js';
 
 const header = (id: string): FormField => ({
@@ -441,5 +448,489 @@ describe('assembleCaseValues — Candidate not yet Competent', () => {
     });
 
     expect(values['overall-no']).toBeUndefined();
+  });
+});
+
+/**
+ * The completion checklist ticks itself — on an OPEN case as much as a
+ * resolved one, because a mid-programme export is exactly where "what has
+ * this candidate finished so far" gets asked. Positional rows: a tick must
+ * sit at its own printed index, never slide up through a gap.
+ */
+describe('assembleCaseValues — part completion ticks', () => {
+  const TICKING: AssessmentToolManifest = {
+    ...BASE,
+    partCompletionMarks: [
+      { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'used' },
+      { partKey: 'p2', fieldId: 'methods', rowIndex: 1, columnKey: 'used' },
+      { partKey: 'p3', fieldId: 'methods', rowIndex: 2, columnKey: 'used' },
+    ],
+  };
+
+  it('ticks exactly the satisfied parts, at their own row indexes', () => {
+    const { values } = assembleCaseValues({
+      manifest: TICKING,
+      pathway: 'new',
+      attempts: [passed('p1'), { partKey: 'p2', attemptNumber: 1, outcome: 'not_satisfactory', values: {} }],
+    });
+
+    // p1 done, p2 failed, p3 untouched: one tick, in row 0 only. The failed
+    // and unstarted rows stay empty objects — never false, which would print
+    // a finding nobody made.
+    expect(values['methods']).toEqual([{ used: true }]);
+  });
+
+  it('keeps ticks at their printed positions when an earlier part is not done', () => {
+    const { values } = assembleCaseValues({
+      manifest: TICKING,
+      pathway: 'new',
+      attempts: [passed('p2')],
+    });
+
+    // p2 satisfied while p1 is untouched — its tick sits at index 1 behind an
+    // empty row, so the exporter's positional bands mark the right method.
+    expect(values['methods']).toEqual([{}, { used: true }]);
+  });
+
+  it('writes nothing when no mapped part is satisfied', () => {
+    const { values } = assembleCaseValues({
+      manifest: TICKING,
+      pathway: 'new',
+      attempts: [],
+    });
+
+    expect(values['methods']).toBeUndefined();
+  });
+
+  it('never reports a Location-excluded part as a blank required one', () => {
+    // The refusal "required by this pathway but no passing attempt, yet
+    // signed off" reads `blank` — a part the case's Location excludes must
+    // not appear there, or no location-scoped case could ever export signed.
+    const withRule = assembleCaseValues({
+      manifest: BASE,
+      pathway: 'new',
+      attempts: [passed('p1'), passed('p2')],
+      applicablePartKeys: new Set(['p1', 'p2']),
+    });
+    expect(withRule.blank).toEqual([]);
+
+    const without = assembleCaseValues({
+      manifest: BASE,
+      pathway: 'new',
+      attempts: [passed('p1'), passed('p2')],
+    });
+    expect(without.blank).toEqual(['p3']);
+  });
+
+  it('judges a multi-part row against the parts THIS case requires', () => {
+    // One "Theory" row covering p1 and p3 — the route resolves which of them
+    // this case actually sits (pathway ∩ Location rule) and passes the set.
+    const multi: AssessmentToolManifest = {
+      ...BASE,
+      partCompletionMarks: [
+        { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'used' },
+        { partKey: 'p3', fieldId: 'methods', rowIndex: 0, columnKey: 'used' },
+      ],
+    };
+
+    // p3 does not apply to this case: p1 alone ticks the row.
+    const narrowed = assembleCaseValues({
+      manifest: multi,
+      pathway: 'new',
+      attempts: [passed('p1')],
+      applicablePartKeys: new Set(['p1', 'p2']),
+    });
+    expect(narrowed.values['methods']).toEqual([{ used: true }]);
+
+    // Both apply: the row waits for both.
+    const waiting = assembleCaseValues({
+      manifest: multi,
+      pathway: 'new',
+      attempts: [passed('p1')],
+      applicablePartKeys: new Set(['p1', 'p2', 'p3']),
+    });
+    expect(waiting.values['methods']).toBeUndefined();
+  });
+});
+
+/**
+ * The pathway tick — written from the CASE, like the location stream: the
+ * pathway chose which parts this document shows filled, so the box saying so
+ * must come from the same fact.
+ */
+describe('assembleCaseValues — the pathway tick', () => {
+  const PATHED: AssessmentToolManifest = {
+    ...BASE,
+    pathwayMarks: {
+      new: { fieldId: 'pathway-new', value: true },
+      experienced: { fieldId: 'pathway-exp', value: true },
+    },
+  };
+
+  it("ticks the case's pathway box and no other", () => {
+    const { values } = assembleCaseValues({
+      manifest: PATHED,
+      pathway: 'new',
+      attempts: [],
+    });
+
+    expect(values['pathway-new']).toBe(true);
+    expect(values['pathway-exp']).toBeUndefined();
+  });
+
+  it('ticks on an OPEN case — which programme the candidate is on is true from day one', () => {
+    const { values } = assembleCaseValues({
+      manifest: PATHED,
+      pathway: 'experienced',
+      attempts: [passed('p1')],
+    });
+
+    expect(values['pathway-exp']).toBe(true);
+    expect(values['pathway-new']).toBeUndefined();
+  });
+
+  it('writes nothing for a pathway the map does not name', () => {
+    const { values } = assembleCaseValues({
+      manifest: { ...BASE, pathwayMarks: { new: { fieldId: 'pathway-new', value: true } } },
+      pathway: 'experienced',
+      attempts: [],
+    });
+
+    expect(values['pathway-new']).toBeUndefined();
+    expect(values['pathway-exp']).toBeUndefined();
+  });
+
+  it('two pathways may share one printed box — RPL ticks the experienced line', () => {
+    const shared: AssessmentToolManifest = {
+      ...BASE,
+      pathwayMarks: {
+        experienced: { fieldId: 'pathway-exp', value: true },
+        rpl: { fieldId: 'pathway-exp', value: true },
+      },
+    };
+    const { values } = assembleCaseValues({ manifest: shared, pathway: 'rpl', attempts: [] });
+
+    expect(values['pathway-exp']).toBe(true);
+  });
+});
+
+/**
+ * The maps the ROUTE resolves — identity prefill and prerequisite verdicts —
+ * and the seam that used to drop them. `exportCasePdf` re-listed every
+ * assemble field by hand and the list drifted: both maps were computed on
+ * every export and never reached the page.
+ */
+describe('assembleCaseValues — identity prefill and prerequisite verdicts', () => {
+  it('merges both maps over the attempts', () => {
+    const { values } = assembleCaseValues({
+      manifest: BASE,
+      pathway: 'experienced',
+      attempts: [passed('p1'), passed('p2')],
+      prefillValues: { 'cover-company': 'Charles Hull Contracting', 'cover-swipe': 'SC-0431' },
+      prerequisiteValues: { 'prereq-licence': true, 'prereq-lapsed': false },
+    });
+
+    expect(values['cover-company']).toBe('Charles Hull Contracting');
+    expect(values['cover-swipe']).toBe('SC-0431');
+    // Both verdicts are recorded findings: ✓ held, ✗ lapsed. Only absent is
+    // silent.
+    expect(values['prereq-licence']).toBe(true);
+    expect(values['prereq-lapsed']).toBe(false);
+  });
+
+  it('prefill wins over whatever an attempt stored for the same box', () => {
+    // The cover belongs to no part, so nothing legitimate writes it — a stray
+    // attempt value there is exactly what the case-sourced identity corrects.
+    const { values } = assembleCaseValues({
+      manifest: BASE,
+      pathway: 'experienced',
+      attempts: [passed('p1', { values: { 'cover-company': 'typed over' } })],
+      prefillValues: { 'cover-company': 'Charles Hull Contracting' },
+    });
+
+    expect(values['cover-company']).toBe('Charles Hull Contracting');
+  });
+});
+
+describe('exportCasePdf — the resolved maps survive the seam', () => {
+  const seamBox = (page: number, y: number): PageBox => ({
+    page,
+    x: 40,
+    y,
+    width: 160,
+    height: 16,
+    pageWidth: 600,
+    pageHeight: 800,
+  });
+
+  it('draws the prefilled identity onto the rendered page', async () => {
+    const fields: FormField[] = [
+      { ...header('h1'), type: 'text', geometry: { segments: [seamBox(0, 700)] } },
+      { ...header('h2'), type: 'text', geometry: { segments: [seamBox(0, 660)] } },
+      { ...header('h3'), type: 'text', geometry: { segments: [seamBox(0, 620)] } },
+      {
+        id: 'cover-company',
+        type: 'text',
+        label: "Candidate's Company Name",
+        required: false,
+        source: 'imported',
+        geometry: { segments: [seamBox(0, 580)] },
+      },
+    ];
+
+    const out = await exportCasePdf({
+      originalPdf: await makeTwoPageFlatPdf(),
+      fields,
+      manifest: BASE,
+      pathway: 'experienced',
+      attempts: [passed('p1'), passed('p2')],
+      prefillValues: { 'cover-company': 'Charles Hull Contracting' },
+    });
+
+    // The output's content streams are Flate-compressed; inflate each and
+    // grep the drawn glyphs — presence here is what the dropped seam lost.
+    const raw = Buffer.from(out);
+    const hay = raw.toString('latin1');
+    let drawn = '';
+    const streamRe = /stream\r?\n/g;
+    let m: RegExpExecArray | null;
+    while ((m = streamRe.exec(hay)) !== null) {
+      const start = m.index + m[0].length;
+      const end = hay.indexOf('endstream', start);
+      if (end < 0) continue;
+      try {
+        drawn += inflateSync(raw.subarray(start, end)).toString('latin1');
+      } catch {
+        drawn += hay.slice(start, end);
+      }
+    }
+    // pdf-lib writes text operands as hex strings; decode them before looking.
+    const decoded = drawn.replace(/<([0-9A-Fa-f]+)>/g, (_s, hex: string) =>
+      Buffer.from(hex, 'hex').toString('latin1'),
+    );
+    expect(decoded).toContain('Charles Hull Contracting');
+  });
+});
+
+/**
+ * Marks an attempt never stored still print.
+ *
+ * The marking writes each question's ✓/✗ (and the part's verdict pair) into
+ * the attempt's values at marking time — but only since it existed. An attempt
+ * marked before then, or before the manifest declared its verdict boxes,
+ * stores the answers alone and the printed outcome column exports blank.
+ */
+describe('withDerivedMarks', () => {
+  const question = (id: string): FormField => ({
+    id,
+    type: 'checkbox_group',
+    label: id,
+    required: false,
+    source: 'imported',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: `${id}-out` },
+  });
+  const cell = (id: string): FormField => ({
+    id,
+    type: 'check_cross',
+    label: id,
+    required: false,
+    source: 'imported',
+  });
+
+  const versionFields: FormField[] = [
+    header('h1'),
+    question('q1'),
+    cell('q1-out'),
+    question('q2'),
+    cell('q2-out'),
+    header('h2'),
+    { ...cell('prac'), label: 'Manoeuvres safely' },
+    header('h3'),
+  ];
+
+  const VERDICT: AssessmentToolManifest = {
+    ...BASE,
+    parts: BASE.parts.map((p) =>
+      p.key === 'p1'
+        ? {
+            ...p,
+            outcomeSatisfactory: { fieldId: 'p1-verdict-yes', value: true },
+            outcomeNotSatisfactory: { fieldId: 'p1-verdict-no', value: true },
+          }
+        : p,
+    ),
+  };
+
+  it('fills the ✓/✗ an old attempt never stored, from its own answers', () => {
+    const healed = withDerivedMarks(
+      passed('p1', { values: { q1: ['a'], q2: ['b'] } }),
+      versionFields,
+      BASE,
+    );
+
+    expect(healed.values['q1-out']).toBe(true);
+    expect(healed.values['q2-out']).toBe(false);
+    // The answers themselves are untouched.
+    expect(healed.values['q1']).toEqual(['a']);
+  });
+
+  it('writes the verdict pair the manifest has since declared', () => {
+    const healed = withDerivedMarks(
+      passed('p1', { values: { q1: ['a'], q2: ['a'] } }),
+      versionFields,
+      VERDICT,
+    );
+
+    expect(healed.values['p1-verdict-yes']).toBe(true);
+    expect(healed.values['p1-verdict-no']).toBeUndefined();
+  });
+
+  it('never overwrites a mark the attempt already stored', () => {
+    // Stored wins even where re-derivation disagrees: the record stands.
+    const healed = withDerivedMarks(
+      passed('p1', { values: { q1: ['a'], q2: ['b'], 'q2-out': true } }),
+      versionFields,
+      BASE,
+    );
+
+    expect(healed.values['q2-out']).toBe(true);
+  });
+
+  it("fills the part's auto-locked verdict radio, by the same rule hand-in writes it", () => {
+    // An attempt marked before the hand-in write existed stores no verdict;
+    // the radio the author locked to `auto` backfills from the outcome here.
+    const fieldsWithRadio: FormField[] = [
+      ...versionFields.slice(0, 5),
+      {
+        id: 'p1-verdict',
+        type: 'radio',
+        label: 'The Candidate’s responses were',
+        required: false,
+        source: 'imported',
+        options: ['Satisfactory', 'Not Satisfactory'],
+      },
+      ...versionFields.slice(5),
+    ];
+    const manifest: AssessmentToolManifest = {
+      ...BASE,
+      workflow: {
+        roles: ['candidate', 'assessor'],
+        sections: [
+          {
+            key: 's1',
+            ordinal: 1,
+            label: 'Theory',
+            partKey: 'p1',
+            access: { candidate: 'fill', assessor: 'fill' },
+            fieldSource: { 'p1-verdict': 'auto' },
+          },
+        ],
+      },
+    };
+
+    const healed = withDerivedMarks(
+      passed('p1', { values: { q1: ['a'], q2: ['a'] } }),
+      fieldsWithRadio,
+      manifest,
+    );
+    expect(healed.values['p1-verdict']).toBe('Satisfactory');
+
+    // A verdict somebody already recorded stands, as everywhere in this seam.
+    const kept = withDerivedMarks(
+      passed('p1', { values: { q1: ['a'], q2: ['a'], 'p1-verdict': 'Not Satisfactory' } }),
+      fieldsWithRadio,
+      manifest,
+    );
+    expect(kept.values['p1-verdict']).toBe('Not Satisfactory');
+  });
+
+  it('leaves a judged part with NO keyed questions alone — its marks belong to the person', () => {
+    const attempt = passed('p2', { values: { prac: true } });
+
+    expect(withDerivedMarks(attempt, versionFields, BASE)).toBe(attempt);
+  });
+
+  it('leaves a failed attempt alone — it never prints', () => {
+    const attempt: CaseAttemptRecord = {
+      partKey: 'p1',
+      attemptNumber: 1,
+      outcome: 'not_satisfactory',
+      values: { q1: ['b'] },
+    };
+
+    expect(withDerivedMarks(attempt, versionFields, BASE)).toBe(attempt);
+  });
+
+  /*
+    MIXED MARKING (U3): a JUDGED part still heals its KEYED SUBSET. p2 here
+    prints a keyed choice question beside a written one the assessor ticked by
+    hand — the written question keeps the part person-judged, and before this
+    path the whole attempt came back untouched, so the keyed ✓/✗ printed blank
+    on every mixed paper resolved before the outcome route persisted pre-marks.
+  */
+  describe('the judged mixed part', () => {
+    const mixedFields: FormField[] = [
+      header('h1'),
+      question('q1'),
+      cell('q1-out'),
+      question('q2'),
+      cell('q2-out'),
+      header('h2'),
+      question('k1'),
+      cell('k1-out'),
+      {
+        id: 'w1',
+        type: 'text',
+        label: 'w1 written',
+        required: false,
+        source: 'imported',
+        modelAnswer: 'The expected prose.',
+        outcomeTarget: { fieldId: 'w1-out' },
+      },
+      cell('w1-out'),
+      header('h3'),
+    ];
+
+    it('backfills the keyed subset and nothing of the person’s, scoped to its own part', () => {
+      const healed = withDerivedMarks(
+        passed('p2', { values: { k1: ['a'], w1: 'candidate prose', 'w1-out': true } }),
+        mixedFields,
+        BASE,
+      );
+
+      // The keyed question's silent cell fills from its own answer…
+      expect(healed.values['k1-out']).toBe(true);
+      // …the person's tick and the candidate's prose stand untouched…
+      expect(healed.values['w1-out']).toBe(true);
+      expect(healed.values['w1']).toBe('candidate prose');
+      // …and ANOTHER part's keyed questions are never marked against this
+      // attempt's values — the subset is the part's own slice.
+      expect(healed.values['q1-out']).toBeUndefined();
+      expect(healed.values['q2-out']).toBeUndefined();
+    });
+
+    it('never overwrites a keyed cell somebody already recorded', () => {
+      const healed = withDerivedMarks(
+        // k1 is wrong, but a person recorded ✓ before the cells locked.
+        passed('p2', { values: { k1: ['b'], 'k1-out': true } }),
+        mixedFields,
+        BASE,
+      );
+
+      expect(healed.values['k1-out']).toBe(true);
+    });
+
+    it('backfills nothing for a failed mixed attempt — it never prints', () => {
+      const attempt: CaseAttemptRecord = {
+        partKey: 'p2',
+        attemptNumber: 1,
+        outcome: 'not_satisfactory',
+        values: { k1: ['a'], w1: 'prose' },
+      };
+
+      expect(withDerivedMarks(attempt, mixedFields, BASE)).toBe(attempt);
+    });
   });
 });

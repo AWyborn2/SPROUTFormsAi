@@ -17,6 +17,8 @@
     "dev:api": "pnpm --filter @formai/api dev",
     "db:generate": "pnpm --filter @formai/db generate",
     "db:migrate": "pnpm --filter @formai/db migrate",
+    "db:status": "pnpm --filter @formai/db status",
+    "db:baseline": "pnpm --filter @formai/db baseline",
     "format": "prettier --write \"**/*.{ts,tsx,css,json,md}\""
   },
   "devDependencies": {

@@ -1,21 +1,30 @@
 import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { Button, Icon, useToast } from '@formai/ui';
+import { Button, Icon, Switch, useToast } from '@formai/ui';
 import {
   ACCESS_LEVELS,
+  ASSESSMENT_PATHWAYS,
   PROFILE_PREFILL_KEYS,
   PROFILE_PREFILL_LABELS,
   VALUE_SOURCES,
+  WORKFLOW_ROLES,
   effectiveAccess,
   fieldsInPart,
+  isChoiceField,
   orderedParts,
   orderedSections,
+  prerequisiteCompetencyIds,
   valueSource,
   workflowFromFields,
   type AccessLevel,
+  type AssessmentCourseLink,
+  type AssessmentPathway,
+  type AssessmentToolManifest,
   type AssessmentWorkflow,
+  type DeclaredMark,
   type FieldAccess,
   type FormField,
+  type PartCompletionMark,
   type PrerequisiteCheck,
   type ProfilePrefillKey,
   type SubmissionValue,
@@ -26,11 +35,16 @@ import {
 import {
   useAssessmentTool,
   useCompetencies,
+  useCourses,
   useSaveWorkflow,
   useSetLocationParts,
   useSession,
+  useTaxonomy,
+  useUpdateTaxonomySettings,
+  useUploadCourse,
 } from '../../lib/data/hooks.js';
-import type { AssessmentToolDetail } from '../../lib/data/assessments.js';
+import { ApiError } from '../../lib/data/api-client.js';
+import type { AssessmentToolDetail, PartOutcomeMarkEntry } from '../../lib/data/assessments.js';
 import { groupFieldsByHeading, totalFields } from './workflow-groups.js';
 
 /**
@@ -53,7 +67,32 @@ const ROLE_LABELS: Record<WorkflowRole, string> = {
   candidate: 'Candidate',
   assessor: 'Assessor',
   supervisor: 'Supervisor',
+  sme: 'SME',
 };
+
+/** Sign-off parties an author opts a workflow into; candidate + assessor are always present. */
+const OPTIONAL_ROLES: readonly WorkflowRole[] = ['supervisor', 'sme'];
+
+/**
+ * Add or drop an optional sign-off role. Adding restores canonical role order so
+ * columns read the same however they were toggled. Dropping also strips the
+ * role from every section's access — a role named in `access` but absent from
+ * `roles` is a hard `validateWorkflow` problem, so the two must move together.
+ */
+function toggleRole(w: AssessmentWorkflow, role: WorkflowRole, on: boolean): void {
+  if (on) {
+    const set = new Set([...w.roles, role]);
+    w.roles = WORKFLOW_ROLES.filter((r) => set.has(r));
+    return;
+  }
+  w.roles = w.roles.filter((r) => r !== role);
+  for (const s of w.sections) {
+    delete s.access[role];
+    if (s.fieldAccess) {
+      for (const fid of Object.keys(s.fieldAccess)) delete s.fieldAccess[fid]![role];
+    }
+  }
+}
 
 const ACCESS_LABELS: Record<AccessLevel, string> = {
   hidden: 'Hidden',
@@ -139,6 +178,17 @@ export function WorkflowBuilderScreen() {
   const { data: session } = useSession();
   const save = useSaveWorkflow(toolId);
   /*
+    THE ORG'S SIGN-OFF POLICY, MIRRORED WHERE SIGN-OFF IS ASSIGNED. The
+    labelled-signoff setting also lives on the Organisation settings card, but
+    an admin deciding who signs a part is exactly who needs to say whether that
+    signature can be applied on the person's behalf — so it is shown here too,
+    beside the roles that make it matter. It writes the same org-wide setting
+    from both places; there is no per-tool copy to drift.
+  */
+  const taxonomy = useTaxonomy();
+  const updateSettings = useUpdateTaxonomySettings();
+  const canEditSignoffPolicy = session?.role === 'admin' || session?.role === 'owner';
+  /*
     WHERE EACH PREFILLED VALUE COMES FROM, held apart from the workflow draft.
 
     The workflow says a field is `prefill`; this says FROM WHAT — the mapping
@@ -159,6 +209,31 @@ export function WorkflowBuilderScreen() {
   const [defaultsDraft, setDefaultsDraft] = useState<
     Record<string, SubmissionValue> | undefined
   >(undefined);
+  /**
+   * The summary page's auto-fill wiring, each the same tri-state as the maps
+   * above: `undefined` means untouched and unsent, so a plain workflow save
+   * cannot erase what publish derived or somebody else configured.
+   */
+  const [completionDraft, setCompletionDraft] = useState<PartCompletionMark[] | undefined>(
+    undefined,
+  );
+  const [signOffDraft, setSignOffDraft] = useState<
+    AssessmentToolManifest['signOff'] | undefined
+  >(undefined);
+  const [pathwayDraft, setPathwayDraft] = useState<
+    AssessmentToolManifest['pathwayMarks'] | undefined
+  >(undefined);
+  /** The parts' printed verdict pairs, full-state per part. Tri-state. */
+  const [partMarksDraft, setPartMarksDraft] = useState<PartOutcomeMarkEntry[] | undefined>(
+    undefined,
+  );
+  /**
+   * The pre-assessment course link — `undefined` untouched, `null` cleared,
+   * an object set. Same tri-state as every draft above.
+   */
+  const [courseDraft, setCourseDraft] = useState<AssessmentCourseLink | null | undefined>(
+    undefined,
+  );
   const competencies = useCompetencies();
 
   // The parts rule is an Admin act (R73). Reads for everyone, edits for admins.
@@ -185,7 +260,12 @@ export function WorkflowBuilderScreen() {
     draft !== null ||
     prefillDraft !== undefined ||
     prereqDraft !== undefined ||
-    defaultsDraft !== undefined;
+    defaultsDraft !== undefined ||
+    completionDraft !== undefined ||
+    signOffDraft !== undefined ||
+    pathwayDraft !== undefined ||
+    partMarksDraft !== undefined ||
+    courseDraft !== undefined;
 
   /** A part's fields, grouped by printed heading. Computed once per tool load. */
   const groupsForPart = useMemo(() => {
@@ -234,16 +314,33 @@ export function WorkflowBuilderScreen() {
     const defaultsTouched = defaultsDraft !== undefined;
     const defaults =
       defaultsTouched && Object.keys(defaultsDraft!).length > 0 ? defaultsDraft! : null;
-    const checks =
-      prereqTouched && prereqDraft!.filter((c) => c.fieldId && c.competencyId).length > 0
-        ? prereqDraft!.filter((c) => c.fieldId && c.competencyId)
+    const completeChecks = (prereqDraft ?? []).filter(
+      (c) => c.fieldId && prerequisiteCompetencyIds(c).length > 0,
+    );
+    const checks = prereqTouched && completeChecks.length > 0 ? completeChecks : null;
+    const completionTouched = completionDraft !== undefined;
+    const completion =
+      completionTouched && completionDraft!.length > 0 ? completionDraft! : null;
+    const signOffTouched = signOffDraft !== undefined;
+    const signOff =
+      signOffTouched && Object.values(signOffDraft ?? {}).some((v) => v !== undefined)
+        ? signOffDraft!
         : null;
+    const pathwaysTouched = pathwayDraft !== undefined;
+    const pathways =
+      pathwaysTouched && Object.keys(pathwayDraft ?? {}).length > 0 ? pathwayDraft! : null;
+    const partMarksTouched = partMarksDraft !== undefined;
     save.mutate(
       {
         workflow,
         ...(touched ? { profilePrefill: map } : {}),
         ...(prereqTouched ? { prerequisiteChecks: checks } : {}),
         ...(defaultsTouched ? { fieldDefaults: defaults } : {}),
+        ...(completionTouched ? { partCompletionMarks: completion } : {}),
+        ...(signOffTouched ? { signOff } : {}),
+        ...(pathwaysTouched ? { pathwayMarks: pathways } : {}),
+        ...(partMarksTouched ? { partOutcomeMarks: partMarksDraft! } : {}),
+        ...(courseDraft !== undefined ? { course: courseDraft } : {}),
       },
       {
       onSuccess: (result) => {
@@ -251,6 +348,11 @@ export function WorkflowBuilderScreen() {
         setPrefillDraft(undefined);
         setPrereqDraft(undefined);
         setDefaultsDraft(undefined);
+        setCompletionDraft(undefined);
+        setSignOffDraft(undefined);
+        setPathwayDraft(undefined);
+        setPartMarksDraft(undefined);
+        setCourseDraft(undefined);
         toast({
           variant: result.warnings.length > 0 ? 'warning' : 'success',
           message:
@@ -279,6 +381,8 @@ export function WorkflowBuilderScreen() {
 
   const sections = orderedSections(workflow);
   const labelByKey = new Map(workflow.sections.map((s) => [s.key, s.label]));
+  /** For the per-row "ticks when X passes" choices on fixed checklists. */
+  const partOptions = orderedParts(tool.manifest).map((p) => ({ key: p.key, label: p.label }));
 
   return (
     <div className="fai-rise mx-auto flex max-w-[1000px] flex-col gap-4 p-[30px_28px_60px]">
@@ -292,6 +396,78 @@ export function WorkflowBuilderScreen() {
             The order below is the order the work HAPPENS. It does not move anything on the printed
             document — that stays as the paper prints it.
           </p>
+          {/*
+            Which sign-off parties this workflow uses. Candidate and assessor are
+            always present; turning on Supervisor or SME adds an access column so
+            an author can say who signs a given part (its signature field set to
+            that role's Fill). Whether that signature may be applied by on-case
+            staff or must be the person's own login is the org's policy.
+          */}
+          <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-text-tertiary">Sign-off roles</span>
+            {OPTIONAL_ROLES.map((role) => {
+              const on = workflow.roles.includes(role);
+              return (
+                <button
+                  key={role}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={on}
+                  aria-label={`Use the ${ROLE_LABELS[role]} sign-off role`}
+                  onClick={() => edit((w) => toggleRole(w, role, !on))}
+                  className={`rounded-lg border px-2.5 py-1 text-[11px] ${
+                    on
+                      ? 'border-accent bg-surface-accent-soft font-semibold text-text-accent'
+                      : 'border-border text-text-secondary hover:bg-surface-hover'
+                  }`}
+                >
+                  {ROLE_LABELS[role]}
+                </button>
+              );
+            })}
+            <span className="text-[11px] text-text-tertiary">
+              — adds a column to set who signs a part
+            </span>
+          </div>
+          {/*
+            THE ORG POLICY, SHOWN WHERE IT BITES. Only once a labelled role is
+            in play — a workflow with just candidate and assessor never applies
+            a signature on someone's behalf, so the setting would be noise.
+            Admins edit it; everyone else sees the policy read-only.
+          */}
+          {OPTIONAL_ROLES.some((r) => workflow.roles.includes(r)) && taxonomy.data && (
+            <label className="mt-2 flex max-w-[62ch] items-start gap-2">
+              <Switch
+                checked={taxonomy.data.settings.allowLabelledSignoff}
+                disabled={!canEditSignoffPolicy || updateSettings.isPending}
+                aria-label="Supervisor / SME sign-off by labelled signature"
+                onChange={(e) =>
+                  updateSettings.mutate(
+                    { allowLabelledSignoff: e.target.checked },
+                    {
+                      onError: () =>
+                        toast({
+                          variant: 'warning',
+                          message: 'Could not change the sign-off policy — try again.',
+                        }),
+                    },
+                  )
+                }
+              />
+              <span className="text-[11.5px] leading-snug text-text-secondary">
+                <strong className="text-text-primary">Labelled sign-off</strong>{' '}
+                <span className="text-text-tertiary">(organisation-wide)</span> —{' '}
+                {taxonomy.data.settings.allowLabelledSignoff
+                  ? 'on-case staff can apply a supervisor’s or SME’s signature on their behalf, so the case never waits for a third person to log in.'
+                  : 'these signatures must be the named person’s own login (coming soon), so a part they sign waits for them.'}
+                {!canEditSignoffPolicy && (
+                  <span className="block text-text-tertiary">
+                    Only an admin or owner can change this.
+                  </span>
+                )}
+              </span>
+            </label>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/*
@@ -346,6 +522,19 @@ export function WorkflowBuilderScreen() {
               base[index] = { ...base[index]!, ...patch };
               return base;
             });
+          /*
+            ANY listed class answers the box — "Driver's Licence C or higher"
+            is a family, and the register keeps each class on its own row. The
+            first class drives the select; the rest are removable "or" chips.
+            Edits write the plural spelling; the legacy single id still reads.
+          */
+          const classIds = prerequisiteCompetencyIds(check);
+          const primary = classIds[0] ?? '';
+          const extras = classIds.slice(1);
+          const className = (id: string) =>
+            (competencies.data ?? []).find((c) => c.id === id)?.name ?? id;
+          const setClasses = (ids: string[]) =>
+            update({ competencyIds: ids, competencyId: undefined });
           return (
             <div key={index} className="mb-1.5 flex flex-wrap items-center gap-2">
               <select
@@ -366,8 +555,14 @@ export function WorkflowBuilderScreen() {
               <span className="text-[11px] text-text-tertiary">answers from</span>
               <select
                 aria-label="Competency that answers it"
-                value={check.competencyId}
-                onChange={(e) => update({ competencyId: e.target.value })}
+                value={primary}
+                onChange={(e) =>
+                  setClasses(
+                    e.target.value
+                      ? [e.target.value, ...extras.filter((id) => id !== e.target.value)]
+                      : extras,
+                  )
+                }
                 className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
               >
                 <option value="">— competency —</option>
@@ -377,6 +572,43 @@ export function WorkflowBuilderScreen() {
                   </option>
                 ))}
               </select>
+              {extras.map((id) => (
+                <span
+                  key={id}
+                  className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-page px-2 py-0.5 text-[11px] text-text-secondary"
+                >
+                  or {className(id)}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${className(id)} from this prerequisite`}
+                    onClick={() => setClasses(classIds.filter((x) => x !== id))}
+                    className="text-text-tertiary hover:text-text-primary"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              {primary &&
+                (competencies.data ?? []).some((c) => !classIds.includes(c.id)) && (
+                  <select
+                    aria-label="Accept another class for this prerequisite"
+                    title="The box ticks — and the sign-off passes — when ANY listed class is current."
+                    value=""
+                    onChange={(e) =>
+                      e.target.value && setClasses([...classIds, e.target.value])
+                    }
+                    className="h-[26px] rounded-sm border border-border-subtle bg-surface-page px-1.5 text-[11.5px] text-text-tertiary"
+                  >
+                    <option value="">+ or…</option>
+                    {(competencies.data ?? [])
+                      .filter((c) => !classIds.includes(c.id))
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </select>
+                )}
               <Button
                 variant="ghost"
                 size="sm"
@@ -399,13 +631,30 @@ export function WorkflowBuilderScreen() {
           onClick={() =>
             setPrereqDraft((prev) => [
               ...(prev ?? tool.manifest.prerequisiteChecks ?? []),
-              { fieldId: '', competencyId: '' },
+              { fieldId: '', competencyIds: [] },
             ])
           }
         >
           Add a prerequisite check
         </Button>
       </div>
+
+      <CourseMaterialCard
+        value={courseDraft === undefined ? (tool.manifest.course ?? null) : courseDraft}
+        onChange={setCourseDraft}
+      />
+
+      <SummaryAutoFill
+        tool={tool}
+        signOff={signOffDraft ?? tool.manifest.signOff}
+        onSignOff={(next) => setSignOffDraft(next)}
+        pathwayMarks={pathwayDraft ?? tool.manifest.pathwayMarks ?? {}}
+        onPathwayMarks={setPathwayDraft}
+        defaults={defaultsDraft ?? tool.manifest.fieldDefaults ?? {}}
+        onDefaults={setDefaultsDraft}
+        partMarks={partMarksDraft ?? partEntriesFrom(tool.manifest)}
+        onPartMarks={setPartMarksDraft}
+      />
 
       {tool.workflowIsDefault && !dirty && (
         <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[11px_13px] text-[12.5px] text-text-secondary">
@@ -676,6 +925,31 @@ export function WorkflowBuilderScreen() {
                                         return base;
                                       })
                                     }
+                                    parts={partOptions}
+                                    completionMarks={
+                                      completionDraft ?? tool.manifest.partCompletionMarks ?? []
+                                    }
+                                    onCompletionMarks={(rowIndex, partKeys) =>
+                                      setCompletionDraft((prev) => {
+                                        const base =
+                                          prev ?? tool.manifest.partCompletionMarks ?? [];
+                                        const rest = base.filter(
+                                          (m) => !(m.fieldId === field.id && m.rowIndex === rowIndex),
+                                        );
+                                        // The tick lands in the second column — the same
+                                        // alignment the exporter's row cursor uses.
+                                        const columnKey = field.columns?.[1]?.key ?? '';
+                                        return [
+                                          ...rest,
+                                          ...partKeys.map((partKey) => ({
+                                            partKey,
+                                            fieldId: field.id,
+                                            rowIndex,
+                                            columnKey,
+                                          })),
+                                        ];
+                                      })
+                                    }
                                     onPrefillKey={(key) =>
                                       setPrefillDraft((prev) => {
                                         const base = { ...(prev ?? tool.manifest.profilePrefill ?? {}) };
@@ -883,6 +1157,557 @@ function LocationPartsEditor({ tool, canEdit }: { tool: AssessmentToolDetail; ca
   );
 }
 
+const PATHWAY_TICK_LABELS: Record<AssessmentPathway, string> = {
+  new: 'New / inexperienced',
+  experienced: 'Experienced / re-assessment',
+  rpl: 'Recognition of prior learning',
+};
+
+/**
+ * Joins a field id to one of its options in a select's value — the unit
+ * separator, which cannot appear in printed text, so the pair round-trips
+ * unambiguously whatever the option says.
+ */
+const OPTION_SEP = '\u001F';
+
+/**
+ * One place a tick can land: a whole ✓/✗-style box (`bool`), one option of a
+ * radio/dropdown (`single`), or one option of a checkbox group (`multi`).
+ * `mark` is the exact DeclaredMark the export writes; `option` is set for the
+ * two option kinds.
+ */
+interface TickTarget {
+  /** The <select> option value — field id, or id + OPTION_SEP + option. */
+  value: string;
+  label: string;
+  kind: 'bool' | 'single' | 'multi';
+  option?: string;
+  mark: DeclaredMark;
+}
+
+/** Every part's current verdict-pair state, as the PATCH's full replacement. */
+function partEntriesFrom(manifest: AssessmentToolManifest): PartOutcomeMarkEntry[] {
+  return orderedParts(manifest).map((p) => ({
+    partKey: p.key,
+    ...(p.outcomeSatisfactory ? { outcomeSatisfactory: p.outcomeSatisfactory } : {}),
+    ...(p.outcomeNotSatisfactory ? { outcomeNotSatisfactory: p.outcomeNotSatisfactory } : {}),
+  }));
+}
+
+/**
+ * The pre-assessment course material: which hosted package this tool's cases
+ * open with, and whether the parts stay shut until it has been read through.
+ *
+ * The packages themselves are org-wide — one uploaded manual serves every
+ * tool that points at it — so the card is a picker plus an uploader, not an
+ * editor. The upload accepts the packaged interactive deck, a SCORM 1.2 zip,
+ * or plain HTML content; what came back (slide count, file count) is echoed
+ * so the author can see the import understood the package.
+ */
+function CourseMaterialCard({
+  value,
+  onChange,
+}: {
+  value: AssessmentCourseLink | null;
+  onChange: (next: AssessmentCourseLink | null) => void;
+}) {
+  const courses = useCourses();
+  const upload = useUploadCourse();
+  const { toast } = useToast();
+  const [title, setTitle] = useState('');
+
+  const list = courses.data?.courses ?? [];
+  const selected = value ? list.find((c) => c.id === value.courseId) : undefined;
+
+  function onFile(file: File | null) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result ?? '');
+      const zipBase64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      const fallback = file.name.replace(/\.zip$/i, '').replace(/[-_]+/g, ' ').trim();
+      upload.mutate(
+        { title: title.trim() || fallback || 'Course', zipBase64 },
+        {
+          onSuccess: (course) => {
+            setTitle('');
+            // A fresh upload is picked immediately — uploading from this card
+            // states the intent, and the author can still unpick before saving.
+            onChange({ courseId: course.id, required: value?.required ?? true });
+            toast({
+              variant: 'success',
+              message: `Course "${course.title}" imported${
+                course.slideCount ? ` — ${course.slideCount} slides` : ''
+              }. Save the workflow to link it.`,
+            });
+          },
+          onError: (err) => {
+            const body = err instanceof ApiError ? (err.body as Record<string, unknown>) : {};
+            toast({
+              variant: 'danger',
+              message:
+                typeof body?.message === 'string'
+                  ? body.message
+                  : 'The package could not be imported.',
+            });
+          },
+        },
+      );
+    };
+    reader.readAsDataURL(file);
+  }
+
+  return (
+    <div className="rounded-md border border-border bg-surface-card p-[13px_15px]">
+      <span className="block text-[13px] font-semibold">Course material</span>
+      <p className="mt-0.5 mb-2 text-[11.5px] text-text-tertiary">
+        A hosted package each case opens with — reading progress is tracked on the case, and
+        while it is required no part can start until the material has been read through.
+      </p>
+      <div className="flex flex-wrap items-center gap-2.5">
+        <select
+          aria-label="Course package"
+          value={value?.courseId ?? ''}
+          onChange={(e) =>
+            onChange(
+              e.target.value
+                ? { courseId: e.target.value, required: value?.required ?? true }
+                : null,
+            )
+          }
+          className="h-[26px] min-w-[260px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+        >
+          <option value="">— no course —</option>
+          {list.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.title}
+            </option>
+          ))}
+          {/* A stored link to a course the list no longer offers stays visible
+              rather than silently reading as "no course". */}
+          {value && !selected && (
+            <option value={value.courseId}>Missing course ({value.courseId.slice(0, 8)}…)</option>
+          )}
+        </select>
+        {value && (
+          <label className="inline-flex items-center gap-1.5 text-[11.5px] text-text-secondary">
+            <input
+              type="checkbox"
+              checked={value.required}
+              onChange={(e) => onChange({ ...value, required: e.target.checked })}
+            />
+            Required before the assessment can start
+          </label>
+        )}
+        {selected && (
+          <span className="text-[11px] text-text-tertiary">
+            {selected.slideCount ? `${selected.slideCount} slides · ` : ''}
+            {selected.fileCount} files
+          </span>
+        )}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <input
+          aria-label="New course title"
+          placeholder="New course title (from the file name if blank)"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          className="h-[26px] w-[280px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+        />
+        <label
+          className={`inline-flex h-[28px] items-center gap-1.5 rounded-md border border-border bg-surface-page px-2.5 text-[12px] font-medium ${
+            upload.isPending ? 'opacity-60' : 'cursor-pointer hover:bg-surface-sunken'
+          }`}
+        >
+          <Icon name="upload" size={13} />
+          {upload.isPending ? 'Importing…' : 'Upload package (.zip)'}
+          <input
+            type="file"
+            accept=".zip,application/zip,application/x-zip-compressed"
+            className="hidden"
+            disabled={upload.isPending}
+            onChange={(e) => {
+              onFile(e.target.files?.[0] ?? null);
+              e.target.value = '';
+            }}
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The summary page's auto-fill wiring, made visible and correctable.
+ *
+ * Publish GUESSES most of this from printed labels — the result pair from a
+ * "RESULT" heading, the methods mapping from part numbers — and until now the
+ * guess was invisible: where it landed right the page filled itself, and where
+ * it missed there was no knob anywhere, only a box that stayed blank on every
+ * export. This card shows what is actually wired and lets an author repoint
+ * it, using the same manifest keys publish writes, so a correction here and a
+ * lucky guess there are indistinguishable downstream.
+ */
+function SummaryAutoFill({
+  tool,
+  signOff,
+  onSignOff,
+  pathwayMarks,
+  onPathwayMarks,
+  defaults,
+  onDefaults,
+  partMarks,
+  onPartMarks,
+}: {
+  tool: AssessmentToolDetail;
+  signOff: AssessmentToolManifest['signOff'];
+  onSignOff: (next: NonNullable<AssessmentToolManifest['signOff']>) => void;
+  pathwayMarks: NonNullable<AssessmentToolManifest['pathwayMarks']>;
+  onPathwayMarks: (next: NonNullable<AssessmentToolManifest['pathwayMarks']>) => void;
+  defaults: Record<string, SubmissionValue>;
+  onDefaults: (next: Record<string, SubmissionValue>) => void;
+  partMarks: PartOutcomeMarkEntry[];
+  onPartMarks: (next: PartOutcomeMarkEntry[]) => void;
+}) {
+  /*
+    EVERYWHERE A TICK CAN LAND. One entry per ✓/✗-style box — and one per
+    OPTION of a choice field, because a printed pair ("Candidate not yet
+    Competent / Candidate Competent", the two pathway lines) usually extracts
+    as ONE field with two options, each option carrying its own printed box.
+    Offering only whole fields hid exactly the boxes this card exists to map.
+    The entry's mark carries the value the export must write: `true` on a
+    ✓/✗ box, the option string on a radio/dropdown, a one-option array on a
+    checkbox group — the shapes their renderers tick on.
+  */
+  const tickTargets = useMemo(() => {
+    /*
+      Quiz machinery is not a summary box. A keyed question's options and the
+      ✓/✗ cell its mark lands in are auto-marking's own territory — offering
+      them here buried the handful of real summary boxes under every option
+      of a thirty-question paper.
+    */
+    const quiz = new Set<string>();
+    for (const f of tool.fields) {
+      if ((f.answerKey?.length ?? 0) > 0) quiz.add(f.id);
+      if (f.outcomeTarget) quiz.add(f.outcomeTarget.fieldId);
+    }
+    const out: TickTarget[] = [];
+    for (const f of tool.fields) {
+      if (quiz.has(f.id)) continue;
+      if (f.type === 'check_cross' || f.type === 'boolean_yes_no' || f.type === 'checkbox') {
+        out.push({
+          value: f.id,
+          label: f.label || f.id,
+          kind: 'bool',
+          mark: { fieldId: f.id, value: true },
+        });
+      } else if (isChoiceField(f.type)) {
+        for (const option of f.options ?? []) {
+          out.push({
+            // OPTION_SEP cannot appear in printed text, so the pair is unambiguous.
+            value: `${f.id}${OPTION_SEP}${option}`,
+            label: f.label && f.label !== option ? `${f.label} — ${option}` : option,
+            kind: f.type === 'checkbox_group' ? 'multi' : 'single',
+            option,
+            mark: { fieldId: f.id, value: f.type === 'checkbox_group' ? [option] : option },
+          });
+        }
+      }
+    }
+    return out;
+  }, [tool.fields]);
+
+  /** The select value a stored mark round-trips to, '' when unmapped. */
+  const targetValue = (mark: DeclaredMark | undefined): string => {
+    if (!mark) return '';
+    if (Array.isArray(mark.value)) {
+      return mark.value[0] !== undefined ? `${mark.fieldId}${OPTION_SEP}${mark.value[0]}` : '';
+    }
+    if (typeof mark.value === 'string') return `${mark.fieldId}${OPTION_SEP}${mark.value}`;
+    return mark.fieldId;
+  };
+  const markFor = (value: string): DeclaredMark | undefined =>
+    tickTargets.find((t) => t.value === value)?.mark;
+
+  const parts = orderedParts(tool.manifest);
+  // Only the pathways this tool's parts actually distinguish, plus any a mark
+  // already names — offering all three on a two-pathway paper invites a
+  // mapping nothing will ever stamp.
+  const pathways = ASSESSMENT_PATHWAYS.filter(
+    (p) => parts.some((part) => part.pathways.includes(p)) || pathwayMarks[p] !== undefined,
+  );
+
+  const setResult = (
+    key: 'overallSatisfactory' | 'overallNotSatisfactory',
+    value: string,
+  ) => {
+    // Spread keeps the name/signature/date pointers and the coaching pair —
+    // this card repoints the result boxes and must not shed the rest.
+    const next = { ...(signOff ?? {}) };
+    const mark = markFor(value);
+    if (mark) next[key] = mark;
+    else delete next[key];
+    onSignOff(next);
+  };
+
+  const setPathway = (pathway: AssessmentPathway, value: string) => {
+    const next = { ...pathwayMarks };
+    const mark = markFor(value);
+    if (mark) next[pathway] = mark;
+    else delete next[pathway];
+    onPathwayMarks(next);
+  };
+
+  /*
+    A default is "active" when the stored default already carries this
+    target's tick — `true` on a box, the option on a radio, membership in a
+    group's array. Group options accumulate into ONE array default; the other
+    shapes replace, because a radio has one answer.
+  */
+  const storedOptions = (fieldId: string): string[] => {
+    const stored = defaults[fieldId];
+    return Array.isArray(stored)
+      ? (stored as unknown[]).filter((o): o is string => typeof o === 'string')
+      : [];
+  };
+  const defaultActive = (t: TickTarget): boolean => {
+    if (t.kind === 'bool') return defaults[t.mark.fieldId] === true;
+    if (t.kind === 'single') return defaults[t.mark.fieldId] === t.option;
+    return storedOptions(t.mark.fieldId).includes(t.option!);
+  };
+  const preTicked = tickTargets.filter(defaultActive);
+  const addPreTick = (value: string) => {
+    const t = tickTargets.find((x) => x.value === value);
+    if (!t) return;
+    const next = { ...defaults };
+    if (t.kind === 'multi') {
+      next[t.mark.fieldId] = [...new Set([...storedOptions(t.mark.fieldId), t.option!])];
+    } else {
+      next[t.mark.fieldId] = t.kind === 'bool' ? true : t.option!;
+    }
+    onDefaults(next);
+  };
+  const removePreTick = (t: TickTarget) => {
+    const next = { ...defaults };
+    if (t.kind === 'multi') {
+      const remaining = storedOptions(t.mark.fieldId).filter((o) => o !== t.option);
+      if (remaining.length > 0) next[t.mark.fieldId] = remaining;
+      else delete next[t.mark.fieldId];
+    } else {
+      delete next[t.mark.fieldId];
+    }
+    onDefaults(next);
+  };
+
+  const resultRows: Array<{
+    key: 'overallSatisfactory' | 'overallNotSatisfactory';
+    label: string;
+    hint: string;
+    mark: DeclaredMark | undefined;
+  }> = [
+    {
+      key: 'overallSatisfactory',
+      label: 'Candidate Competent',
+      hint: 'ticks once an assessor signs the case off',
+      mark: signOff?.overallSatisfactory,
+    },
+    {
+      key: 'overallNotSatisfactory',
+      label: 'Candidate not yet Competent',
+      hint: 'ticks when the case resolves without competency',
+      mark: signOff?.overallNotSatisfactory,
+    },
+  ];
+
+  return (
+    <div className="rounded-md border border-border bg-surface-card p-[13px_15px]">
+      <span className="block text-[13px] font-semibold">Summary auto-fill</span>
+      <p className="mt-0.5 mb-2.5 max-w-[72ch] text-[11.5px] text-text-tertiary">
+        The front page fills itself from the case — point each printed box at the field it lives
+        in. A box left unmapped prints blank, never a guess.
+      </p>
+
+      <div className="flex flex-col gap-3">
+        {/* Boxes that print ticked on every case — the Category-of-Assessment line. */}
+        <div>
+          <span className="block text-[12px] font-semibold">Always ticked</span>
+          <p className="mt-0.5 mb-1.5 text-[11px] text-text-tertiary">
+            Printed ticked on every case — the Category of Assessment line. A default, not a
+            finding: a recorded answer always wins over it.
+          </p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {preTicked.map((t) => (
+              <span
+                key={t.value}
+                className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-page px-2 py-0.5 text-[11px]"
+              >
+                {t.label}
+                <button
+                  type="button"
+                  aria-label={`Stop pre-ticking ${t.label}`}
+                  onClick={() => removePreTick(t)}
+                  className="text-text-tertiary hover:text-text-primary"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <select
+              aria-label="Add an always-ticked box"
+              value=""
+              onChange={(e) => e.target.value && addPreTick(e.target.value)}
+              className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+            >
+              <option value="">— add a box —</option>
+              {tickTargets
+                .filter((t) => !defaultActive(t))
+                .map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+            </select>
+          </div>
+        </div>
+
+        {/* The pathway tick — written from the case at export. */}
+        <div>
+          <span className="block text-[12px] font-semibold">Pathway</span>
+          <p className="mt-0.5 mb-1.5 text-[11px] text-text-tertiary">
+            Ticks the box for the pathway the case was created on — the same choice that decided
+            which parts the candidate sits.
+          </p>
+          {pathways.map((pathway) => (
+            <div key={pathway} className="mb-1.5 flex flex-wrap items-center gap-2">
+              <span className="min-w-[190px] text-[11.5px] text-text-secondary">
+                {PATHWAY_TICK_LABELS[pathway]}
+              </span>
+              <span className="text-[11px] text-text-tertiary">ticks</span>
+              <select
+                aria-label={`Printed box for the ${PATHWAY_TICK_LABELS[pathway]} pathway`}
+                value={targetValue(pathwayMarks[pathway])}
+                onChange={(e) => setPathway(pathway, e.target.value)}
+                className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+              >
+                <option value="">— not printed —</option>
+                {tickTargets.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+
+        {/* The Assessment Result pair. Two boxes, two different gates. */}
+        <div>
+          <span className="block text-[12px] font-semibold">Assessment result</span>
+          <p className="mt-0.5 mb-1.5 text-[11px] text-text-tertiary">
+            Competent prints only once an assessor has signed; not-yet-competent prints as soon as
+            a case resolves without it — a failed case often ends with no sign-off at all.
+          </p>
+          {resultRows.map((row) => (
+            <div key={row.key} className="mb-1.5 flex flex-wrap items-center gap-2">
+              <span className="min-w-[190px] text-[11.5px] text-text-secondary">{row.label}</span>
+              <select
+                aria-label={`Printed box for ${row.label}`}
+                value={targetValue(row.mark)}
+                onChange={(e) => setResult(row.key, e.target.value)}
+                className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+              >
+                <option value="">— not mapped —</option>
+                {tickTargets.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[11px] text-text-tertiary">{row.hint}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Each part's printed verdict pair, written from its own marking. */}
+        <div>
+          <span className="block text-[12px] font-semibold">Part results</span>
+          <p className="mt-0.5 mb-1.5 max-w-[72ch] text-[11px] text-text-tertiary">
+            Each part&rsquo;s printed &ldquo;responses were: Satisfactory / Not
+            Satisfactory&rdquo; pair, stamped from that part&rsquo;s own marking. One printed
+            pair shared by several theory parts is mapped on EACH of them — whichever papers
+            the case sits write the same box.
+          </p>
+          {parts.map((p) => {
+            const entry = partMarks.find((e) => e.partKey === p.key);
+            const set = (
+              key: 'outcomeSatisfactory' | 'outcomeNotSatisfactory',
+              value: string,
+            ) => {
+              const mark = markFor(value);
+              onPartMarks(
+                parts.map((part) => {
+                  const current = partMarks.find((e) => e.partKey === part.key) ?? {
+                    partKey: part.key,
+                  };
+                  if (part.key !== p.key) return current;
+                  const { [key]: _dropped, ...rest } = current;
+                  return mark ? { ...rest, [key]: mark } : rest;
+                }),
+              );
+            };
+            return (
+              <div key={p.key} className="mb-1.5 flex flex-wrap items-center gap-2">
+                <span className="min-w-[190px] truncate text-[11.5px] text-text-secondary">
+                  {p.label}
+                </span>
+                <select
+                  aria-label={`Satisfactory box for ${p.label}`}
+                  value={targetValue(entry?.outcomeSatisfactory)}
+                  onChange={(e) => set('outcomeSatisfactory', e.target.value)}
+                  className="h-[26px] min-w-[200px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+                >
+                  <option value="">— Satisfactory box —</option>
+                  {tickTargets.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label={`Not Satisfactory box for ${p.label}`}
+                  value={targetValue(entry?.outcomeNotSatisfactory)}
+                  onChange={(e) => set('outcomeNotSatisfactory', e.target.value)}
+                  className="h-[26px] min-w-[200px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+                >
+                  <option value="">— Not Satisfactory box —</option>
+                  {tickTargets.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })}
+        </div>
+
+        {/*
+          The methods checklist's per-row mapping lives ON the table's own row
+          in its section below — manual / always ticked / when a part passes —
+          because that is where an author looks for it, wherever the table
+          sits on the paper.
+        */}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The row-mode select's "always ticked" sentinel — impossible as a part key,
+ * which keeps one dropdown carrying both mechanisms without ambiguity.
+ */
+const PRESET_MODE = '__always__';
+
 /** One field's overrides. `Inherit` is a real choice, not the absence of one. */
 function FieldRow({
   field,
@@ -894,6 +1719,9 @@ function FieldRow({
   onPrefillKey,
   defaultValue,
   onDefaultValue,
+  parts,
+  completionMarks,
+  onCompletionMarks,
 }: {
   field: FormField;
   section: WorkflowSection;
@@ -906,6 +1734,12 @@ function FieldRow({
   /** The tool's preset answer for this field, when one is declared. */
   defaultValue?: SubmissionValue;
   onDefaultValue?: (value: SubmissionValue | null) => void;
+  /** The tool's parts, for the per-row "ticks when X passes" choices. */
+  parts?: ReadonlyArray<{ key: string; label: string }>;
+  /** Every stored completion mark; the row control reads its own field's. */
+  completionMarks?: readonly PartCompletionMark[];
+  /** Replace which parts tick this field's given row ([] clears it). */
+  onCompletionMarks?: (rowIndex: number, partKeys: string[]) => void;
 }) {
   const source = valueSource(section, field.id);
   return (
@@ -966,40 +1800,139 @@ function FieldRow({
         `validateProfilePrefill` refuses anything else at save.
       */}
       {/*
-        THE METHODS PRESET. A repeating table whose rows are fixed and whose one
-        answer column is a tick — "Methods used to assess competence" — can
-        carry a tool-level DEFAULT: the rows that come pre-ticked on every
-        case. A default, not a derived fact: the section stays writable and an
-        assessor's recorded answer always wins. Rows are written by INDEX,
-        which is the same alignment the exporter's row cursor uses.
+        HOW EACH PRINTED ROW OF A FIXED CHECKLIST FILLS — one dropdown per row,
+        ON the row, because that is where an author looks for it:
+
+          · manual — nobody fills it but a person;
+          · always ticked — a tool-level DEFAULT, printed ticked on every case
+            from day one (a recorded answer still wins over it);
+          · when <part> passes — ticks the moment that part's final outcome is
+            satisfactory, on the fill view, the dashboard and the export.
+
+        One control for what used to be two (the Preset checkboxes and a
+        separate mapping card), because the two mechanisms were being mistaken
+        for each other: pre-ticking every row LOOKED like completion tracking
+        and printed a fully-ticked checklist on untouched cases. Rows are
+        addressed by INDEX, the same alignment the exporter's row cursor uses.
       */}
       {field.type === 'repeating_group' &&
         (field.fixedRows?.length ?? 0) > 0 &&
         (field.columns?.length ?? 0) === 2 &&
         onDefaultValue && (
-          <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 pl-1">
-            <span className="font-mono text-[9px] uppercase text-text-tertiary">Preset</span>
+          <div className="flex w-full flex-col gap-1 pl-1">
             {field.fixedRows!.map((row, index) => {
               const columnKey = field.columns![1]!.key;
               const rows = Array.isArray(defaultValue)
                 ? (defaultValue as Record<string, boolean>[])
                 : [];
-              const ticked = rows[index]?.[columnKey] === true;
+              const presetTicked = rows[index]?.[columnKey] === true;
+              /*
+                A ROW MAY MAP TO SEVERAL PARTS — the Track Dozer's "Theory"
+                method covers General plus one of two location papers. The
+                first mark drives the select; the rest render as removable
+                "and" chips beside it, and the row ticks once every mapped
+                part that applies to the case has passed.
+              */
+              const rowMarks = (completionMarks ?? []).filter(
+                (m) => m.fieldId === field.id && m.rowIndex === index,
+              );
+              const primary = rowMarks[0]?.partKey;
+              const extras = rowMarks.slice(1);
+              const mode = primary ?? (presetTicked ? PRESET_MODE : '');
+              const partLabel = (key: string) =>
+                parts?.find((p) => p.key === key)?.label ?? key;
+
+              const setPreset = (on: boolean) => {
+                const next = field.fixedRows!.map((_, i) => ({
+                  [columnKey]: i === index ? on : rows[i]?.[columnKey] === true,
+                }));
+                onDefaultValue(next.some((r) => r[columnKey]) ? next : null);
+              };
+              const onMode = (value: string) => {
+                if (value === PRESET_MODE) {
+                  if (rowMarks.length > 0) onCompletionMarks?.(index, []);
+                  setPreset(true);
+                  return;
+                }
+                if (presetTicked) setPreset(false);
+                if (value === '') {
+                  onCompletionMarks?.(index, []);
+                  return;
+                }
+                // Replaces the PRIMARY part; the "and" chips ride along.
+                onCompletionMarks?.(index, [
+                  value,
+                  ...extras.map((m) => m.partKey).filter((k) => k !== value),
+                ]);
+              };
+              const addPart = (value: string) => {
+                if (!value) return;
+                onCompletionMarks?.(index, [
+                  ...rowMarks.map((m) => m.partKey),
+                  value,
+                ]);
+              };
+              const removePart = (key: string) => {
+                onCompletionMarks?.(
+                  index,
+                  rowMarks.map((m) => m.partKey).filter((k) => k !== key),
+                );
+              };
+
               return (
-                <label key={row} className="flex items-center gap-1 text-[11px] text-text-secondary">
-                  <input
-                    type="checkbox"
-                    checked={ticked}
-                    onChange={(e) => {
-                      const next = field.fixedRows!.map((_, i) => ({
-                        [columnKey]: i === index ? e.target.checked : rows[i]?.[columnKey] === true,
-                      }));
-                      const any = next.some((r) => r[columnKey]);
-                      onDefaultValue(any ? next : null);
-                    }}
-                  />
-                  {row}
-                </label>
+                <div key={row} className="flex flex-wrap items-center gap-2">
+                  <span className="min-w-[240px] truncate text-[11px] text-text-secondary">
+                    {row}
+                  </span>
+                  <select
+                    aria-label={`When "${row}" ticks`}
+                    value={mode}
+                    onChange={(e) => onMode(e.target.value)}
+                    className="h-[24px] min-w-[210px] rounded-sm border border-border bg-surface-page px-1.5 text-[11px]"
+                  >
+                    <option value="">— manual —</option>
+                    <option value={PRESET_MODE}>Always ticked</option>
+                    {(parts ?? []).map((p) => (
+                      <option key={p.key} value={p.key}>
+                        when {p.label} passes
+                      </option>
+                    ))}
+                  </select>
+                  {extras.map((m) => (
+                    <span
+                      key={m.partKey}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-page px-2 py-0.5 text-[11px] text-text-secondary"
+                    >
+                      and {partLabel(m.partKey)}
+                      <button
+                        type="button"
+                        aria-label={`"${row}" no longer waits for ${partLabel(m.partKey)}`}
+                        onClick={() => removePart(m.partKey)}
+                        className="text-text-tertiary hover:text-text-primary"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  {primary && (parts ?? []).some((p) => !rowMarks.some((m) => m.partKey === p.key)) && (
+                    <select
+                      aria-label={`Also require another part before "${row}" ticks`}
+                      title="The row ticks once every mapped part that applies to the case has passed — a part the case doesn't require (other location, other pathway) never blocks it."
+                      value=""
+                      onChange={(e) => addPart(e.target.value)}
+                      className="h-[24px] rounded-sm border border-border-subtle bg-surface-page px-1.5 text-[11px] text-text-tertiary"
+                    >
+                      <option value="">+ and…</option>
+                      {(parts ?? [])
+                        .filter((p) => !rowMarks.some((m) => m.partKey === p.key))
+                        .map((p) => (
+                          <option key={p.key} value={p.key}>
+                            {p.label}
+                          </option>
+                        ))}
+                    </select>
+                  )}
+                </div>
               );
             })}
           </div>

@@ -5,15 +5,24 @@ const tenant = { userId: 'u1', orgId: 'org-1', role: 'admin' as const };
 let sealSession: (t: typeof tenant) => string;
 
 const mockExtractForm = vi.fn();
+const mockAuditForm = vi.fn();
 const mockRoundTripExport = vi.fn();
 vi.mock('../pdf/index.js', () => ({
   extractForm: (...args: unknown[]) => mockExtractForm(...args),
+  auditForm: (...args: unknown[]) => mockAuditForm(...args),
   roundTripExport: (...args: unknown[]) => mockRoundTripExport(...args),
 }));
 
 const mockGetAnthropic = vi.fn(() => undefined);
 vi.mock('../anthropic.js', () => ({
   getAnthropic: () => mockGetAnthropic(),
+}));
+
+// The raw-extraction capture is a separate best-effort concern; the route's job
+// is only to surface the id it returns. capture.test.ts owns the id derivation.
+const mockCaptureExtraction = vi.fn<(...args: unknown[]) => Promise<string | null>>(async () => null);
+vi.mock('../pdf/capture.js', () => ({
+  captureExtraction: (...args: unknown[]) => mockCaptureExtraction(...args),
 }));
 
 const mockGetStorageClient = vi.fn();
@@ -67,6 +76,7 @@ afterEach(() => {
   vi.clearAllMocks();
   mockGetStorageClient.mockReturnValue(null);
   mockGetAnthropic.mockReturnValue(undefined);
+  mockCaptureExtraction.mockResolvedValue(null);
   mockDbValue = null;
 });
 
@@ -191,6 +201,52 @@ describe('POST /pdf/extract', () => {
     }
   });
 
+  it('surfaces the capture id on the result when a capture was written', async () => {
+    mockExtractForm.mockResolvedValue({ path: 'ai', fields: [], pageCount: 1 });
+    mockCaptureExtraction.mockResolvedValue('cap-123');
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/pdf/extract`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ fileName: 'a.pdf', pdfBase64: 'AAA=' }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ captureId: 'cap-123' });
+      // The capture is handed the extraction result to persist. (The db arg is
+      // null here since none is configured — `expect.anything()` would reject
+      // that — so assert the params directly.)
+      expect(mockCaptureExtraction).toHaveBeenCalledTimes(1);
+      const captureArg = mockCaptureExtraction.mock.calls[0]![1] as {
+        orgId: string;
+        result: { path: string };
+      };
+      expect(captureArg.orgId).toBe('org-1');
+      expect(captureArg.result.path).toBe('ai');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('omits captureId when no capture was written (best-effort no-op)', async () => {
+    mockExtractForm.mockResolvedValue({ path: 'ai', fields: [], pageCount: 1 });
+    mockCaptureExtraction.mockResolvedValue(null);
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/pdf/extract`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ fileName: 'a.pdf', pdfBase64: 'AAA=' }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).not.toHaveProperty('captureId');
+    } finally {
+      server.close();
+    }
+  });
+
   it('extracts from a storage assetId, matching the base64 path\'s output shape', async () => {
     mockGetStorageClient.mockReturnValue(fakeStorageClient());
     mockDownloadPdf.mockResolvedValue(Buffer.from('pdf-bytes'));
@@ -237,6 +293,122 @@ describe('POST /pdf/extract', () => {
         body: JSON.stringify({ fileName: 'a.pdf', assetId: 'org-2/x.pdf' }),
       });
       expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The secondary-extraction pass. Same PDF-in contract as `/extract` (inline
+ * base64 XOR a stored assetId), plus the captured-label list it audits against,
+ * returning the boxes the first pass missed.
+ */
+describe('POST /pdf/audit', () => {
+  function post(base: string, body: unknown) {
+    return fetch(`${base}/pdf/audit`, {
+      method: 'POST',
+      headers: { ...authHeader(), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('400s when neither pdfBase64 nor assetId is present', async () => {
+    const { server, base } = startApp();
+    try {
+      expect((await post(base, { fileName: 'a.pdf', knownLabels: [] })).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s when both pdfBase64 and assetId are present', async () => {
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, {
+        fileName: 'a.pdf',
+        pdfBase64: 'AAA=',
+        assetId: 'org-1/x.pdf',
+      });
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('audits inline base64 and passes the captured labels through', async () => {
+    mockAuditForm.mockResolvedValue({ missedInputs: [{ label: 'Assessor signature', type: 'text' }] });
+
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, {
+        fileName: 'a.pdf',
+        pdfBase64: 'AAA=',
+        knownLabels: ['Candidate name'],
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        missedInputs: [{ label: 'Assessor signature', type: 'text' }],
+      });
+      expect(mockAuditForm).toHaveBeenCalledWith(
+        Buffer.from('AAA=', 'base64'),
+        expect.objectContaining({ knownLabels: ['Candidate name'] }),
+      );
+      expect(mockDownloadPdf).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('defaults knownLabels to empty when omitted', async () => {
+    mockAuditForm.mockResolvedValue({ missedInputs: [] });
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { fileName: 'a.pdf', pdfBase64: 'AAA=' });
+      expect(res.status).toBe(200);
+      expect(mockAuditForm).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ knownLabels: [] }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('audits from a storage assetId', async () => {
+    mockGetStorageClient.mockReturnValue(fakeStorageClient());
+    mockDownloadPdf.mockResolvedValue(Buffer.from('pdf-bytes'));
+    mockAuditForm.mockResolvedValue({ missedInputs: [] });
+
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { fileName: 'a.pdf', assetId: 'org-1/x.pdf', knownLabels: [] });
+      expect(res.status).toBe(200);
+      expect(mockDownloadPdf).toHaveBeenCalledWith('org-1', 'org-1/x.pdf');
+      expect(mockAuditForm).toHaveBeenCalledWith(Buffer.from('pdf-bytes'), expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s when the asset is missing or belongs to another org', async () => {
+    mockGetStorageClient.mockReturnValue(fakeStorageClient());
+    mockDownloadPdf.mockResolvedValue(null);
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { fileName: 'a.pdf', assetId: 'org-2/x.pdf', knownLabels: [] });
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('surfaces a missing key as 422, not 500', async () => {
+    mockAuditForm.mockRejectedValue(new Error('extraction_unavailable: flat PDF requires a key'));
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { fileName: 'a.pdf', pdfBase64: 'AAA=', knownLabels: [] });
+      expect(res.status).toBe(422);
     } finally {
       server.close();
     }
@@ -405,6 +577,509 @@ describe('POST /pdf/round-trip', () => {
     const { server, base } = startApp();
     try {
       expect((await post(base, { submissionId: 'sub-1' })).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The learning loop's correction-diff store (2b). The review client posts the
+ * diff between the raw extraction and the published form at publish; the route
+ * validates and writes one org-scoped row.
+ */
+describe('POST /pdf/corrections', () => {
+  /** A db surface for this route: a capture-ownership lookup and an insert. */
+  function fakeCorrectionsDb(opts: { captureFindFirst?: unknown; insertedId?: string } = {}) {
+    const inserted: Record<string, unknown>[] = [];
+    const findFirst = vi.fn().mockResolvedValue(opts.captureFindFirst);
+    const db = {
+      query: { extractionCaptures: { findFirst } },
+      insert: vi.fn(() => ({
+        values: (row: Record<string, unknown>) => {
+          inserted.push(row);
+          return { returning: async () => [{ id: opts.insertedId ?? 'corr-1' }] };
+        },
+      })),
+    };
+    return { db, inserted, findFirst };
+  }
+
+  const WELL_FORMED = {
+    fieldCount: 10,
+    corrections: {
+      path: 'ai',
+      pageCount: 18,
+      documentType: 'assessment',
+      corrections: [
+        { kind: 'retype', fieldId: 'ai_1', from: 'radio', to: 'textarea' },
+        { kind: 'deleted', fieldId: 'ai_5', wasType: 'radio', wasLabel: 'c) x' },
+      ],
+    },
+  };
+
+  function post(base: string, body: unknown) {
+    return fetch(`${base}/pdf/corrections`, {
+      method: 'POST',
+      headers: { ...authHeader(), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('503s when the database is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      expect((await post(base, WELL_FORMED)).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes an org-scoped row from a well-formed body, denormalising the counts', async () => {
+    const { db, inserted } = fakeCorrectionsDb({ insertedId: 'corr-99' });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, WELL_FORMED);
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: 'corr-99' });
+      expect(inserted).toHaveLength(1);
+      expect(inserted[0]).toMatchObject({
+        orgId: 'org-1',
+        documentType: 'assessment',
+        correctionCount: 2,
+        fieldCount: 10,
+        createdByUserId: 'u1',
+      });
+      expect((inserted[0]!.corrections as { corrections: unknown[] }).corrections).toHaveLength(2);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('links a captureId that belongs to the caller org', async () => {
+    const { db, inserted } = fakeCorrectionsDb({ captureFindFirst: { id: 'cap-1' } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const body = { ...WELL_FORMED, corrections: { ...WELL_FORMED.corrections, captureId: 'cap-1' } };
+      const res = await post(base, body);
+      expect(res.status).toBe(201);
+      expect(inserted[0]).toMatchObject({ captureId: 'cap-1' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s when the captureId names a capture in another org (never links across tenants)', async () => {
+    const { db, inserted } = fakeCorrectionsDb({ captureFindFirst: undefined });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const body = { ...WELL_FORMED, corrections: { ...WELL_FORMED.corrections, captureId: 'cap-other' } };
+      const res = await post(base, body);
+      expect(res.status).toBe(404);
+      expect(inserted).toHaveLength(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s on a malformed correction (an unknown kind)', async () => {
+    mockDbValue = fakeCorrectionsDb().db;
+    const { server, base } = startApp();
+    try {
+      const body = {
+        fieldCount: 1,
+        corrections: {
+          path: 'ai',
+          pageCount: 1,
+          corrections: [{ kind: 'not-a-real-kind', fieldId: 'ai_1' }],
+        },
+      };
+      expect((await post(base, body)).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The correction-rate metric + shape clusters (Phase E). Aggregates the stored
+ * correction rows into a rate per document type and content-free shape counts.
+ */
+describe('GET /pdf/corrections/insights', () => {
+  function fakeInsightsDb(rows: unknown[]) {
+    return { query: { extractionCorrections: { findMany: vi.fn().mockResolvedValue(rows) } } };
+  }
+
+  const ROWS = [
+    {
+      documentType: 'assessment',
+      correctionCount: 2,
+      fieldCount: 10,
+      captureId: 'cap-1',
+      corrections: {
+        corrections: [
+          { kind: 'retype', fieldId: 'ai_1', from: 'radio', to: 'textarea' },
+          { kind: 'deleted', fieldId: 'ai_5', wasType: 'radio', wasLabel: 'c) x' },
+        ],
+      },
+    },
+    {
+      documentType: 'assessment',
+      correctionCount: 1,
+      fieldCount: 10,
+      captureId: 'cap-2',
+      corrections: {
+        corrections: [{ kind: 'retype', fieldId: 'ai_2', from: 'radio', to: 'textarea' }],
+      },
+    },
+  ];
+
+  function get(base: string) {
+    return fetch(`${base}/pdf/corrections/insights`, { headers: { ...authHeader() } });
+  }
+
+  it('503s when the database is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      expect((await get(base)).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports the correction rate per type and the recurring shapes with samples', async () => {
+    mockDbValue = fakeInsightsDb(ROWS);
+    const { server, base } = startApp();
+    try {
+      const res = await get(base);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        metrics: { documentType: string; corrections: number; fields: number; rate: number }[];
+        shapes: { documentType: string; shape: string; count: number; sampleCaptureIds: string[] }[];
+      };
+
+      expect(body.metrics).toEqual([
+        { documentType: 'assessment', corrections: 3, fields: 20, rate: 0.15 },
+      ]);
+
+      const retype = body.shapes.find((s) => s.shape === 'retype:radio→textarea');
+      expect(retype).toMatchObject({ documentType: 'assessment', count: 2 });
+      expect(retype!.sampleCaptureIds.sort()).toEqual(['cap-1', 'cap-2']);
+      expect(body.shapes.find((s) => s.shape === 'deleted:orphan-option')?.count).toBe(1);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The human-gated candidate-rules surface (Phase F / U10). Admin-only; returns
+ * recurring shapes above a threshold, each with a rule suggestion.
+ */
+describe('GET /pdf/corrections/candidates', () => {
+  function fakeInsightsDb(rows: unknown[]) {
+    return { query: { extractionCorrections: { findMany: vi.fn().mockResolvedValue(rows) } } };
+  }
+
+  // Four rows so retype:radio→textarea clears the default threshold of 3.
+  const ROWS = Array.from({ length: 4 }, (_, i) => ({
+    documentType: 'assessment',
+    correctionCount: 1,
+    fieldCount: 10,
+    captureId: `cap-${i}`,
+    corrections: { corrections: [{ kind: 'retype', fieldId: `ai_${i}`, from: 'radio', to: 'textarea' }] },
+  }));
+
+  function get(base: string, cookie: string, query = '') {
+    return fetch(`${base}/pdf/corrections/candidates${query}`, { headers: { cookie } });
+  }
+
+  it('403s for a non-admin caller', async () => {
+    mockDbValue = fakeInsightsDb(ROWS);
+    // A non-admin session. sealSession's param is typed to the admin fixture, so
+    // route a different role through `unknown` — this is test-only plumbing.
+    const candidateCookie = `fai_session=${sealSession({
+      userId: 'u1',
+      orgId: 'org-1',
+      role: 'candidate',
+    } as unknown as Parameters<typeof sealSession>[0])}`;
+    const { server, base } = startApp();
+    try {
+      expect((await get(base, candidateCookie)).status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('503s when the database is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      expect((await get(base, `fai_session=${sealSession(tenant)}`)).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns recurring shapes above the threshold, each with a rule suggestion', async () => {
+    mockDbValue = fakeInsightsDb(ROWS);
+    const { server, base } = startApp();
+    try {
+      const res = await get(base, `fai_session=${sealSession(tenant)}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        minCount: number;
+        candidates: { shape: string; count: number; suggestion: string }[];
+      };
+      expect(body.minCount).toBe(3);
+      const retype = body.candidates.find((c) => c.shape === 'retype:radio→textarea');
+      expect(retype?.count).toBe(4);
+      expect(retype?.suggestion).toContain('rule 18');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('honours a higher minCount, dropping a shape below it', async () => {
+    mockDbValue = fakeInsightsDb(ROWS);
+    const { server, base } = startApp();
+    try {
+      const res = await get(base, `fai_session=${sealSession(tenant)}`, '?minCount=5');
+      const body = (await res.json()) as { minCount: number; candidates: unknown[] };
+      expect(body.minCount).toBe(5);
+      expect(body.candidates).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The placement learning loop's store (U4). The geometry editor posts one
+ * session-slice of outcome events after a successful Save placement; the route
+ * validates at the boundary, recomputes the tallies server-side, and writes one
+ * org-scoped row.
+ */
+describe('POST /pdf/placements', () => {
+  /** A db surface for this route: just an insert. */
+  function fakePlacementsDb(opts: { insertedId?: string } = {}) {
+    const inserted: Record<string, unknown>[] = [];
+    const db = {
+      insert: vi.fn(() => ({
+        values: (row: Record<string, unknown>) => {
+          inserted.push(row);
+          return { returning: async () => [{ id: opts.insertedId ?? 'po-1' }] };
+        },
+      })),
+    };
+    return { db, inserted };
+  }
+
+  const WELL_FORMED = {
+    formId: 'form-1',
+    versionId: 'v-2',
+    documentType: 'assessment',
+    context: 'builder',
+    fieldCount: 12,
+    events: [
+      { kind: 'proposed', fieldId: 'f1', method: 'option-cells', tier: 'auto-confirm' },
+      { kind: 'accepted', fieldId: 'f1', method: 'option-cells', via: 'auto' },
+      { kind: 'proposed', fieldId: 'f2', method: 'table', tier: 'needs-review' },
+      { kind: 'adjusted', fieldId: 'f2', adjustment: 'column-band', bucket: '>4pt', phase: 'preview' },
+      { kind: 'accepted', fieldId: 'f2', method: 'table', via: 'confirm' },
+      { kind: 'proposed', fieldId: 'f3', method: 'match-anchor', tier: 'no-match' },
+      { kind: 'manual-draw', fieldId: 'f3', fieldTypeClass: 'option' },
+      { kind: 'retargeted', fieldId: 'f2', pageDeltaBucket: '+2..4' },
+    ],
+  };
+
+  function post(base: string, body: unknown) {
+    return fetch(`${base}/pdf/placements`, {
+      method: 'POST',
+      headers: { ...authHeader(), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('503s when the database is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      expect((await post(base, WELL_FORMED)).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes an org-scoped row, recomputing the tallies server-side from the events', async () => {
+    const { db, inserted } = fakePlacementsDb({ insertedId: 'po-42' });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, WELL_FORMED);
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: 'po-42' });
+      expect(inserted).toHaveLength(1);
+      // The hand-computed tally for WELL_FORMED's events — the counters come
+      // from `tallyPlacementOutcomes` over the payload, never from the client.
+      expect(inserted[0]).toMatchObject({
+        orgId: 'org-1',
+        formId: 'form-1',
+        versionId: 'v-2',
+        documentType: 'assessment',
+        context: 'builder',
+        proposalsAttempted: 3,
+        autoConfirmed: 1,
+        acceptedAsIs: 1,
+        adjusted: 1,
+        rejected: 0,
+        noMatch: 1,
+        manualDraws: 1,
+        retargets: 1,
+        fieldCount: 12,
+        createdByUserId: 'u1',
+      });
+      expect((inserted[0]!.outcomes as { events: unknown[] }).events).toHaveLength(8);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stores missing optional ids as null', async () => {
+    const { db, inserted } = fakePlacementsDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const body = {
+        context: 'standalone',
+        fieldCount: 3,
+        events: [{ kind: 'proposed', fieldId: 'f1', method: 'table', tier: 'no-match' }],
+      };
+      expect((await post(base, body)).status).toBe(201);
+      expect(inserted[0]).toMatchObject({ formId: null, versionId: null, documentType: null });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s on a malformed event (an unknown kind)', async () => {
+    mockDbValue = fakePlacementsDb().db;
+    const { server, base } = startApp();
+    try {
+      const body = {
+        context: 'standalone',
+        fieldCount: 1,
+        events: [{ kind: 'not-a-real-kind', fieldId: 'f1' }],
+      };
+      expect((await post(base, body)).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s on an empty slice — the recorder never sends one, so nothing stores one', async () => {
+    mockDbValue = fakePlacementsDb().db;
+    const { server, base } = startApp();
+    try {
+      const body = { context: 'standalone', fieldCount: 1, events: [] };
+      expect((await post(base, body)).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The placement loop's read surface (U7): the hit-rate metric, the recurring
+ * shapes with their engine-seam suggestions, and the weekly trend. Admin-only,
+ * like the corrections candidates.
+ */
+describe('GET /pdf/placements/insights', () => {
+  function fakePlacementInsightsDb(rows: unknown[]) {
+    return { query: { placementOutcomes: { findMany: vi.fn().mockResolvedValue(rows) } } };
+  }
+
+  const ROWS = [
+    {
+      documentType: 'assessment',
+      createdAt: '2026-08-18T10:00:00Z',
+      outcomes: {
+        context: 'builder',
+        fieldCount: 10,
+        events: [
+          { kind: 'proposed', fieldId: 'f1', method: 'table', tier: 'needs-review' },
+          { kind: 'adjusted', fieldId: 'f1', adjustment: 'column-band', bucket: '>4pt', phase: 'preview' },
+          { kind: 'accepted', fieldId: 'f1', method: 'table', via: 'confirm' },
+          { kind: 'proposed', fieldId: 'f2', method: 'option-cells', tier: 'auto-confirm' },
+        ],
+      },
+      proposalsAttempted: 2,
+      autoConfirmed: 1,
+      acceptedAsIs: 1,
+      adjusted: 1,
+      rejected: 0,
+      noMatch: 0,
+      manualDraws: 0,
+      retargets: 0,
+    },
+  ];
+
+  function get(base: string, cookie: string) {
+    return fetch(`${base}/pdf/placements/insights`, { headers: { cookie } });
+  }
+
+  it('403s for a non-admin caller', async () => {
+    mockDbValue = fakePlacementInsightsDb(ROWS);
+    const candidateCookie = `fai_session=${sealSession({
+      userId: 'u1',
+      orgId: 'org-1',
+      role: 'candidate',
+    } as unknown as Parameters<typeof sealSession>[0])}`;
+    const { server, base } = startApp();
+    try {
+      expect((await get(base, candidateCookie)).status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('503s when the database is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      expect((await get(base, `fai_session=${sealSession(tenant)}`)).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports the rates, the shapes with suggestions, and the weekly trend', async () => {
+    mockDbValue = fakePlacementInsightsDb(ROWS);
+    const { server, base } = startApp();
+    try {
+      const res = await get(base, `fai_session=${sealSession(tenant)}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        metrics: { documentType: string; hitRate: number; adjustmentRate: number }[];
+        shapes: { shape: string; count: number; suggestion: string }[];
+        trend: { week: string; hitRate: number }[];
+      };
+
+      expect(body.metrics[0]).toMatchObject({ documentType: 'assessment', hitRate: 0.5 });
+      expect(body.metrics[0]!.adjustmentRate).toBe(0.5);
+
+      const bandMoved = body.shapes.find((s) => s.shape === 'adjusted:column-band:>4pt');
+      expect(bandMoved?.count).toBe(1);
+      expect(bandMoved?.suggestion).toContain('proposeTableSegments');
+
+      expect(body.trend).toEqual([
+        expect.objectContaining({ week: '2026-W34', hitRate: 0.5 }),
+      ]);
     } finally {
       server.close();
     }

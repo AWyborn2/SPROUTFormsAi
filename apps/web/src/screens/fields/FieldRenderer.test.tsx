@@ -255,3 +255,32 @@ describe('FieldInput — check_cross outcome boxes', () => {
     expect(canDictateField(outcomeField())).toBe(false);
   });
 });
+
+describe('signature fields — the saved-signature affordance (U5)', () => {
+  const sigField: FormField = {
+    id: 'sig-1',
+    label: 'Candidate signature',
+    type: 'signature',
+    required: false,
+    source: 'imported',
+  };
+
+  it('renders "Use saved signature" only when a caller provides the handler', () => {
+    const onUse = vi.fn();
+    render(
+      <FieldInput
+        field={sigField}
+        value={null}
+        onChange={vi.fn()}
+        onUseSavedSignature={onUse}
+      />,
+    );
+    fireEvent.click(screen.getByText('Use saved signature'));
+    expect(onUse).toHaveBeenCalledWith('sig-1');
+  });
+
+  it('stays absent by default — preview and public fill never dangle it', () => {
+    render(<FieldInput field={sigField} value={null} onChange={vi.fn()} />);
+    expect(screen.queryByText('Use saved signature')).toBeNull();
+  });
+});

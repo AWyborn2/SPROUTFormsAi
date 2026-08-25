@@ -9,6 +9,7 @@ import type {
   ProfileAccess,
   ProfileResponse,
   ProfileSeedResponse,
+  RecommendedCompetencies,
 } from '../../lib/data/types.js';
 
 /*
@@ -23,15 +24,32 @@ const state: {
   saved: Array<{ membershipId: string; values: Record<string, string> }>;
   seed: ProfileSeedResponse | undefined;
   role: string;
+  signature: string | null;
+  hasPassword: boolean;
+  signatureSaves: Array<{ signature: string | null; password?: string }>;
+  saveError: unknown;
   cases: Array<{ id: string; toolName: string; state: string; createdAt: string }>;
+  /** The candidate's own recommended read (U7). Undefined keeps the card absent. */
+  recommended: RecommendedCompetencies | undefined;
 } = {
   profile: { data: undefined, isLoading: false, isError: false },
   held: [],
   saved: [],
   seed: undefined,
   role: 'admin',
+  signature: null as string | null,
+  hasPassword: true,
   cases: [],
+  recommended: undefined,
+  signatureSaves: [] as Array<{ signature: string | null; password?: string }>,
+  saveError: undefined as unknown,
 };
+const requestTraining = vi.fn();
+// Renewing invokes onSuccess so the control resets and toasts, the same shape
+// useSaveProfile's mock takes.
+const renewMutate = vi.fn((_input: unknown, opts?: { onSuccess?: () => void }) => {
+  opts?.onSuccess?.();
+});
 
 /*
   No route params and no query string by default, so the screen takes its
@@ -48,7 +66,20 @@ vi.mock('react-router-dom', () => ({
 vi.mock('../../lib/data/hooks.js', () => ({
   useProfile: () => state.profile,
   useMyProfileMembership: () => ({ data: { membershipId: 'm-1' }, isLoading: false }),
-  useSession: () => ({ data: { role: state.role } }),
+  useSession: () => ({
+    data: { role: state.role, signature: state.signature, hasPassword: state.hasPassword },
+  }),
+  useSaveSignature: () => ({
+    mutate: (
+      input: { signature: string | null; password?: string },
+      opts?: { onSuccess?: () => void; onError?: (e: unknown) => void },
+    ) => {
+      state.signatureSaves.push(input);
+      if (state.saveError) opts?.onError?.(state.saveError);
+      else opts?.onSuccess?.();
+    },
+    isPending: false,
+  }),
   useAssessmentCases: () => ({ data: state.cases }),
   useHeldCompetencies: () => ({ data: state.held }),
   useMemberPlacement: () => ({
@@ -74,6 +105,9 @@ vi.mock('../../lib/data/hooks.js', () => ({
     },
   }),
   useProfileSeed: () => ({ data: state.seed }),
+  useMyRecommended: () => ({ data: state.recommended }),
+  useRequestTraining: () => ({ mutate: requestTraining, isPending: false }),
+  useRenewCompetency: () => ({ mutate: renewMutate, isPending: false }),
   useSaveProfile: () => ({
     mutate: (
       input: { membershipId: string; values: Record<string, string> },
@@ -86,6 +120,22 @@ vi.mock('../../lib/data/hooks.js', () => ({
     isError: false,
   }),
 }));
+
+// The recommended card toasts on request outcomes; the provider is app chrome
+// these component tests do not mount.
+const toast = vi.fn();
+vi.mock('@formai/ui', async () => {
+  const actual = await vi.importActual<typeof import('@formai/ui')>('@formai/ui');
+  return {
+    ...actual,
+    useToast: () => ({ toast }),
+    // The real pad drags in canvas; the card's contract is only what it saves,
+    // so the stub exposes a deterministic "draw" that fires onChange.
+    SignaturePad: ({ onChange }: { onChange: (v: string) => void }) => (
+      <button data-testid="pad-draw" onClick={() => onChange('data:image/png;base64,iVBORw0KDRAWN=')} />
+    ),
+  };
+});
 
 const { ProfileScreen } = await import('./ProfileScreen.js');
 
@@ -143,6 +193,11 @@ afterEach(() => {
   state.seed = undefined;
   state.role = 'admin';
   state.cases = [];
+  state.recommended = undefined;
+  state.signature = null;
+  state.hasPassword = true;
+  state.signatureSaves = [];
+  state.saveError = undefined;
   searchParams = new URLSearchParams();
 });
 
@@ -194,6 +249,7 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
   it('shows standing and currency as two separate facts', () => {
     state.held = [
       {
+        holderId: 'h-dozer',
         competencyId: 'c-dozer',
         name: 'Track Dozer',
         code: null,
@@ -215,6 +271,80 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     expect(screen.queryByText('c-dozer')).toBeNull();
   });
 
+  it('renders each entry’s source scopes as ONE comma-joined line (AE1, R5, U8)', () => {
+    /*
+      The AE1 stack on the record: a required entry produced by three scopes
+      reads "Required — from <a>, <b> and <c>" — commas, "and" before the
+      last — and an org-scope entry reads "org-wide", never the org's name.
+    */
+    state.held = [
+      {
+        holderId: 'h-site',
+        competencyId: 'c-site',
+        name: 'Site Induction',
+        code: null,
+        evidenceRef: null,
+        licenceClass: null,
+        licenceNumber: null,
+        status: 'held',
+        standing: 'required',
+        sources: [
+          { scope: 'location', name: 'Boddington' },
+          { scope: 'department', name: 'Operations' },
+          { scope: 'role', name: 'Dozer Operator' },
+        ],
+        current: true,
+        expiresAt: null,
+        note: null,
+      },
+      {
+        holderId: 'h-org',
+        competencyId: 'c-org',
+        name: 'First Aid',
+        code: null,
+        evidenceRef: null,
+        licenceClass: null,
+        licenceNumber: null,
+        status: 'held',
+        standing: 'required',
+        sources: [{ scope: 'org', name: 'Org One' }],
+        current: true,
+        expiresAt: null,
+        note: null,
+      },
+    ];
+    show();
+    expect(
+      screen.getByText('Required — from Boddington, Operations and Dozer Operator'),
+    ).toBeDefined();
+    expect(screen.getByText('Required — org-wide')).toBeDefined();
+    expect(screen.queryByText(/Org One/)).toBeNull();
+  });
+
+  it('renders NO source line where the API withheld sources (the viewer gate, U8)', () => {
+    // A colleague read without `profiles.view_competencies`: the field is
+    // absent, and the row must not render a dangling or invented caption.
+    state.held = [
+      {
+        holderId: 'h-dozer',
+        competencyId: 'c-dozer',
+        name: 'Track Dozer',
+        code: null,
+        evidenceRef: null,
+        licenceClass: null,
+        licenceNumber: null,
+        status: 'held',
+        standing: 'required',
+        current: true,
+        expiresAt: null,
+        note: null,
+      },
+    ];
+    show();
+    expect(screen.queryByText(/— from/)).toBeNull();
+    expect(screen.queryByText(/org-wide/)).toBeNull();
+  });
+
   it('does not render an expired OPTIONAL competency as a compliance failure (AE43, R102)', () => {
     /*
       Standing is obligation and follows the person's Roles; currency is
@@ -224,6 +354,7 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     */
     state.held = [
       {
+        holderId: 'h-req',
         competencyId: 'c-req',
         name: 'Required Ticket',
         code: null,
@@ -237,6 +368,7 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
         note: null,
       },
       {
+        holderId: 'h-vol',
         competencyId: 'c-vol',
         name: 'Voluntary Ticket',
         code: null,
@@ -254,6 +386,76 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     expect(screen.getByText('optional')).toBeDefined();
     expect(screen.getByText('expired')).toBeDefined();
     expect(screen.getAllByText('Voluntary Ticket').length).toBeGreaterThan(0);
+  });
+
+  /*
+    RENEW (task #43): the sign-off dead-end. A lapsed licence blocks
+    certification, and until now there was no way to re-date it — the assessor
+    was stuck. On an editable record they can now set the new expiry and file the
+    renewed evidence from the person's own record.
+  */
+  const LAPSED_LICENCE: HeldCompetencyRow = {
+    holderId: 'h-lic',
+    competencyId: 'c-lic',
+    name: 'Driver Licence',
+    code: null,
+    evidenceRef: null,
+    licenceClass: 'C',
+    licenceNumber: null,
+    status: 'expired',
+    standing: 'required',
+    current: false,
+    expiresAt: '2025-01-01T00:00:00Z',
+    note: null,
+  };
+
+  it('renews a lapsed licence with the end-of-day expiry (task #43)', () => {
+    state.role = 'admin';
+    state.held = [LAPSED_LICENCE];
+    // A non-subject reader who may edit the record — both the re-grant and the
+    // evidence attach need that authority.
+    show({ editableFields: ['firstName'] });
+
+    // Collapsed until opened.
+    fireEvent.click(screen.getByRole('button', { name: /Renew/ }));
+    fireEvent.change(screen.getByLabelText('New expiry date'), {
+      target: { value: '2031-06-30' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Renew' }));
+
+    expect(renewMutate).toHaveBeenCalledTimes(1);
+    // End of day, so the licence stays valid THROUGH its printed expiry date.
+    expect(renewMutate.mock.calls[0]![0]).toMatchObject({
+      expiresAt: '2031-06-30T23:59:59.000Z',
+    });
+  });
+
+  it('does nothing with neither a new date nor a file — the submit stays disabled', () => {
+    state.role = 'admin';
+    state.held = [LAPSED_LICENCE];
+    show({ editableFields: ['firstName'] });
+    fireEvent.click(screen.getByRole('button', { name: /Renew/ }));
+
+    const submit = screen.getByRole('button', { name: 'Renew' }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(renewMutate).not.toHaveBeenCalled();
+  });
+
+  it('offers no Renew on a read-only record', () => {
+    state.role = 'admin';
+    state.held = [LAPSED_LICENCE];
+    // READ_ONLY has no editable fields — the default access. No affordance.
+    show();
+    expect(screen.queryByRole('button', { name: /Renew/ })).toBeNull();
+  });
+
+  it('offers no Renew to the subject on their own record — that path is a replacement', () => {
+    state.role = 'assessor';
+    state.held = [LAPSED_LICENCE];
+    // Even with fields to edit, the subject may not attach held evidence here.
+    show({ isSubject: true, editableFields: ['firstName'] });
+    expect(screen.queryByRole('button', { name: /Renew/ })).toBeNull();
   });
 });
 
@@ -480,11 +682,174 @@ describe('ProfileScreen — the candidate-focused own view', () => {
     expect(screen.getByText(/Nothing due/)).toBeDefined();
   });
 
+  it('shows an unheld recommendation with NO start action while self-start is OFF (AE5, R12)', () => {
+    state.role = 'candidate';
+    state.recommended = {
+      selfStartEnabled: false,
+      items: [
+        { competencyId: 'c1', name: 'First Aid', code: 'HLTAID011', held: false, requestableToolId: 't1' },
+      ],
+    };
+    show({ isSubject: true });
+    expect(screen.getByText('Recommended for your roles')).toBeDefined();
+    expect(screen.getByText('First Aid')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Request this training' })).toBeNull();
+  });
+
+  it('exposes the request action when the org flips self-start ON, posting { toolId } (AE5, R14)', () => {
+    state.role = 'candidate';
+    state.recommended = {
+      selfStartEnabled: true,
+      items: [
+        { competencyId: 'c1', name: 'First Aid', code: 'HLTAID011', held: false, requestableToolId: 't1' },
+      ],
+    };
+    show({ isSubject: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Request this training' }));
+    // The existing voluntary body — the request lands in the training-request
+    // queue, never enrols directly (R94, R96).
+    expect(requestTraining).toHaveBeenCalledWith('t1', expect.anything());
+  });
+
+  it('captions a recommendation with its recommending scope — "Recommended — from <Location>" (AE5, U8)', () => {
+    state.role = 'candidate';
+    state.recommended = {
+      selfStartEnabled: false,
+      items: [
+        {
+          competencyId: 'c1',
+          name: 'First Aid',
+          code: 'HLTAID011',
+          held: false,
+          requestableToolId: 't1',
+          sources: [{ scope: 'location', name: 'Boddington' }],
+        },
+      ],
+    };
+    show({ isSubject: true });
+    expect(screen.getByText('Recommended — from Boddington')).toBeDefined();
+  });
+
+  it('offers no request for an evidence-only recommendation, toggle regardless (R7)', () => {
+    state.role = 'candidate';
+    state.recommended = {
+      selfStartEnabled: true,
+      items: [
+        { competencyId: 'c2', name: 'Driver Licence', code: null, held: false, requestableToolId: null },
+      ],
+    };
+    show({ isSubject: true });
+    expect(screen.getByText('Driver Licence')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Request this training' })).toBeNull();
+  });
+
+  it('renders no recommended card on someone ELSE’s record — it is a self surface (R12)', () => {
+    state.role = 'admin';
+    state.recommended = {
+      selfStartEnabled: true,
+      items: [
+        { competencyId: 'c1', name: 'First Aid', code: null, held: false, requestableToolId: 't1' },
+      ],
+    };
+    show();
+    expect(screen.queryByText('Recommended for your roles')).toBeNull();
+  });
+
   it('keeps the full record — placement and documents — for a non-candidate reader', () => {
     state.role = 'admin';
     show();
     expect(screen.getByText('Placement')).toBeDefined();
     expect(screen.getByText('Documents')).toBeDefined();
     expect(screen.queryByText('Assessments due')).toBeNull();
+  });
+});
+
+describe('ProfileScreen — My signature (own record only)', () => {
+  it('renders the card on the caller’s own record', () => {
+    show({ isSubject: true });
+    expect(screen.getByText('My signature')).toBeDefined();
+  });
+
+  it('never renders on a member record an admin is viewing', () => {
+    show({ isSubject: false });
+    expect(screen.queryByText('My signature')).toBeNull();
+  });
+
+  it('removing a saved mark takes the password before it clears (disarm defence)', () => {
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    show({ isSubject: true });
+    expect(screen.getByAltText('Your saved signature')).toBeDefined();
+    fireEvent.click(screen.getByText('Remove'));
+    // Does NOT clear yet — a password panel appears instead.
+    expect(state.signatureSaves).toEqual([]);
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByText('Remove signature'));
+    expect(state.signatureSaves).toEqual([{ signature: null, password: 'pw' }]);
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'success' }));
+  });
+
+  it('replacing a saved mark sends the drawn mark WITH the password', () => {
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    show({ isSubject: true });
+    fireEvent.click(screen.getByText('Replace'));
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    // Save stays disabled until the password is entered.
+    const save = screen.getByText('Save signature').closest('button')!;
+    expect(save.hasAttribute('disabled')).toBe(true);
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'pw' } });
+    expect(save.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(save);
+    expect(state.signatureSaves).toEqual([
+      { signature: 'data:image/png;base64,iVBORw0KDRAWN=', password: 'pw' },
+    ]);
+  });
+
+  it('a no-password account can remove its mark without a password prompt (R6)', () => {
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    state.hasPassword = false;
+    show({ isSubject: true });
+    fireEvent.click(screen.getByText('Remove'));
+    expect(state.signatureSaves).toEqual([{ signature: null }]);
+  });
+
+  it('with nothing saved, offers the pad and disables Save until something is drawn', () => {
+    show({ isSubject: true });
+    const save = screen.getByText('Save signature').closest('button')!;
+    expect(save.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('first save (nothing saved yet) sends the drawn mark with no password (AE1)', () => {
+    show({ isSubject: true });
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    const save = screen.getByText('Save signature').closest('button')!;
+    expect(save.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(save);
+    expect(state.signatureSaves).toEqual([{ signature: 'data:image/png;base64,iVBORw0KDRAWN=' }]);
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'success' }));
+  });
+
+  it('an oversized-save error names the size, not the format', async () => {
+    const { ApiError } = await import('../../lib/data/api-client.js');
+    state.saveError = new ApiError(400, { error: 'too_large' });
+    show({ isSubject: true });
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    fireEvent.click(screen.getByText('Save signature'));
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: 'danger', message: expect.stringMatching(/too large/i) }),
+    );
+  });
+
+  it('a wrong-password error on replace names the password, not the format', async () => {
+    const { ApiError } = await import('../../lib/data/api-client.js');
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    state.saveError = new ApiError(401, { error: 'invalid_credentials' });
+    show({ isSubject: true });
+    fireEvent.click(screen.getByText('Replace'));
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'wrong' } });
+    fireEvent.click(screen.getByText('Save signature'));
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: 'danger', message: expect.stringMatching(/password is not right/i) }),
+    );
   });
 });

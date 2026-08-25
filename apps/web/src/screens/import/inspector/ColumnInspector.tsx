@@ -63,6 +63,11 @@ export interface ColumnActions {
    * this is the reviewer's correction.
    */
   setLabelColumn(fieldId: string, isLabel: boolean): void;
+  /**
+   * Replace the pre-printed checklist rows (the locked item labels). Empty
+   * clears them — a table with no fixed rows is an open row-entry table.
+   */
+  setFixedRows(fieldId: string, rows: string[]): void;
   /** Append a new fillable text column to the table. */
   addColumn(fieldId: string): void;
   /** Remove a column. Never the pre-printed label column of a checklist. */
@@ -71,6 +76,11 @@ export interface ColumnActions {
   moveColumn(fieldId: string, columnKey: string, dir: -1 | 1): void;
   /** Set (or clear, with null) a column's auto-calculation. */
   setColumnCalc(fieldId: string, columnKey: string, calc: ColumnCalc | null): void;
+  /**
+   * Turn a date/time column's auto-stamp on or off — seed each new row's cell
+   * with today's date / the current time instead of leaving it blank.
+   */
+  setColumnAutoStamp(fieldId: string, columnKey: string, autoStamp: boolean): void;
 }
 
 /** Types a table cell can sensibly take (a column is never a section header). */
@@ -216,6 +226,15 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
         </span>
       </label>
 
+      {/*
+        The checklist's rows, editable. The columns are the shape of the table;
+        these are its pre-printed CONTENT — and extraction gets them wrong the
+        same ways it gets fields wrong (a garbled item, a missed one, a stray
+        one, the wrong order). Shown only for a checklist, because an open table
+        has no pre-printed rows.
+      */}
+      {labelled && <FixedRowsEditor field={field} actions={actions} />}
+
       <div className="flex flex-col gap-2">
         {rows.map((row) => (
           <div
@@ -294,6 +313,27 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
                   aria-label={`Column required: ${row.column.label}`}
                 />
               </div>
+            )}
+
+            {!row.isLabel && (row.column.type === 'date' || row.column.type === 'time') && (
+              <label className="mt-1.5 flex items-center gap-2 rounded-sm border border-border-subtle bg-surface-card p-[8px_9px]">
+                <Switch
+                  checked={row.column.autoStamp ?? false}
+                  onChange={(e) => actions.setColumnAutoStamp(field.id, row.column.key, e.target.checked)}
+                  aria-label={`Auto-fill ${row.column.label} on each new row`}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[11.5px] font-medium text-text-primary">
+                    {row.column.type === 'date'
+                      ? "Auto-fill with today's date"
+                      : 'Auto-fill with the current time'}
+                  </span>
+                  <span className="block text-[10.5px] text-text-tertiary">
+                    Each new row starts stamped — still editable, so a shift logged later can be
+                    corrected.
+                  </span>
+                </span>
+              </label>
             )}
 
             {!row.isLabel && CHOICE_COLUMN_TYPES.has(row.column.type) && (
@@ -387,6 +427,89 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The pre-printed checklist rows — the locked item labels a candidate reads but
+ * cannot change (`seedFixedRows` fills column 0 from these on every fill
+ * surface). Editable here so an author can fix what extraction mangled: rename a
+ * garbled item, add one it missed, drop one it invented, or reorder them into
+ * the printed sequence.
+ *
+ * Deleting the last row clears `fixedRows` — the adapter normalizes empty to
+ * undefined — which turns the table back into an open row-entry one, the same
+ * end state as switching off "first column is a pre-printed label".
+ */
+function FixedRowsEditor({
+  field,
+  actions,
+}: {
+  field: ColumnInspectorField;
+  actions: ColumnActions;
+}) {
+  const rows = field.fixedRows ?? [];
+  const write = (next: string[]) => actions.setFixedRows(field.id, next);
+  const swap = (i: number, j: number) => {
+    if (j < 0 || j >= rows.length) return;
+    const next = rows.slice();
+    [next[i], next[j]] = [next[j]!, next[i]!];
+    write(next);
+  };
+
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-border-subtle bg-surface-sunken p-[9px_10px]">
+      <div>
+        <div className="text-[12.5px] font-semibold">Checklist rows</div>
+        <p className="mt-0.5 text-[11px] text-text-tertiary">
+          The pre-printed items, locked on the form. Each is one row of the table.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        {rows.map((r, i) => (
+          <div key={i} className="flex items-center gap-1.5">
+            <input
+              value={r}
+              onChange={(e) => write(rows.map((x, j) => (j === i ? e.target.value : x)))}
+              aria-label={`Checklist row ${i + 1}`}
+              className="h-7 min-w-0 flex-1 rounded-sm border border-border bg-surface-card px-2 text-[12.5px] text-text-primary focus-visible:shadow-focus"
+            />
+            <button
+              onClick={() => swap(i, i - 1)}
+              disabled={i === 0}
+              aria-label={`Move up: ${r || `row ${i + 1}`}`}
+              className="grid h-7 w-7 flex-none place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Icon name="chevron-up" size={12} />
+            </button>
+            <button
+              onClick={() => swap(i, i + 1)}
+              disabled={i >= rows.length - 1}
+              aria-label={`Move down: ${r || `row ${i + 1}`}`}
+              className="grid h-7 w-7 flex-none place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Icon name="chevron-down" size={12} />
+            </button>
+            <button
+              onClick={() => write(rows.filter((_, j) => j !== i))}
+              aria-label={`Remove row: ${r || `row ${i + 1}`}`}
+              className="grid h-7 w-7 flex-none place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover hover:text-danger-text"
+            >
+              <Icon name="x" size={12} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <button
+        onClick={() => write([...rows, ''])}
+        className="inline-flex items-center justify-center gap-1.5 rounded-sm border border-dashed border-border-strong px-2.5 py-1.5 text-[12px] font-semibold text-text-secondary hover:bg-surface-hover"
+      >
+        <Icon name="plus" size={13} />
+        Add row
+      </button>
     </div>
   );
 }

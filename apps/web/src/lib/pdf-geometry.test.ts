@@ -521,6 +521,199 @@ describe('proposeTableSegments — band extent', () => {
 });
 
 /**
+ * Printed-square refinement (U3, R1/R4-R7) — the page's own checkbox
+ * rectangles snapping a text-derived grid onto the printed squares.
+ *
+ * The squares below are 9pt sides on the measured dozer baselines
+ * (630.8 / 614 / 597.1 / 580.3), placed so each square's centre sits beside
+ * its own row's text — where a printed checkbox actually is.
+ */
+import type { PrintedRect } from '../screens/import/inspector/geometry-actions.js';
+
+/** One 9pt square per table-1 row at a given x. */
+function table1Squares(x: number): PrintedRect[] {
+  return [630.8, 614, 597.1, 580.3].map((baseline) => ({
+    x,
+    y: baseline - 6,
+    width: 9,
+    height: 9,
+  }));
+}
+
+function proposeWithRects(
+  items: PositionedText[],
+  rects: readonly PrintedRect[] | undefined,
+  columns = tickCrossNaColumns(),
+) {
+  return proposeTableSegments({ page: 6, ...A4, items, columns, rects });
+}
+
+describe('proposeTableSegments — rect evidence degrades byte-identically (AE2/AE7, R1)', () => {
+  /**
+   * R1 as an executable property, over every module-scope fixture shape: with
+   * `rects: undefined` (never measured) and `rects: []` (the historic pdf.js
+   * silent-zero failure mode) the output is DEEP-EQUAL to the no-argument
+   * derivation — same segments, same bands, same confidence, same notes. This
+   * is what makes the rect evidence a pure bonus: if the extractor regresses
+   * to zero again, nothing about placement changes except the measured
+   * caption disappearing.
+   */
+  const fixtures: { name: string; items: PositionedText[] }[] = [
+    { name: 'dozer page 7, table 1', items: dozerPage7Table1() },
+    { name: 'dozer page 7, table 2 (wrapping rows, stray colon)', items: dozerPage7Table2Header() },
+    {
+      name: 'both page-7 tables (corroborated headers)',
+      items: [...dozerPage7Table1(), ...dozerPage7Table2Header()],
+    },
+    { name: 'repeated table 1', items: repeated(dozerPage7Table1()) },
+    { name: 'the Small Loader shape (tick missing), repeated', items: repeated(withoutTick()) },
+  ];
+
+  for (const { name, items } of fixtures) {
+    it(`is byte-identical for ${name}`, () => {
+      const base = propose(items);
+
+      expect(proposeWithRects(items, undefined)).toEqual(base);
+      expect(proposeWithRects(items, [])).toEqual(base);
+    });
+  }
+
+  it('is byte-identical for a standalone-header page too', () => {
+    // The second header shape: option glyphs on their own baseline.
+    const okNa: RepeatingColumn[] = [
+      { key: 'item', label: 'Item', type: 'text' },
+      { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+      { key: 'na', label: 'NA', type: 'boolean_yes_no' },
+    ];
+    const headerAt = (y: number): PositionedText[] => [
+      { text: 'OK', x: 345.7, y, width: 12.2 },
+      { text: 'NA', x: 371.1, y, width: 12.6 },
+      { text: 'OK', x: 512.6, y, width: 12.2 },
+      { text: 'NA', x: 540.7, y, width: 12.6 },
+    ];
+    const items: PositionedText[] = [
+      ...headerAt(306.2),
+      ...[0, 1, 2].map((r) => ({ text: `Check ${r}`, x: 42, y: 290 - r * 16, width: 60 })),
+      ...headerAt(180),
+      ...[0, 1].map((r) => ({ text: `Later ${r}`, x: 42, y: 164 - r * 16, width: 60 })),
+    ];
+    const base = proposeTableSegments({ page: 0, pageWidth: 595, pageHeight: 420, items, columns: okNa });
+
+    expect(
+      proposeTableSegments({ page: 0, pageWidth: 595, pageHeight: 420, items, columns: okNa, rects: [] }),
+    ).toEqual(base);
+    expect(base.length).toBeGreaterThan(0);
+    for (const p of base) expect(p.columnEvidence).toBe('header-text');
+  });
+
+  it('keeps the notes: [] contract on a clean text-only derivation', () => {
+    const [proposal] = proposeWithRects(
+      [...dozerPage7Table1(), ...dozerPage7Table2Header()],
+      [],
+    );
+
+    expect(proposal!.notes).toEqual([]);
+    expect(proposal!.confidence).toBe(1);
+    expect(proposal!.columnEvidence).toBe('header-text');
+  });
+});
+
+describe('proposeTableSegments — snapping bands to printed squares (U3, R4/R5/R7)', () => {
+  /** Both page-7 tables, so the headers corroborate and confidence starts at 1. */
+  const corroborated = () => [...dozerPage7Table1(), ...dozerPage7Table2Header()];
+
+  it('Covers AE3: each matched band snaps to its squares’ measured extent, confidence intact', () => {
+    // Squares under each option column of table 1: tick at x=502, cross at
+    // 513, N/A at 540 — inside the derived bands, and now the measurement.
+    const rects = [...table1Squares(502), ...table1Squares(513), ...table1Squares(540)];
+
+    const [first, second] = proposeWithRects(corroborated(), rects);
+
+    // Band start === square x, end === x + width: on the printed boxes, not
+    // where the header glyphs happened to sit.
+    expect(first!.segment.columnBands).toEqual([
+      { key: 'tick', start: 502, end: 511 },
+      { key: 'cross', start: 513, end: 522 },
+      { key: 'na', start: 540, end: 549 },
+    ]);
+    expect(first!.confidence).toBe(1);
+    // Provenance rides the field, not a note — a clean grid that merely
+    // snapped keeps the asserted notes: [] contract (KTD3).
+    expect(first!.notes).toEqual([]);
+    expect(first!.columnEvidence).toBe('printed-boxes');
+    // Table 2 has three rows; the four-square columns row-align with nothing
+    // of its shape, so it is untouched — and says so.
+    expect(second!.columnEvidence).toBe('header-text');
+  });
+
+  it('Covers AE4: measurement lifts the inferred-column penalty and its note', () => {
+    // The Small Loader shape: no Private-Use tick reaches the text layer, so
+    // the tick column is inferred from pitch at -0.3 — a guess. Printed
+    // squares confirming all three columns stop it being one. The inferred
+    // tick band spans [473.3, 502.6] (centre extended leftward on the 29.3pt
+    // pitch), so the tick square sits at x=493 with its centre inside it.
+    const rects = [...table1Squares(493), ...table1Squares(513), ...table1Squares(540)];
+
+    const [first] = proposeWithRects(repeated(withoutTick()), rects);
+
+    expect(first!.anchorsInferred).toBe(1);
+    expect(first!.confidence).toBe(1);
+    expect(first!.notes.join(' ')).not.toMatch(/inferred from pitch/);
+    expect(first!.notes.join(' ')).toMatch(/measured from printed checkbox squares/);
+    // The bands sit on the squares.
+    expect(first!.segment.columnBands![0]).toEqual({ key: 'tick', start: 493, end: 502 });
+    expect(first!.columnEvidence).toBe('printed-boxes');
+  });
+
+  it('Covers AE5: conflicting squares penalise and warn, never silently resolve', () => {
+    // Squares row-align with table 1's four rows but sit far left of the
+    // derived bands, and only two columns print for three declared. The text
+    // bands are kept, confidence drops 0.2, and the reviewer is told.
+    const rects = [...table1Squares(300), ...table1Squares(360)];
+    const base = propose(corroborated());
+
+    const [first] = proposeWithRects(corroborated(), rects);
+
+    expect(first!.segment.columnBands).toEqual(base[0]!.segment.columnBands);
+    expect(first!.confidence).toBe(0.8);
+    expect(first!.notes.join(' ')).toMatch(/do not line up/);
+    expect(first!.columnEvidence).toBe('header-text');
+  });
+
+  it('snaps to the checkbox, not the ruled cell contending for the same band', () => {
+    // A bordered answer column prints both. The smaller control wins the band
+    // — the cell is furniture around the control — so the band lands on the
+    // 9pt square, never centred on the whole cell.
+    const cells: PrintedRect[] = [630.8, 614, 597.1, 580.3].map((baseline) => ({
+      x: 498,
+      y: baseline - 8,
+      width: 16,
+      height: 16,
+    }));
+    const rects = [...cells, ...table1Squares(502), ...table1Squares(513), ...table1Squares(540)];
+
+    const [first] = proposeWithRects(corroborated(), rects);
+
+    expect(first!.segment.columnBands![0]).toEqual({ key: 'tick', start: 502, end: 511 });
+  });
+
+  it('grows the segment to hold a snapped band past the last text-derived edge (R15)', () => {
+    // The N/A squares end at x=559, past the old segment edge at 556.65. A
+    // box that no longer contains its own bands is silently dropped by the
+    // shipped validator, so the union must absorb the measured extents.
+    const rects = [...table1Squares(502), ...table1Squares(513), ...table1Squares(550)];
+
+    const [first] = proposeWithRects(corroborated(), rects);
+
+    expect(first).toBeDefined();
+    expect(first!.segment.columnBands![2]).toEqual({ key: 'na', start: 550, end: 559 });
+    const resolved = resolveGeometry({ geometry: { segments: [first!.segment] } }, 18);
+    expect(resolved.dropped).toEqual([]);
+    expect(first!.segment.x + first!.segment.width).toBeGreaterThanOrEqual(559);
+  });
+});
+
+/**
  * U8 — a header row that carries no label of its own (R17).
  *
  * Every fixture is measured from `ADMN-FRM-111 Light Vehicle Pre-start
@@ -1581,5 +1774,152 @@ describe('matchAnchorBoxAt', () => {
     expect(box.x).toBe(0);
     expect(box.y + box.height).toBeLessThanOrEqual(842);
     expect(resolveGeometry({ geometry: { segments: [box] } }, 1).segments).toHaveLength(1);
+  });
+});
+
+import {
+  clearWholeFieldBoxOnPage,
+  distributeOptionCells,
+  isWholeFieldBox,
+  mergeWholeFieldBox,
+  setGlyphOnAll,
+} from './pdf-geometry.js';
+import type { GlyphKind, PageBox } from '@formai/shared';
+
+describe('whole-field table boxes, one per page (a table that spans a page break)', () => {
+  /** A whole-field box on `page` — plain when `rows` is 0, divided otherwise. */
+  function whole(page: number, rows = 0): PageBox {
+    return {
+      page,
+      x: 30,
+      y: 200,
+      width: 500,
+      height: 300,
+      pageWidth: 595,
+      pageHeight: 842,
+      ...(rows > 0
+        ? {
+            rowBands: Array.from({ length: rows }, (_, i) => ({
+              key: `r${i + 1}`,
+              start: 200 + i,
+              end: 201 + i,
+            })),
+          }
+        : {}),
+    };
+  }
+  /** A single printed row's own cell — keyed `row:<index>`, never whole-field. */
+  function rowCell(page: number, index: number): PageBox {
+    return {
+      page,
+      x: 30,
+      y: 200,
+      width: 500,
+      height: 20,
+      pageWidth: 595,
+      pageHeight: 842,
+      rowBands: [{ key: `row:${index}`, start: 200, end: 220 }],
+    };
+  }
+
+  it('recognises a plain box and a divided grid, but not a row cell or an option cell', () => {
+    expect(isWholeFieldBox(whole(7))).toBe(true);
+    expect(isWholeFieldBox(whole(7, 6))).toBe(true);
+    expect(isWholeFieldBox(rowCell(7, 0))).toBe(false);
+    expect(isWholeFieldBox({ ...whole(7), optionKey: 'yes' })).toBe(false);
+  });
+
+  it('adds a continuation page WITHOUT wiping the first, kept in page order', () => {
+    // The whole bug: placing page 9's box used to replace page 8's.
+    const after = mergeWholeFieldBox([whole(7, 6)], whole(8, 5));
+    expect(after.map((s) => s.page)).toEqual([7, 8]);
+    expect(after[0]!.rowBands).toHaveLength(6);
+    expect(after[1]!.rowBands).toHaveLength(5);
+  });
+
+  it('replaces the box on the SAME page, leaving other pages alone', () => {
+    const after = mergeWholeFieldBox([whole(7, 6), whole(8, 5)], whole(7, 9));
+    expect(after.map((s) => s.page)).toEqual([7, 8]);
+    expect(after[0]!.rowBands).toHaveLength(9); // page 7 redrawn
+    expect(after[1]!.rowBands).toHaveLength(5); // page 8 untouched
+  });
+
+  it('never disturbs per-row or per-option cells', () => {
+    const row = rowCell(7, 0);
+    const opt: PageBox = { ...whole(7), optionKey: 'yes' };
+    const after = mergeWholeFieldBox([row, opt], whole(7, 6));
+    expect(after).toContain(row);
+    expect(after).toContain(opt);
+    expect(after.filter((s) => isWholeFieldBox(s))).toHaveLength(1);
+  });
+
+  it('clears one page and keeps the table’s other pages', () => {
+    expect(clearWholeFieldBoxOnPage([whole(7, 6), whole(8, 5)], 7).map((s) => s.page)).toEqual([8]);
+    // A per-row cell on the cleared page survives — it is not a whole-field box.
+    const withRow = clearWholeFieldBoxOnPage([whole(7, 6), rowCell(7, 0)], 7);
+    expect(withRow).toHaveLength(1);
+    expect(isWholeFieldBox(withRow[0]!)).toBe(false);
+  });
+});
+
+describe('setGlyphOnAll — bulk-set the printed mark on every box', () => {
+  function box(page: number, glyph?: GlyphKind): PageBox {
+    return {
+      page,
+      x: 10,
+      y: 10,
+      width: 20,
+      height: 20,
+      pageWidth: 595,
+      pageHeight: 842,
+      ...(glyph ? { markStyle: { glyph } } : {}),
+    };
+  }
+
+  it('sets the glyph on every box, leaving positions and pages untouched', () => {
+    const out = setGlyphOnAll([box(0), box(1, 'tick_hand')], 'ring');
+    expect(out.map((b) => b.markStyle?.glyph)).toEqual(['ring', 'ring']);
+    expect(out.map((b) => b.page)).toEqual([0, 1]);
+    expect(out[0]!.width).toBe(20);
+  });
+
+  it('clears the whole markStyle for Default, never an empty one', () => {
+    // Absent is what the exporter reads as "the field's own mark"; an empty
+    // markStyle would be a style that means nothing.
+    const out = setGlyphOnAll([box(0, 'ring'), box(1, 'ring')], undefined);
+    expect(out.every((b) => !('markStyle' in b))).toBe(true);
+  });
+});
+
+describe('distributeOptionCells — sweep an area into a cell per option', () => {
+  const area: PageBox = {
+    page: 2,
+    x: 40,
+    y: 500,
+    width: 300,
+    height: 120,
+    pageWidth: 595,
+    pageHeight: 842,
+  };
+
+  it('gives one box per option, tagged and full width, top-to-bottom', () => {
+    const cells = distributeOptionCells(area, ['a', 'b', 'c']);
+    expect(cells.map((c) => c.optionKey)).toEqual(['a', 'b', 'c']);
+    expect(cells.every((c) => c.page === 2 && c.x === 40 && c.width === 300)).toBe(true);
+    // Even bands, top option highest in PDF space (y grows upward).
+    expect(cells.map((c) => c.height)).toEqual([40, 40, 40]);
+    expect(cells[0]!.y).toBeGreaterThan(cells[2]!.y);
+    // The bands tile the box with no gap or overlap.
+    expect(cells[0]!.y).toBe(area.y + area.height - 40);
+    expect(cells[2]!.y).toBe(area.y);
+  });
+
+  it('carries the drawn box’s mark style onto every cell', () => {
+    const cells = distributeOptionCells({ ...area, markStyle: { glyph: 'ring' } }, ['a', 'b']);
+    expect(cells.every((c) => c.markStyle?.glyph === 'ring')).toBe(true);
+  });
+
+  it('returns nothing for a field with no options', () => {
+    expect(distributeOptionCells(area, [])).toEqual([]);
   });
 });

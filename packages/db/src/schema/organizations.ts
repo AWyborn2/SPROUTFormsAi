@@ -72,6 +72,37 @@ export const organizations = pgTable('organizations', {
   allowMultipleLocations: boolean('allow_multiple_locations').notNull().default(false),
   allowMultipleDepartments: boolean('allow_multiple_departments').notNull().default(false),
   /**
+   * Whether a candidate may SELF-START training for a competency their Role
+   * merely RECOMMENDS (R14, KTD6). Default OFF: recommended is visible but
+   * never actionable until the organisation opts in. Consumed by a later unit
+   * (the candidate-facing "request this training" affordance and the
+   * training-request POST's relevance check); the column lands with the links
+   * table so the whole recommended tier ships one migration.
+   */
+  candidateSelfStartRecommended: boolean('candidate_self_start_recommended')
+    .notNull()
+    .default(false),
+  /**
+   * Whether a qualified assessor may run and certify their OWN assessment
+   * case. Industry practice differs by organisation — some registered
+   * training setups permit self-assessment, most do not — so it is a policy
+   * switch, defaulting to the stricter reading: nobody certifies themselves.
+   * Enforced at the sign-off gate and in the fill surface's party resolution,
+   * never inferred from role alone.
+   */
+  allowSelfAssessment: boolean('allow_self_assessment').notNull().default(false),
+  /**
+   * Whether a supervisor's or SME's sign-off on a part may be applied as a
+   * LABELLED signature by on-case staff (the assessor signing on their behalf,
+   * as on paper) rather than requiring that person's own login. Defaults on:
+   * the labelled model is the one that ships first and never blocks the flow —
+   * a part is never held waiting for a third party to authenticate. Turning it
+   * off will require the named signer to log in themselves (a stricter,
+   * audit-grade attribution that arrives with that capability); until then it
+   * only ever gates the labelled union access in the fill surface.
+   */
+  allowLabelledSignoff: boolean('allow_labelled_signoff').notNull().default(true),
+  /**
    * Which of the two workforce numbers identifies a person on screen (R40).
    * Defaults to the employee number; the swipe card number is the alternative.
    * The numbers themselves are profile fields owned by the candidate profile
@@ -123,6 +154,25 @@ export const users = pgTable('users', {
    */
   username: text().unique(),
   passwordHash: text('password_hash'),
+  /**
+   * The person's saved signature — a PNG data URL, as `SignaturePad` emits.
+   *
+   * HERE rather than on the profile for the same reason as `username`: a
+   * person's signature is their own mark and does not change between the
+   * customers they might assess for, so it belongs on the product-wide row. It
+   * is remembered from the last sign-off and prefilled at the next, so an
+   * assessor draws it once rather than on every certification. Null until they
+   * have signed anything.
+   */
+  signature: text('signature'),
+  /**
+   * When the person DELIBERATELY saved their signature (My signature — drawn
+   * or uploaded), as opposed to the sign-off remember above. Null means every
+   * stored signature is only a remembered convenience, and the sign-off may
+   * keep refreshing it; set, the remember-write stands down so a deliberate
+   * choice is never silently clobbered by a one-off drawing.
+   */
+  signatureSavedAt: timestamp('signature_saved_at', { withTimezone: true }),
   createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
 });
 

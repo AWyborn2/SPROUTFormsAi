@@ -2,6 +2,23 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '../utils/cn.js';
 import { Icon } from './Icon.js';
 
+/**
+ * Refuse an upload whose transcoded PNG would exceed what a stored signature
+ * may be. The cap mirrors `MAX_SIGNATURE_BYTES` in `@formai/shared`, restated
+ * here rather than imported because this package is a leaf UI kit with no
+ * dependency on `@formai/shared`; the server revalidates against the shared
+ * constant regardless, so this is a friendlier-failure convenience, not the
+ * authority. `bytesInDataUrl` estimates the payload size without decoding.
+ */
+const MAX_SIGNATURE_BYTES = 200 * 1024;
+
+function bytesInDataUrl(value: string): number {
+  const comma = value.indexOf(',');
+  const payload = comma === -1 ? '' : value.slice(comma + 1);
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((payload.length * 3) / 4) - padding);
+}
+
 export interface SignaturePadProps {
   /** Current value: a PNG data URL, or '' when empty. */
   value?: string;
@@ -9,14 +26,18 @@ export interface SignaturePadProps {
   width?: number;
   height?: number;
   className?: string;
+  /** Show the "Upload image" action beside Draw/Type. Off by default so fill
+   * surfaces keep their exact current affordances; the profile's My-signature
+   * card turns it on. */
+  allowUpload?: boolean;
   'aria-label'?: string;
 }
 
 /**
- * Signature capture. Pointer/touch drawing on a canvas, plus a
- * keyboard-accessible "type your signature" fallback (rendered to the same
- * canvas) so the field is completable without a pointing device. Emits a PNG
- * data URL on change.
+ * Signature capture. Pointer/touch drawing on a canvas, a keyboard-accessible
+ * "type your signature" fallback (rendered to the same canvas), and an opt-in
+ * image upload that transcodes to the same PNG shape — so every path emits
+ * exactly what the exporter can embed: `canvas.toDataURL('image/png')`.
  */
 export function SignaturePad({
   value,
@@ -24,18 +45,74 @@ export function SignaturePad({
   width = 440,
   height = 150,
   className,
+  allowUpload = false,
   'aria-label': ariaLabel = 'Signature',
 }: SignaturePadProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const drawing = useRef(false);
   const last = useRef<{ x: number; y: number } | null>(null);
   const [typed, setTyped] = useState(false);
   const [typedName, setTypedName] = useState('');
   const [hasInk, setHasInk] = useState(!!value);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  /*
+    Whether the canvas holds ink, tracked in a REF so `endStroke` reads it
+    synchronously. `hasInk` is React state set inside the pointer-move handler,
+    and a guard reading it back can see the pre-update value — a stroke ended in
+    the same tick it began would emit nothing and the signature would look drawn
+    but never reach the form. The ref is written the instant a line is drawn.
+  */
+  const ink = useRef(!!value);
+  /*
+    The last value THIS pad emitted, so the repaint effect below can tell its
+    own echo (parent state flowing straight back down) from a genuinely
+    external value — a saved signature arriving from an async session fetch, or
+    an "apply saved signature" action writing into the field. Repainting on the
+    echo would redraw mid-interaction for no reason; ignoring external values
+    was the old bug (a value arriving after mount never appeared).
+  */
+  const lastEmitted = useRef<string | null>(null);
 
   const ctx = useCallback(() => canvasRef.current?.getContext('2d') ?? null, []);
 
-  // Paint an incoming value (e.g. restored draft) onto the canvas once.
+  const emit = useCallback(
+    (dataUrl: string) => {
+      lastEmitted.current = dataUrl;
+      onChange(dataUrl);
+    },
+    [onChange],
+  );
+
+  /** Draw an image into the canvas, contain-fit and centred, replacing all ink. */
+  const paintImage = useCallback(
+    (img: CanvasImageSource & { width?: number; height?: number }, flattenWhite: boolean) => {
+      const c = canvasRef.current;
+      const context = ctx();
+      if (!c || !context) return;
+      context.clearRect(0, 0, c.width, c.height);
+      if (flattenWhite) {
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, c.width, c.height);
+      }
+      const iw = Number(img.width) || c.width;
+      const ih = Number(img.height) || c.height;
+      const scale = Math.min(c.width / iw, c.height / ih, 1);
+      const w = iw * scale;
+      const h = ih * scale;
+      context.drawImage(img, (c.width - w) / 2, (c.height - h) / 2, w, h);
+      ink.current = true;
+      setHasInk(true);
+    },
+    [ctx],
+  );
+
+  /*
+    Paint the incoming value whenever it changes from OUTSIDE — restored
+    drafts, the saved-signature prefill landing after an async session fetch,
+    or an apply action. Skips the pad's own echo, and never repaints under the
+    pen mid-stroke.
+  */
   useEffect(() => {
     const c = canvasRef.current;
     const context = ctx();
@@ -44,14 +121,23 @@ export function SignaturePad({
     context.lineCap = 'round';
     context.lineJoin = 'round';
     context.strokeStyle = '#181b19';
-    if (value && !hasInk) {
+    const v = value ?? '';
+    if (v === lastEmitted.current) return;
+    if (drawing.current) return;
+    if (v) {
       const img = new Image();
-      img.onload = () => context.drawImage(img, 0, 0);
-      img.src = value;
+      img.onload = () => paintImage(img, false);
+      img.src = v;
+      ink.current = true;
       setHasInk(true);
+    } else {
+      context.clearRect(0, 0, c.width, c.height);
+      ink.current = false;
+      setHasInk(false);
     }
+    lastEmitted.current = v;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [value]);
 
   function pointFromEvent(e: React.PointerEvent<HTMLCanvasElement>) {
     const rect = canvasRef.current!.getBoundingClientRect();
@@ -79,6 +165,7 @@ export function SignaturePad({
     context.lineTo(p.x, p.y);
     context.stroke();
     last.current = p;
+    ink.current = true;
     if (!hasInk) setHasInk(true);
   }
 
@@ -87,16 +174,18 @@ export function SignaturePad({
     drawing.current = false;
     last.current = null;
     const c = canvasRef.current;
-    if (c && hasInk) onChange(c.toDataURL('image/png'));
+    if (c && ink.current) emit(c.toDataURL('image/png'));
   }
 
   function clear() {
     const context = ctx();
     const c = canvasRef.current;
     if (context && c) context.clearRect(0, 0, c.width, c.height);
+    ink.current = false;
     setHasInk(false);
     setTypedName('');
-    onChange('');
+    setUploadError(null);
+    emit('');
   }
 
   function renderTyped(name: string) {
@@ -109,12 +198,53 @@ export function SignaturePad({
       context.font = "34px 'Spectral', Georgia, serif";
       context.textBaseline = 'middle';
       context.fillText(name, 16, height / 2);
+      ink.current = true;
       setHasInk(true);
-      onChange(c.toDataURL('image/png'));
+      emit(c.toDataURL('image/png'));
     } else {
+      ink.current = false;
       setHasInk(false);
-      onChange('');
+      emit('');
     }
+  }
+
+  /*
+    Upload path: the picked image is drawn contain-fit onto THIS canvas over a
+    flattened white background, then emitted as the canvas's own PNG — so an
+    uploaded 3MB photo leaves here as the same small `toDataURL('image/png')`
+    string a drawn signature does, and the exporter's PNG-only contract holds
+    without the server ever seeing the original file.
+  */
+  function onFilePicked(file: File | undefined) {
+    setUploadError(null);
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setUploadError('That file is not an image. Choose a photo or scan of your signature.');
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const c = canvasRef.current;
+      if (!c) return;
+      setTyped(false);
+      setTypedName('');
+      paintImage(img, true);
+      const dataUrl = c.toDataURL('image/png');
+      // Refuse over the shared cap here, not only server-side, so a noisy photo
+      // fails with a clear message instead of a confusing save error later.
+      if (bytesInDataUrl(dataUrl) > MAX_SIGNATURE_BYTES) {
+        setUploadError('That image is too detailed to store. Try a clearer photo or a smaller crop.');
+        return;
+      }
+      emit(dataUrl);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      setUploadError('That image could not be read. Try a PNG or JPEG.');
+    };
+    img.src = url;
   }
 
   return (
@@ -155,6 +285,12 @@ export function SignaturePad({
         />
       )}
 
+      {uploadError && (
+        <p role="alert" className="text-[13px] text-text-danger">
+          {uploadError}
+        </p>
+      )}
+
       <div className="flex items-center gap-3 text-[13px]">
         <button
           type="button"
@@ -167,6 +303,30 @@ export function SignaturePad({
           <Icon name={typed ? 'pen-line' : 'keyboard'} size={14} />
           {typed ? 'Draw instead' : 'Type instead'}
         </button>
+        {allowUpload && (
+          <>
+            <span className="text-text-disabled">·</span>
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              className="inline-flex items-center gap-1.5 font-semibold text-text-accent hover:underline"
+            >
+              <Icon name="image-up" size={14} />
+              Upload image
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              aria-label="Upload signature image"
+              className="hidden"
+              onChange={(e) => {
+                onFilePicked(e.target.files?.[0]);
+                e.target.value = '';
+              }}
+            />
+          </>
+        )}
         <span className="text-text-disabled">·</span>
         <button
           type="button"

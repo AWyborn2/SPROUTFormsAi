@@ -61,6 +61,19 @@ export interface SessionInfo extends TenantContext {
   orgName: string;
   userName: string;
   userEmail: string;
+  /**
+   * The person's saved signature — a PNG data URL — remembered from their last
+   * sign-off and prefilled at the next, so an assessor draws it once. Null until
+   * they have signed anything.
+   */
+  signature: string | null;
+  /**
+   * Whether the account has a password to re-enter. Invite-created users may
+   * have none — for them the client hides every "confirm with your password"
+   * affordance (applying a stored signature) rather than offering a prompt
+   * that can never succeed; drawing fresh stays available regardless.
+   */
+  hasPassword: boolean;
   /** Whether the org is a solo workspace ('individual') or a shared team ('team'). */
   accountKind: 'individual' | 'team';
   /** The org's branding kit; null when the org row could not be resolved. */

@@ -26,14 +26,18 @@ import {
   derivePartsFromStructure,
   findDurationColumn,
   inferKind,
+  logbookChoiceColumnsFor,
   logbookColumnsFor,
   movePart,
+  parseTaskMinimumHours,
   proposeCoverPointers,
   proposePartMarks,
   proposeProfilePrefill,
   proposeSignOff,
   setPathways,
+  taskMinimumsFromColumn,
   updatePart,
+  withTaskTargetHours,
 } from './builder-manifest.js';
 
 function field(over: Partial<FormField> & { id: string }): FormField {
@@ -94,6 +98,35 @@ describe('inferKind', () => {
         field({ id: 'open', type: 'repeating_group' }),
       ]),
     ).toBe('logbook');
+  });
+
+  it('reads a declaration from a CANDIDATE declaration with a signature', () => {
+    // An attestation, not an assessment — defaulting it to theory parked the
+    // hand-in for marking nobody could do.
+    expect(
+      inferKind([field({ id: 'sig', type: 'signature' })], 'Candidate’s Declaration'),
+    ).toBe('declaration');
+  });
+
+  it('never proposes declaration for the ASSESSOR block', () => {
+    /*
+      This paper prints an assessor declaration per part, and those are the
+      assessor's attestations — auto-completing one at the CANDIDATE's submit
+      would sign the assessor's block for them. Content alone cannot tell the
+      two apart (both are a signature and a date), so the word is required.
+    */
+    expect(
+      inferKind([field({ id: 'sig', type: 'signature' })], 'PART 2 Assessor Assessment Declaration'),
+    ).toBe('theory');
+  });
+
+  it('keeps keyed content theory whatever the heading says', () => {
+    expect(
+      inferKind(
+        [field({ id: 'sig', type: 'signature' }), { ...question('q1'), answerKey: ['a'] }],
+        'Candidate Declaration',
+      ),
+    ).toBe('theory');
   });
 });
 
@@ -198,6 +231,36 @@ describe('derivePartsFromStructure', () => {
     expect(logbookColumnsFor(parts[0]!, fields)).toEqual([{ key: 'duration', label: 'Hours' }]);
   });
 
+  it('a header-less (grouped) logbook section resolves and validates', () => {
+    /*
+      The General Items regression. Grouped into its own section, it has no
+      heading and so anchors on its table. The duration column must resolve from
+      that table — not read as "not a column of its table" — and the picker must
+      offer the table's own columns, not a neighbour's.
+    */
+    const fields = [
+      field({
+        id: 'tbl',
+        type: 'repeating_group',
+        columns: [
+          { key: 'date', label: 'Date', type: 'date' as const },
+          { key: 'duration', label: 'Duration', type: 'text' as const },
+        ],
+      }),
+    ];
+    const parts = updatePart(derive([section('gen', 'General items', ['tbl'])], fields), 'gen', {
+      minimumHours: 10,
+    });
+
+    expect(parts[0]!.startFieldId).toBe('tbl');
+    expect(parts[0]!.durationColumnKey).toBe('duration');
+    expect(logbookColumnsFor(parts[0]!, fields).map((c) => c.key)).toEqual(['date', 'duration']);
+    const problems = validateManifest(buildManifest(parts, []), fields);
+    expect(problems.filter((p) => /not a column of its table|no repeating table/.test(p))).toEqual(
+      [],
+    );
+  });
+
   it('skips a section the author has emptied', () => {
     // A part with no start field is not a part; declaring one produces a
     // manifest the validator rejects for a reason the author cannot see.
@@ -217,6 +280,25 @@ describe('derivePartsFromStructure', () => {
       [section('p1', 'Part 1', ['q1', 'q2'])],
       [question('q1'), question('q2')],
       [{ fieldId: 'q1', answerKey: ['a'], source: 'manual' }],
+    );
+    expect(parts[0]!.mandatoryFieldIds).toEqual(['q1']);
+  });
+
+  it('NEVER PROPOSES A MODEL KEY as mandatory', () => {
+    /*
+      A written question's model key (`answerKey: []` + `modelAnswer`) is a
+      row marking never reads. Proposing its question as mandatory would hand
+      `validateManifest` a mandatory question with no answer key the moment an
+      author types a model answer — a legitimate guide becoming a publish
+      blocker.
+    */
+    const parts = derive(
+      [section('p1', 'Part 1', ['q1', 'w1'])],
+      [question('q1'), field({ id: 'w1', type: 'textarea' })],
+      [
+        { fieldId: 'q1', answerKey: ['a'], source: 'manual' },
+        { fieldId: 'w1', answerKey: [], modelAnswer: 'The expected prose', source: 'manual' },
+      ],
     );
     expect(parts[0]!.mandatoryFieldIds).toEqual(['q1']);
   });
@@ -401,20 +483,110 @@ describe('the derived manifest passes the real validator', () => {
 });
 
 describe('logbookColumnsFor', () => {
-  it('offers the same columns the validator checks against', () => {
-    // The list an author picks from and the list validateManifest checks have
-    // to come from one slice, or the pick can fail validation.
-    const fields = [
-      field({ id: 'tbl', type: 'repeating_group', columns: [{ key: 'duration', label: 'Hours', type: 'text' as const }] }),
-    ];
-    expect(logbookColumnsFor({ startFieldId: 'tbl' }, fields)).toEqual([]);
+  const cols = [{ key: 'duration', label: 'Hours', type: 'text' as const }];
 
-    const withLead = [field({ id: 'lead' }), ...fields];
-    // The picker offers key + label only; the column's own type is not the
-    // author's choice here.
-    expect(logbookColumnsFor({ startFieldId: 'lead' }, withLead)).toEqual([
+  it('reads a header-less section’s own table — the one it anchors on', () => {
+    // A section an author built by grouping has no heading, so the part anchors
+    // on the table itself. The picker must still read THAT table's columns:
+    // skipping the anchor is what left General Items' Hours-column picker
+    // offering a neighbouring part's fields, with "Duration" absent.
+    const atTable = [field({ id: 'tbl', type: 'repeating_group', columns: cols })];
+    expect(logbookColumnsFor({ startFieldId: 'tbl' }, atTable)).toEqual([
       { key: 'duration', label: 'Hours' },
     ]);
+  });
+
+  it('reads the table that follows a section_header anchor', () => {
+    // The list an author picks from and the list validateManifest checks have
+    // to come from one slice, or the pick can fail validation.
+    const withHeader = [
+      field({ id: 'lead', type: 'section_header' }),
+      field({ id: 'tbl', type: 'repeating_group', columns: cols }),
+    ];
+    // The picker offers key + label only; the column's own type is not the
+    // author's choice here.
+    expect(logbookColumnsFor({ startFieldId: 'lead' }, withHeader)).toEqual([
+      { key: 'duration', label: 'Hours' },
+    ]);
+  });
+});
+
+describe('per-task minimum authoring', () => {
+  // The start field is the section header; fieldsInSection reads what FOLLOWS
+  // it, so the table sits after the header the part starts at.
+  const tableFields = (columns: NonNullable<FormField['columns']>): FormField[] => [
+    field({ id: 'h', type: 'section_header' }),
+    field({ id: 'tbl', type: 'repeating_group', columns }),
+  ];
+
+  describe('logbookChoiceColumnsFor', () => {
+    it('offers only columns that carry options — a target value must be pickable', () => {
+      const fields = tableFields([
+        { key: 'date', label: 'Date', type: 'date' },
+        { key: 'task', label: 'Task', type: 'dropdown', options: ['Topsoil', 'Gravel'] },
+        { key: 'duration', label: 'Duration', type: 'number' },
+      ]);
+      expect(logbookChoiceColumnsFor({ startFieldId: 'h' }, fields)).toEqual([
+        { key: 'task', label: 'Task', options: ['Topsoil', 'Gravel'] },
+      ]);
+    });
+
+    it('is empty when no column offers a choice', () => {
+      const fields = tableFields([{ key: 'note', label: 'Note', type: 'text' }]);
+      expect(logbookChoiceColumnsFor({ startFieldId: 'h' }, fields)).toEqual([]);
+    });
+  });
+
+  describe('parseTaskMinimumHours', () => {
+    it('reads the minimum a task label declares', () => {
+      expect(parseTaskMinimumHours('Overburden Removal – Topsoil (min 10 hours)')).toBe(10);
+      expect(parseTaskMinimumHours('Layer strip (minimum 7.5 hrs)')).toBe(7.5);
+    });
+
+    it('returns null for a label that declares none, or declares zero', () => {
+      expect(parseTaskMinimumHours('General items — coached exercise on each')).toBeNull();
+      expect(parseTaskMinimumHours('Something (min 0 hours)')).toBeNull();
+    });
+  });
+
+  describe('taskMinimumsFromColumn', () => {
+    it('prefills a target for each option whose label declares a minimum, skipping the rest', () => {
+      // The Scraper's shape: five hours-gated tasks and a coached "General
+      // items" that carries no minimum and gets no target.
+      const options = [
+        'Overburden Removal – Topsoil (min 10 hours)',
+        'Overburden Removal – Gravel (min 10 hours)',
+        'General items',
+      ];
+      expect(taskMinimumsFromColumn('task', options)).toEqual({
+        columnKey: 'task',
+        targets: [
+          { value: 'Overburden Removal – Topsoil (min 10 hours)', minimumHours: 10 },
+          { value: 'Overburden Removal – Gravel (min 10 hours)', minimumHours: 10 },
+        ],
+      });
+    });
+  });
+
+  describe('withTaskTargetHours', () => {
+    const base = { columnKey: 'task', targets: [{ value: 'Topsoil', minimumHours: 10 }] };
+    const options = ['Topsoil', 'Gravel', 'Rehabilitation'];
+
+    it('adds a target and keeps the column’s option order', () => {
+      const next = withTaskTargetHours(base, options, 'Rehabilitation', 8);
+      expect(next.targets).toEqual([
+        { value: 'Topsoil', minimumHours: 10 },
+        { value: 'Rehabilitation', minimumHours: 8 },
+      ]);
+      // Gravel (no target) stays out; Rehabilitation follows Topsoil because
+      // that is the option order, not the edit order.
+    });
+
+    it('clears a target set to zero, blank (NaN) or negative — never an unmeetable minimum', () => {
+      expect(withTaskTargetHours(base, options, 'Topsoil', 0).targets).toEqual([]);
+      expect(withTaskTargetHours(base, options, 'Topsoil', Number.NaN).targets).toEqual([]);
+      expect(withTaskTargetHours(base, options, 'Topsoil', -3).targets).toEqual([]);
+    });
   });
 });
 
@@ -586,7 +758,127 @@ describe('proposePartMarks', () => {
     expect(marks.outcomeSatisfactory).toBeUndefined();
   });
 
+  it('pairs two printed boxes — a tick in whichever box speaks', () => {
+    /*
+      The two-field shape: "☐ Satisfactory ☐ Not Satisfactory" as separate
+      cells. `true` in the NEGATIVE box, never `false` in the positive one — a
+      ✗ beside "Satisfactory" with an empty partner reads as both and neither.
+    */
+    const marks = proposePartMarks([
+      f('yes-box', 'Satisfactory'),
+      f('no-box', 'Not Satisfactory'),
+    ]);
+
+    expect(marks.outcomeSatisfactory).toEqual({ fieldId: 'yes-box', value: true });
+    expect(marks.outcomeNotSatisfactory).toEqual({ fieldId: 'no-box', value: true });
+  });
+
+  it('pairs the sentence-labelled two-field shape, curly apostrophe and all', () => {
+    // Extraction reads the paper's own punctuation; a straight-quote-only
+    // pattern silently missed every real "Candidate's".
+    const marks = proposePartMarks([
+      f('yes-box', 'The Candidate’s responses were: Satisfactory'),
+      f('no-box', 'The Candidate’s responses were: Not Satisfactory'),
+    ]);
+
+    expect(marks.outcomeSatisfactory).toEqual({ fieldId: 'yes-box', value: true });
+    expect(marks.outcomeNotSatisfactory).toEqual({ fieldId: 'no-box', value: true });
+  });
+
+  it('refuses two boxes where neither is the negative', () => {
+    // Two positives is the ambiguity the exactly-one rule exists for.
+    const marks = proposePartMarks([
+      f('a', 'Satisfactory'),
+      f('b', 'Satisfactory'),
+    ]);
+
+    expect(marks.outcomeSatisfactory).toBeUndefined();
+  });
+
+  it('refuses a two-field pair whose boxes cannot carry a mark', () => {
+    const marks = proposePartMarks([
+      f('yes-box', 'Satisfactory', 'textarea'),
+      f('no-box', 'Not Satisfactory'),
+    ]);
+
+    expect(marks.outcomeSatisfactory).toBeUndefined();
+  });
+
   it('proposes nothing for a section that prints neither', () => {
     expect(proposePartMarks([f('q', 'Manoeuvres the dozer safely')])).toEqual({});
+  });
+});
+
+/**
+ * Mapping the printed methods checklist to the parts whose completion it
+ * records. The fixtures are the real paper's own hazards: a heading typo
+ * ("OBSERVATON") that defeats word matching, and a declaration part sharing
+ * its number with the part it declares for.
+ */
+describe('proposePartCompletionMarks', () => {
+  const methodsTable = {
+    id: 'methods',
+    label: 'Assessment Methods used (check all that apply)',
+    type: 'repeating_group' as const,
+    fixedRows: [
+      '1. Theory',
+      '2. Practical Demonstration',
+      '3. Direct Observation Log',
+      '4. Minimal Supervision Practical Assessment',
+    ],
+    columns: [
+      { key: 'method', label: 'Method', type: 'text' as const },
+      { key: 'used', label: 'Used', type: 'checkbox' as const },
+    ],
+  };
+  const PARTS = [
+    { key: 'p1', label: 'PART 1 - THEORY' },
+    { key: 'p2', label: 'PART 2 - PRACTICAL DEMONSTRATION' },
+    { key: 'p2d', label: 'PART 2 Assessor Assessment Declaration' },
+    { key: 'p3', label: 'PART 3 - DIRECT OBSERVATON LOG' },
+  ];
+
+  it('maps each part to its numbered row, typo and declaration collision included', async () => {
+    const { proposePartCompletionMarks } = await import('./builder-manifest.js');
+    const marks = proposePartCompletionMarks(PARTS, [methodsTable]);
+
+    expect(marks).toEqual([
+      { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'used' },
+      { partKey: 'p2', fieldId: 'methods', rowIndex: 1, columnKey: 'used' },
+      { partKey: 'p3', fieldId: 'methods', rowIndex: 2, columnKey: 'used' },
+    ]);
+    // The declaration part shares number 2 and no words with the row — it
+    // must not steal or duplicate the practical's tick.
+    expect(marks.some((m) => m.partKey === 'p2d')).toBe(false);
+  });
+
+  it('proposes nothing from a table matching fewer than two parts', async () => {
+    const { proposePartCompletionMarks } = await import('./builder-manifest.js');
+
+    expect(
+      proposePartCompletionMarks([PARTS[0]!], [methodsTable]),
+    ).toEqual([]);
+  });
+
+  it('proposes nothing from a multi-answer-column table', async () => {
+    const { proposePartCompletionMarks } = await import('./builder-manifest.js');
+    const twoColumns = {
+      ...methodsTable,
+      columns: [
+        ...methodsTable.columns,
+        { key: 'na', label: 'N/A', type: 'checkbox' as const },
+      ],
+    };
+
+    expect(proposePartCompletionMarks(PARTS, [twoColumns])).toEqual([]);
+  });
+
+  it('reaches the built manifest', async () => {
+    const { buildManifest, derivePartsFromStructure } = await import('./builder-manifest.js');
+    void derivePartsFromStructure;
+    const manifest = buildManifest([], [methodsTable]);
+    // No parts derived → nothing to map; the property stays absent rather
+    // than empty, like every other unproposed pointer.
+    expect(manifest.partCompletionMarks).toBeUndefined();
   });
 });

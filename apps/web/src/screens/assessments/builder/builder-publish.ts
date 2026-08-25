@@ -30,14 +30,133 @@ import { resolveStructure } from './builder-structure.js';
 import {
   isSelfAnswering,
   linkOutcomeTargets,
+  markingCompositionWarnings,
+  unplacedMarkDestinations,
   validateAnswerKeys,
   validateManifest,
   type AssessmentToolManifest,
   type BuilderStructure,
   type DraftAnswerKey,
+  type ExtractionResult,
+  type FieldGeometry,
   type OutcomeTarget,
   type FormField,
 } from '@formai/shared';
+
+/**
+ * The printed references, keyed by field id, read back off the extraction the
+ * draft keeps whole.
+ *
+ * `questionRef` lives on the EXTRACTED field, never on `FormField` — the same
+ * split as `coverSection` — so the builder resolves links by carrying the refs
+ * BESIDE the fields, exactly as the keys travel until publish merges them on.
+ * Field ids survive `seedFields`, which is what makes the join safe. A revision
+ * draft has no extraction and gets an empty map: its links fall through to the
+ * author's own choices and the adjacency tier, as before.
+ */
+export function extractionQuestionRefs(
+  extraction: Pick<ExtractionResult, 'fields'> | null | undefined,
+): Map<string, string> {
+  const refs = new Map<string, string>();
+  for (const field of extraction?.fields ?? []) {
+    if (field.questionRef) refs.set(field.id, field.questionRef);
+  }
+  return refs;
+}
+
+/**
+ * The manifest a REVISION republishes: the seeded tool's manifest with the
+ * builder's derivation overlaid.
+ *
+ * The seeded copy carries what the builder does not model — `profilePrefill`,
+ * `prerequisiteChecks`, `fieldDefaults`, workflow customisations layered on
+ * after creation — and a republish that sent only the derived manifest would
+ * silently shed them (the republish schema names them for exactly this
+ * moment). Derived keys win where both exist: parts, pathways and pointers
+ * are what the author is here to edit. Undefined derived keys are stripped
+ * first, so an absence in the derivation can never erase a seeded value.
+ *
+ * TWO EXCEPTIONS, when `fields` is given: `partCompletionMarks` and the
+ * sign-off block. Publish DERIVES both from printed labels, so the plain
+ * overlay re-guessed them on every revision — which was fine while the guess
+ * was the only writer, and wrong the moment the workflow editor let an author
+ * repoint them: a republish would silently clobber a configured mapping with
+ * a fresh guess. So a seeded entry that still RESOLVES against the revision's
+ * fields wins over the derivation, and one whose target vanished falls back
+ * (or is dropped, for the pathway map nothing derives) rather than blocking
+ * the republish on a ghost id.
+ */
+export function composeRevisionManifest(
+  seeded: AssessmentToolManifest,
+  derived: AssessmentToolManifest,
+  fields?: readonly FormField[],
+): AssessmentToolManifest {
+  const overlay = Object.fromEntries(
+    Object.entries(derived).filter(([, value]) => value !== undefined),
+  );
+  const merged = { ...seeded, ...overlay } as AssessmentToolManifest;
+  if (!fields) return merged;
+  const byId = new Map(fields.map((f) => [f.id, f]));
+
+  const resolvedSeededMarks = (seeded.partCompletionMarks ?? []).filter((mark) => {
+    const field = byId.get(mark.fieldId);
+    return (
+      field?.type === 'repeating_group' &&
+      mark.rowIndex < (field.fixedRows?.length ?? 0) &&
+      (field.columns ?? []).some((c) => c.key === mark.columnKey) &&
+      merged.parts.some((p) => p.key === mark.partKey)
+    );
+  });
+  if (resolvedSeededMarks.length > 0) merged.partCompletionMarks = resolvedSeededMarks;
+
+  if (seeded.signOff) {
+    // Per-key graft: each seeded pointer wins where its field still exists,
+    // so one renamed box costs one pointer, never the whole block.
+    const next = { ...(merged.signOff ?? {}) };
+    const pointerKeys = ['assessorNameFieldId', 'assessorSignatureFieldId', 'signedDateFieldId'] as const;
+    for (const key of pointerKeys) {
+      const id = seeded.signOff[key];
+      if (id && byId.has(id)) next[key] = id;
+    }
+    const markKeys = [
+      'overallSatisfactory',
+      'overallNotSatisfactory',
+      'moreCoachingRequiredYes',
+      'moreCoachingRequiredNo',
+    ] as const;
+    for (const key of markKeys) {
+      const mark = seeded.signOff[key];
+      if (mark && byId.has(mark.fieldId)) next[key] = mark;
+    }
+    merged.signOff = next;
+  }
+
+  if (seeded.pathwayMarks) {
+    const kept = Object.fromEntries(
+      Object.entries(seeded.pathwayMarks).filter(([, mark]) => mark && byId.has(mark.fieldId)),
+    ) as AssessmentToolManifest['pathwayMarks'];
+    if (kept && Object.keys(kept).length > 0) merged.pathwayMarks = kept;
+    else delete merged.pathwayMarks;
+  }
+
+  // The parts' verdict pairs, per part: a seeded mark whose box still exists
+  // beats the fresh label-guess, exactly like the sign-off block above.
+  merged.parts = merged.parts.map((p) => {
+    const seededPart = seeded.parts.find((sp) => sp.key === p.key);
+    if (!seededPart) return p;
+    const keep = (mark: AssessmentToolManifest['parts'][number]['outcomeSatisfactory']) =>
+      mark && byId.has(mark.fieldId) ? mark : undefined;
+    const yes = keep(seededPart.outcomeSatisfactory);
+    const no = keep(seededPart.outcomeNotSatisfactory);
+    return {
+      ...p,
+      ...(yes ? { outcomeSatisfactory: yes } : {}),
+      ...(no ? { outcomeNotSatisfactory: no } : {}),
+    };
+  });
+
+  return merged;
+}
 
 /**
  * Put the draft's answer keys and the resolved outcome links onto the version's
@@ -58,25 +177,40 @@ import {
 export function resolvePublishFields(
   fields: readonly FormField[],
   keys: readonly DraftAnswerKey[],
+  /**
+   * Printed references by field id, from `extractionQuestionRefs`. The refs are
+   * merged onto the fields' linkable view only — never written to the fields —
+   * because `questionRef` is extraction metadata, not part of the published
+   * shape. Absent (a revision draft, a caller predating the wiring), every
+   * question falls through to the author's own choice and the adjacency tier.
+   */
+  refs?: ReadonlyMap<string, string>,
 ): { fields: FormField[]; unlinked: string[]; inferred: string[] } {
-  const linked = linkOutcomeTargets(fields);
+  const linkable = refs?.size
+    ? fields.map((f) => {
+        const ref = refs.get(f.id);
+        return ref ? { ...f, questionRef: ref } : f;
+      })
+    : fields;
+  const linked = linkOutcomeTargets(linkable);
   const targetByQuestion = new Map(linked.links.map((l) => [l.questionId, l.outcomeId]));
   const keyById = new Map(keys.map((k) => [k.fieldId, k]));
   const unlinked: string[] = [];
   const inferred: string[] = [];
 
   /*
-    THE PRINTED-REFERENCE ROUTE CANNOT FIRE IN THIS BUILDER, and that is why a
-    third tier exists.
+    THE PRINTED-REFERENCE ROUTE FIRES ONLY WHEN THE CALLER PASSES THE REFS, and
+    that is why a third tier exists.
 
     `linkOutcomeTargets` pairs a question with its ✓/✗ box by the `questionRef`
     both carry. That reference lives on the EXTRACTED field — `FormField` has no
-    such property, and `seedFields` does not copy it — so every question is
-    skipped and the map above is always empty here. The import-review screen
-    keeps the reference in its own side-table and resolves links there; the
-    assessment builder never had an equivalent.
+    such property — so the builder resolves it by handing this function the refs
+    read back off the extraction the draft keeps whole (`extractionQuestionRefs`),
+    mirroring how the import-review screen keeps the reference in its own
+    side-table. A box the extraction missed, an author-added field, or a revision
+    draft (which has no extraction) carries no ref and falls through.
 
-    The visible consequence was that "Automatic — from the printed reference"
+    Before the refs were wired through, "Automatic — from the printed reference"
     resolved nothing, on every question, and a thirty-question paper failed
     publish thirty times over with "no outcome box to write its mark into". The
     only way through was to pick all thirty by hand from a list of thirty
@@ -97,9 +231,40 @@ export function resolvePublishFields(
     return next && isSelfAnswering(next.type) ? next.id : undefined;
   };
 
-  const next = fields.map((field, index) => {
+  /*
+    THE DRAFT KEY ROWS ARE THE SINGLE SOURCE OF TRUTH for what they own —
+    `answerKey` and `modelAnswer` — so those are STRIPPED off every field
+    first and re-applied only from rows. Without the strip, a revision-seeded
+    field (which carries the published copy verbatim) republished it after the
+    author CLEARED the key or guide in the draft: clearing deleted only the
+    row, the untouched field returned here as-is, and the builder showed a
+    question unguided while quietly republishing the old answer underneath.
+
+    Exactly the two row-owned properties, nothing wider: `outcomeTarget` is a
+    placement the author may have set by hand (the tier below deliberately
+    lets it win), and `answerHint` never travels on a key row — stripping
+    either would change what an untouched draft publishes. A from-scratch
+    draft's fields never carry these two, and a revision seed creates a row
+    for every field that does (`keysFromFields`), so present-row output is
+    byte-identical to before.
+  */
+  const next = fields.map((raw, index) => {
+    let field = raw;
+    if (raw.answerKey !== undefined || raw.modelAnswer !== undefined) {
+      const { answerKey: _seededKey, modelAnswer: _seededModel, ...rest } = raw;
+      field = rest;
+    }
     const key = keyById.get(field.id);
-    if (!key || key.answerKey.length === 0) return field;
+    /*
+      A MODEL KEY IS A KEY ROW TOO. A written question's draft key carries
+      `answerKey: []` and the assessor's `modelAnswer` prose — it publishes
+      onto the field like a key does, and its outcome target resolves through
+      the SAME tiers, because the target means the same thing on both kinds:
+      the box the mark lands in. The only difference is who writes the mark.
+    */
+    const hasKey = !!key && key.answerKey.length > 0;
+    const hasModel = !!key?.modelAnswer;
+    if (!key || (!hasKey && !hasModel)) return field;
 
     // An existing outcomeTarget on the field wins: it may have been authored
     // explicitly, and a resolved link should not overwrite a decision.
@@ -112,13 +277,25 @@ export function resolvePublishFields(
       }
     }
     if (!target) {
-      unlinked.push(field.id);
-      return field;
+      /*
+        Targetless splits by kind, because the validators split by kind. A KEY
+        with nowhere to land is refused (`validateAnswerKeys` rejects it — a
+        computed mark that never reaches the page reads as a question nobody
+        answered). A MODEL ANSWER with nowhere to land still publishes: it is
+        a marking aid the assessor reads, the validator accepts it targetless,
+        and the assessor's tick simply has no declared cell on this paper.
+      */
+      if (hasKey) {
+        unlinked.push(field.id);
+        return field;
+      }
+      return { ...field, modelAnswer: key.modelAnswer! };
     }
 
     return {
       ...field,
-      answerKey: [...key.answerKey],
+      ...(hasKey ? { answerKey: [...key.answerKey] } : {}),
+      ...(hasModel ? { modelAnswer: key.modelAnswer! } : {}),
       outcomeTarget: typeof target === 'string' ? { fieldId: target } : target,
     };
   });
@@ -142,6 +319,28 @@ export interface PublishCheck {
    * something to spot-check.
    */
   inferred: string[];
+  /**
+   * Auto-mark destinations with no drawable box — the ✓/✗ cells, verdict
+   * pairs and sign-off boxes whose marks would compute and print NOWHERE.
+   * Warnings, never gates: the tool still assesses and certifies correctly,
+   * only the printed record is incomplete, and the exporter's own safe
+   * failure (silence) is exactly why it has to be said here.
+   */
+  unplaced: string[];
+  /**
+   * Fields whose boxes were CARRIED across a PDF replacement and never
+   * re-confirmed. Warnings, never gates (R8): the field simply prints
+   * nowhere until placed, and the silence has to be said here because the
+   * exporter's safe failure is exactly that silence.
+   */
+  carried: string[];
+  /**
+   * Marking compositions that will misbehave at runtime — an auto-locked
+   * verdict pair beside untargeted Yes/No boxes (auto-fails hand-ins), a
+   * written question's mark addressed at a table cell (untickable on the
+   * marking pass). Warnings, never gates: the shared validator's own contract.
+   */
+  warnings: string[];
   fields: FormField[];
 }
 
@@ -176,10 +375,14 @@ export function checkPublish(
    * the flat list.
    */
   structure?: BuilderStructure,
+  /** The revision's carried-but-unconfirmed stash, when there is one. */
+  carriedGeometry?: Record<string, FieldGeometry>,
+  /** Printed references by field id (`extractionQuestionRefs`), for the link tier. */
+  refs?: ReadonlyMap<string, string>,
 ): PublishCheck {
   const arranged = structure && structure.length > 0 ? resolveStructure(structure, fields) : null;
   const ordered = arranged ? arranged.fields : fields;
-  const resolved = resolvePublishFields(ordered, keys);
+  const resolved = resolvePublishFields(ordered, keys, refs);
 
   const problems: string[] = [];
 
@@ -212,10 +415,17 @@ export function checkPublish(
     );
   }
 
+  const carried = Object.keys(carriedGeometry ?? {}).map(
+    (id) => fields.find((f) => f.id === id)?.label ?? id,
+  );
+
   return {
     problems,
     unlinked: resolved.unlinked,
     inferred: resolved.inferred,
+    unplaced: manifest ? unplacedMarkDestinations(manifest, resolved.fields) : [],
+    carried,
+    warnings: manifest ? markingCompositionWarnings(manifest, resolved.fields) : [],
     fields: resolved.fields,
   };
 }
@@ -226,6 +436,12 @@ export interface PublishSummary {
   questionsKeyed: number;
   questionsVerified: number;
   boxesPlaced: number;
+  /**
+   * Written questions publishing with a model answer. Present only when there
+   * ARE any, so a choice-only draft's summary is byte-identical to before the
+   * kind existed — the same absent-means-today rule every draft shape follows.
+   */
+  writtenGuided?: number;
 }
 
 export function publishSummary(
@@ -233,12 +449,17 @@ export function publishSummary(
   keys: readonly DraftAnswerKey[],
   manifest: AssessmentToolManifest | null,
 ): PublishSummary {
+  const writtenGuided = keys.filter((k) => k.answerKey.length === 0 && k.modelAnswer).length;
   return {
     parts: manifest?.parts.length ?? 0,
+    // Keys only — a model key (`answerKey: []`) is a guide a person marks
+    // against, and counting it "keyed" would claim auto-marking it never does.
     questionsKeyed: keys.filter((k) => k.answerKey.length > 0).length,
     // Verified is reported SEPARATELY from keyed, because an unverified key
     // still marks — the distinction is the attestation, not the behaviour.
+    // It spans both kinds: a model key's attestation is the same claim.
     questionsVerified: keys.filter((k) => k.verifiedAt).length,
     boxesPlaced: fields.reduce((n, f) => n + (f.geometry?.segments.length ?? 0), 0),
+    ...(writtenGuided > 0 ? { writtenGuided } : {}),
   };
 }

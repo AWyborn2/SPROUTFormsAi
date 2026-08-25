@@ -1,6 +1,6 @@
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Badge, Button, Card, Icon, useToast } from '@formai/ui';
+import { Badge, Button, Card, Icon, Input, SignaturePad, useToast } from '@formai/ui';
 import {
   PROFILE_FIELDS,
   isTerminalCaseState,
@@ -14,12 +14,22 @@ import {
   useMyProfileMembership,
   useProfile,
   useProfileSeed,
+  useRenewCompetency,
   useSaveProfile,
+  useSaveSignature,
   useSession,
   useTaxonomy,
 } from '../../lib/data/hooks.js';
+import { ApiError } from '../../lib/data/api-client.js';
 import { CaseStateBadge } from '../statusBadges.js';
-import type { HeldCompetencyRow, MemberProfile, ProfileAccess, ProfileSeedResponse } from '../../lib/data/types.js';
+import { RecommendedTrainingList } from '../recommended-training.js';
+import { sourcesLine } from '../../lib/competency-sources.js';
+import type {
+  HeldCompetencyRow,
+  MemberProfile,
+  ProfileAccess,
+  ProfileSeedResponse,
+} from '../../lib/data/types.js';
 
 /* ── View-model types ─────────────────────────────────────────────────────── */
 
@@ -301,8 +311,26 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
 
   const { profile, access, userId } = data;
   const role = (session.data?.role ?? 'candidate') as string;
+  /*
+    A candidate on their OWN record gets the focused layout: their details, the
+    competencies they hold, and the assessments waiting on them. The placement
+    and documents machinery is the organisation's bookkeeping — rendering it to
+    the person it is about only buried the three answers they came for.
+  */
   const candidateSelf = access.isSubject && role === 'candidate';
   const canEdit = access.editableFields.length > 0;
+  /*
+    Who may RENEW a held competency here — re-date a lapsed licence and file the
+    new evidence. It re-grants, so it takes the register's own authoring tier
+    (owner/admin/assessor), AND the evidence attach is an edit of this record, so
+    it needs edit access on a record that is not the caller's own. A candidate
+    fixing their own licence goes the replacement route, which waits for
+    approval; this is the assessor unblocking a sign-off.
+  */
+  const canRenewCompetencies =
+    canEdit &&
+    !access.isSubject &&
+    ['owner', 'admin', 'assessor'].includes(session.data?.role ?? '');
 
   return (
     <ProfileContent
@@ -313,6 +341,7 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
       role={role}
       candidateSelf={candidateSelf}
       canEdit={canEdit}
+      canRenewCompetencies={canRenewCompetencies}
       editing={editing}
       setEditing={setEditing}
       seedFrom={seedFrom}
@@ -329,6 +358,7 @@ function ProfileContent({
   role,
   candidateSelf,
   canEdit,
+  canRenewCompetencies,
   editing,
   setEditing,
   seedFrom,
@@ -341,6 +371,7 @@ function ProfileContent({
   role: string;
   candidateSelf: boolean;
   canEdit: boolean;
+  canRenewCompetencies: boolean;
   editing: boolean;
   setEditing: (v: boolean) => void;
   seedFrom: string | undefined;
@@ -409,7 +440,9 @@ function ProfileContent({
                 <CompetencyRegister
                   rows={vm.register}
                   membershipId={membershipId}
+                  userId={userId}
                   role={role}
+                  canRenew={canRenewCompetencies}
                 />
               ) : (
                 <WithheldCard title="Competencies" />
@@ -435,6 +468,16 @@ function ProfileContent({
             <div className="flex flex-col gap-4">
               {candidateSelf && <MyAssessmentsCard />}
 
+              {/*
+                OWN RECORD ONLY. The signature is a users-level value — one mark
+                across every organisation the person works for — shown here
+                because "my record" is where a person manages what is theirs. An
+                admin viewing a MEMBER record must not see or edit it: the
+                profile permission matrix governs org-scoped profile fields and
+                is the wrong gate for a product-wide personal mark.
+              */}
+              {access.isSubject && <MySignatureCard />}
+
               <NextBadgeCard
                 badges={vm.badges}
                 role={role}
@@ -442,6 +485,11 @@ function ProfileContent({
               />
 
               <TrainingActions actions={vm.actions} role={role} />
+
+              {/* Recommended-but-unheld, on the candidate's OWN record only
+                  (U7, R12): the held tier already shows through the register
+                  above. */}
+              {candidateSelf && <RecommendedCard />}
 
               <TrainingTimeline events={vm.timeline} />
             </div>
@@ -464,15 +512,6 @@ function ProfileContent({
             </span>
           </span>
         </div>
-
-        {canEdit && !editing && (
-          <div className="flex justify-center">
-            <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
-              <Icon name="pencil" size={14} />
-              Edit details
-            </Button>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -728,12 +767,18 @@ function statusTextColor(status: string): string {
 function CompetencyRegister({
   rows,
   membershipId,
+  userId,
   role,
+  canRenew,
 }: {
   rows: HeldCompetencyRow[];
   membershipId: string | undefined;
+  userId: string;
   role: string;
+  canRenew: boolean;
 }) {
+  const { toast } = useToast();
+
   if (rows.length === 0) {
     return (
       <Card className="p-5">
@@ -770,6 +815,8 @@ function CompetencyRegister({
             const standingColor =
               r.standing === 'required' ? 'var(--accent)' : 'var(--text-tertiary)';
             const expiryWarn = r.status === 'expiring' || r.status === 'grace';
+            const needsRenewal =
+              r.status === 'expired' || r.status === 'expiring' || r.status === 'grace';
             return (
               <Fragment key={r.competencyId}>
                 <div className="border-b border-border-subtle py-2.5">
@@ -778,6 +825,18 @@ function CompetencyRegister({
                   <span className="font-medium" style={{ color: standingColor }}>
                     {r.standing}
                   </span>
+                  {/*
+                    WHERE the obligation comes from (R5, U8): one comma-joined
+                    line, "and" before the last — "Required — from Boddington,
+                    Operations and Dozer Operator"; org-scope reads "org-wide".
+                    Absent where the API withheld sources (the viewer gate) or
+                    nothing names the entry — no line beats a false one.
+                  */}
+                  {sourcesLine(r.standing, r.sources) && (
+                    <span className="block text-[11px] text-text-tertiary">
+                      {sourcesLine(r.standing, r.sources)}
+                    </span>
+                  )}
                 </div>
                 <div className="border-b border-border-subtle py-2.5">
                   <span
@@ -824,6 +883,16 @@ function CompetencyRegister({
                     <span className="text-[12px] leading-7 text-text-disabled">&mdash;</span>
                   )}
                 </div>
+                {/* Renew — re-date a lapsed ticket and file the new evidence — for
+                    a reader with the authority, on someone else's record. */}
+                {canRenew && needsRenewal && (
+                  <div
+                    className="border-b border-border-subtle pb-2.5 pt-1"
+                    style={{ gridColumn: '1 / -1' }}
+                  >
+                    <RenewControl row={r} userId={userId} />
+                  </div>
+                )}
               </Fragment>
             );
           })}
@@ -1093,6 +1162,150 @@ function MyAssessmentsCard() {
   );
 }
 
+/**
+ * The person's saved signature — their digital ID (U4).
+ *
+ * Draw or upload once here; signing surfaces offer to APPLY it, gated by a
+ * password confirmation at that moment. The preview shows exactly what will
+ * print on an exported record, because the stored value IS the PNG the
+ * exporter embeds. Editing replaces; Remove clears both the mark and the
+ * deliberate-save marker, returning the account to remember-on-sign-off.
+ */
+function MySignatureCard() {
+  const session = useSession();
+  const save = useSaveSignature();
+  const { toast } = useToast();
+  const [editing, setEditing] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [password, setPassword] = useState('');
+  const saved = session.data?.signature ?? null;
+  /*
+    Changing or clearing an EXISTING saved mark is a step-up act — clearing it
+    is the one move that would disarm the sign-off password gate — so it takes
+    the password. The first save, and accounts with no password, stay ungated
+    (the server enforces the same rule).
+  */
+  const needsPassword = Boolean(saved && session.data?.hasPassword);
+
+  const reset = () => {
+    setEditing(false);
+    setRemoving(false);
+    setDraft('');
+    setPassword('');
+  };
+
+  const persist = (signature: string | null, done: string) => {
+    save.mutate(
+      { signature, ...(needsPassword ? { password } : {}) },
+      {
+        onSuccess: () => {
+          reset();
+          toast({ variant: 'success', message: done });
+        },
+        onError: (err) => {
+          const code = err instanceof ApiError ? (err.body as { error?: unknown } | null)?.error : null;
+          const message =
+            code === 'invalid_credentials'
+              ? 'That password is not right. Try again.'
+              : code === 'too_many_attempts'
+                ? 'Too many attempts. Wait a few minutes and try again.'
+                : code === 'too_large'
+                  ? 'That signature image is too large. Try a smaller one.'
+                  : code === 'not_png_data_url'
+                    ? 'That signature could not be saved. It must be a PNG image.'
+                    : 'That signature could not be saved. Check your connection and try again.';
+          toast({ variant: 'danger', message });
+        },
+      },
+    );
+  };
+
+  const passwordField = needsPassword && (
+    <Input
+      type="password"
+      value={password}
+      onChange={(e) => setPassword(e.target.value)}
+      aria-label="Your password"
+      placeholder="Your password"
+      className="max-w-[240px]"
+    />
+  );
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="font-heading text-[15px] font-bold">My signature</h3>
+          <p className="mt-0.5 text-[12.5px] text-text-tertiary">
+            Saved once, applied when you sign — you confirm with your password each time it is used.
+          </p>
+        </div>
+        {saved && !editing && !removing && (
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
+              Replace
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={save.isPending}
+              onClick={() => (needsPassword ? setRemoving(true) : persist(null, 'Saved signature removed.'))}
+            >
+              Remove
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {removing ? (
+        <div className="mt-3 flex max-w-[460px] flex-col gap-2">
+          <p className="text-[12.5px] text-text-secondary">
+            Enter your password to remove your saved signature.
+          </p>
+          {passwordField}
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={!password || save.isPending}
+              onClick={() => persist(null, 'Saved signature removed.')}
+            >
+              Remove signature
+            </Button>
+            <Button size="sm" variant="ghost" onClick={reset}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : saved && !editing ? (
+        <div className="mt-3 inline-block rounded-lg border border-border-strong bg-surface-card p-2">
+          <img src={saved} alt="Your saved signature" className="h-[75px] max-w-full" />
+        </div>
+      ) : (
+        <div className="mt-3 flex max-w-[460px] flex-col gap-2">
+          <SignaturePad value={draft} onChange={setDraft} allowUpload aria-label="Your signature" />
+          {editing && passwordField}
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              disabled={!draft || (needsPassword && !password) || save.isPending}
+              onClick={() => persist(draft, 'Signature saved to your profile.')}
+            >
+              Save signature
+            </Button>
+            {editing && (
+              <Button size="sm" variant="ghost" onClick={reset}>
+                Cancel
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function SeedBanner({ submissionId }: { submissionId: string }) {
   const { data } = useProfileSeed(submissionId);
   if (!data) return null;
@@ -1339,6 +1552,157 @@ function PlacementCard({ membershipId }: { membershipId: string }) {
         ))}
       </div>
     </Card>
+  );
+}
+
+/**
+ * Renew ONE held competency from the profile — the dead-end a sign-off hits when
+ * a prerequisite reads "expired" and the licence has since been renewed.
+ *
+ * Collapsed to a "Renew" link until opened, like the register's record-by-hand
+ * control. Two moves, either or both: a new expiry date re-dates the holding so
+ * the prerequisite it gates passes again, and an evidence file records the
+ * renewed licence against the same holding. At least one is required — an empty
+ * renewal would toast nothing done.
+ */
+function RenewControl({ row, userId }: { row: HeldCompetencyRow; userId: string }) {
+  const { toast } = useToast();
+  const renew = useRenewCompetency({
+    competencyId: row.competencyId,
+    userId,
+    holderId: row.holderId,
+  });
+  const [open, setOpen] = useState(false);
+  const [expires, setExpires] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  function reset() {
+    setExpires('');
+    setFile(null);
+    setProgress(null);
+    setOpen(false);
+  }
+
+  function onRenew() {
+    if (!expires && !file) {
+      toast({ variant: 'warning', message: 'Set a new expiry date, attach evidence, or both.' });
+      return;
+    }
+    renew.mutate(
+      {
+        // End of day, so a licence stays valid THROUGH its printed expiry date
+        // instead of lapsing the midnight that date begins — the same rule the
+        // register's grant-by-hand uses.
+        ...(expires ? { expiresAt: `${expires}T23:59:59.000Z` } : {}),
+        evidenceFile: file,
+        onProgress: setProgress,
+      },
+      {
+        onSuccess: () => {
+          toast({ variant: 'success', message: `Renewed ${row.name}.` });
+          reset();
+        },
+        onError: () => {
+          setProgress(null);
+          toast({ variant: 'danger', message: 'Could not renew this competency.' });
+        },
+      },
+    );
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="fai-chip-btn inline-flex w-fit items-center gap-1 rounded-sm text-[11px] font-medium text-text-accent hover:underline"
+      >
+        <Icon name="refresh-cw" size={12} />
+        Renew
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-border-subtle pt-2.5">
+      <Input
+        label="New expiry date"
+        type="date"
+        value={expires}
+        onChange={(e) => setExpires(e.target.value)}
+      />
+      <div>
+        <span className="block text-[12px] font-medium text-text-secondary">
+          Evidence (optional)
+        </span>
+        <div className="mt-1 flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => fileRef.current?.click()}
+            disabled={renew.isPending}
+          >
+            {file ? 'Change file' : 'Attach file'}
+          </Button>
+          {file && (
+            <span className="min-w-0 truncate text-[11.5px] text-text-tertiary">{file.name}</span>
+          )}
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,application/pdf"
+            className="sr-only"
+            tabIndex={-1}
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          />
+        </div>
+      </div>
+      <p className="text-[11px] text-text-tertiary">
+        Set the new expiry so the prerequisite passes again, and attach the renewed licence as
+        evidence. PNG, JPG, WebP or PDF, up to 10 MB.
+      </p>
+      {progress !== null && progress < 100 && (
+        <div className="h-1.5 overflow-hidden rounded-pill bg-surface-card">
+          {/* Scaled, not widened — `transform` composites where animating
+              `width` re-runs layout on every progress tick. */}
+          <div
+            className="h-full w-full origin-left bg-accent transition-transform duration-base"
+            style={{ transform: `scaleX(${Math.min(Math.max(progress / 100, 0), 1)})` }}
+          />
+        </div>
+      )}
+      <div className="flex gap-2">
+        <Button size="sm" onClick={onRenew} disabled={renew.isPending || (!expires && !file)}>
+          {renew.isPending ? 'Renewing…' : 'Renew'}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={reset} disabled={renew.isPending}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * What the candidate's Roles RECOMMEND that they do not yet hold (U7, R12) —
+ * the shared `RecommendedTrainingList` owns the hooks, the unheld filter and
+ * the rows; this wrapper is only the profile's card chrome.
+ */
+function RecommendedCard() {
+  return (
+    <RecommendedTrainingList
+      row="li"
+      render={(rows) => (
+        <Card className="p-5">
+          <h3 className="font-ui text-sm font-semibold">Recommended for your roles</h3>
+          <p className="mt-1 text-[12px] text-text-tertiary">
+            Worth holding for the roles you carry — never required, and never counted against you.
+          </p>
+          <ul className="mt-3 flex flex-col gap-1.5">{rows}</ul>
+        </Card>
+      )}
+    />
   );
 }
 

@@ -1,16 +1,18 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button, Icon } from '@formai/ui';
-import { ASSESSMENT_PATHWAYS, type AssessmentPathway } from '@formai/shared';
-import { CaseStateBadge } from '../statusBadges.js';
+import { ASSESSMENT_PATHWAYS, type AssessmentPathway, pathwayFromHistory } from '@formai/shared';
+import { CaseStatusCell } from '../statusBadges.js';
 import type { AssessmentToolSummary } from '../../lib/data/assessments.js';
 import {
   useAssessmentCases,
   useAssessmentTools,
   useCreateAssessmentCase,
+  useHeldCompetencies,
   useMembers,
   useSession,
 } from '../../lib/data/hooks.js';
+import { useStartRevision } from './builder/use-start-revision.js';
 
 /**
  * Assessment cases.
@@ -34,6 +36,9 @@ export function AssessmentCasesScreen() {
   const { data: cases, isLoading, error } = useAssessmentCases();
   const { data: tools } = useAssessmentTools();
   const [creating, setCreating] = useState(false);
+  const revision = useStartRevision();
+  /** Which tool the revision_draft_exists dialog is about — discard restarts it. */
+  const revisionToolIdRef = useRef<string | null>(null);
 
   const isCandidate = session?.role === 'candidate';
 
@@ -107,21 +112,99 @@ export function AssessmentCasesScreen() {
           <span className="font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
             Assessment workflows
           </span>
-          <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+          <div className="flex flex-col gap-1">
             {tools.map((t) => (
-              <Link
-                key={t.id}
-                to={`/app/assessments/tools/${t.id}/workflow`}
-                className="inline-flex items-center gap-1.5 text-[13px] font-medium text-text-accent hover:underline"
-              >
-                <Icon name="workflow" size={13} />
-                {t.name}
-              </Link>
+              <div key={t.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <Link
+                  to={`/app/assessments/tools/${t.id}/workflow`}
+                  className="inline-flex items-center gap-1.5 text-[13px] font-medium text-text-accent hover:underline"
+                >
+                  <Icon name="workflow" size={13} />
+                  {t.name}
+                </Link>
+                {/*
+                  The revision path (R1): re-enter the builder seeded from the
+                  published tool — never a rebuild, never a re-extract. The
+                  button pends while the seed composes its reads; a tool that
+                  already has a revision draft answers with a resume-or-discard
+                  dialog rather than overwriting it.
+                */}
+                <button
+                  type="button"
+                  disabled={revision.pendingToolId !== null}
+                  onClick={() => {
+                    revisionToolIdRef.current = t.id;
+                    void revision.start(t.id);
+                  }}
+                  className="inline-flex items-center gap-1 text-[11.5px] font-medium text-text-tertiary hover:text-text-accent disabled:opacity-50"
+                >
+                  {revision.pendingToolId === t.id ? (
+                    <Icon name="loader-circle" size={11} className="animate-spin" />
+                  ) : (
+                    <Icon name="git-branch" size={11} />
+                  )}
+                  Start revision
+                </button>
+              </div>
             ))}
           </div>
           <span className="text-[11.5px] text-text-tertiary">
-            Set who fills each section, and the order the work happens in.
+            Set who fills each section, and the order the work happens in — or start a revision to
+            update a tool without rebuilding it.
           </span>
+          {revision.error && (
+            <p role="alert" className="text-[11.5px] text-danger">
+              {revision.error}
+            </p>
+          )}
+        </div>
+      )}
+
+      {revision.existing && (
+        <div
+          role="alertdialog"
+          aria-label="A revision draft already exists"
+          className="flex flex-col gap-2 rounded-md border border-warning bg-warning-soft p-4"
+        >
+          <span className="text-[13.5px] font-semibold text-warning-text">
+            This tool already has a revision in progress
+          </span>
+          <p className="text-[12.5px] leading-relaxed text-warning-text">
+            “{revision.existing.name}”
+            {revision.existing.savedByName ? ` — last saved by ${revision.existing.savedByName}` : ''}
+            {' on '}
+            {revision.existing.updatedAt.slice(0, 10)}. A tool has one revision draft at a time, so
+            a second cannot be started while this one exists.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" leadingIcon="play" onClick={revision.resumeExisting}>
+              Resume that revision
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              leadingIcon="trash-2"
+              onClick={() => {
+                // Named consequence before the destructive arm: discarding
+                // deletes that draft's revision work; the published tool is
+                // unaffected either way.
+                const toolId = revisionToolIdRef.current;
+                if (
+                  toolId &&
+                  window.confirm(
+                    `Discard “${revision.existing?.name}”? This deletes that draft's revision work — re-confirmed boxes, edits, everything. The published tool is unaffected.`,
+                  )
+                ) {
+                  void revision.discardAndRestart(toolId);
+                }
+              }}
+            >
+              Discard it and start fresh
+            </Button>
+            <Button size="sm" variant="ghost" onClick={revision.dismissExisting}>
+              Cancel
+            </Button>
+          </div>
         </div>
       )}
 
@@ -168,7 +251,13 @@ export function AssessmentCasesScreen() {
                     )}
                     <td className="p-[11px_14px] text-text-secondary">{PATHWAY_LABELS[c.pathway]}</td>
                     <td className="p-[11px_14px]">
-                      <CaseStateBadge state={c.state} />
+                      <CaseStatusCell
+                        state={c.state}
+                        awaitingAssessor={c.awaitingAssessor}
+                        currentPartLabel={c.currentPartLabel}
+                        currentPartIndex={c.currentPartIndex}
+                        requiredPartCount={c.requiredPartCount}
+                      />
                     </td>
                     <td className="p-[11px_14px] text-text-tertiary">
                       {new Date(c.createdAt).toLocaleDateString()}
@@ -222,9 +311,37 @@ function NewCaseForm({
   const [locationId, setLocationId] = useState('');
   const [rplJustification, setRplJustification] = useState('');
   const [error, setError] = useState<string | null>(null);
+  /*
+    Whether the assessor has chosen the pathway by hand. A manual choice wins
+    until they pick a different candidate or tool, when a fresh suggestion from
+    the new candidate's history is due.
+  */
+  const [pathwayOverridden, setPathwayOverridden] = useState(false);
 
+  const tool = tools.find((t) => t.id === toolId);
   /** The organisation's Locations, offered as a closed list (R77). */
-  const locations = tools.find((t) => t.id === toolId)?.locations ?? [];
+  const locations = tool?.locations ?? [];
+
+  /*
+    SUGGEST THE PATHWAY FROM THE CANDIDATE'S RECORD. A candidate who already
+    holds — or has held — the competency this tool grants has operated the plant
+    before, so `experienced` (the shorter path) fits; a first-timer takes the
+    full assessment. Only a suggestion: the box stays editable, and a manual
+    choice is never overwritten. `/held/:userId` already excludes revoked grants.
+  */
+  const held = useHeldCompetencies(candidateUserId || undefined);
+  const holdsAwarded =
+    !!tool && !!held.data && tool.awardedCompetencyIds.some((id) => held.data!.some((c) => c.competencyId === id));
+
+  // A new candidate or tool is a fresh decision — drop any prior manual override.
+  useEffect(() => {
+    setPathwayOverridden(false);
+  }, [candidateUserId, toolId]);
+
+  useEffect(() => {
+    if (pathwayOverridden || !candidateUserId || !tool || !held.data) return;
+    setPathway(pathwayFromHistory(tool.awardedCompetencyIds, held.data.map((c) => c.competencyId)));
+  }, [pathwayOverridden, candidateUserId, tool, held.data]);
 
   async function submit() {
     setError(null);
@@ -295,7 +412,11 @@ function NewCaseForm({
           <select
             id="nc-pathway"
             value={pathway}
-            onChange={(e) => setPathway(e.target.value as AssessmentPathway)}
+            onChange={(e) => {
+              // A hand-picked pathway is the assessor's call — stop suggesting.
+              setPathwayOverridden(true);
+              setPathway(e.target.value as AssessmentPathway);
+            }}
             className={`${field} mt-1`}
           >
             {ASSESSMENT_PATHWAYS.map((p) => (
@@ -303,9 +424,11 @@ function NewCaseForm({
             ))}
           </select>
           <p className="mt-1 text-xs text-text-tertiary">
-            {pathway === 'new'
-              ? 'All six parts, including both logbooks.'
-              : 'Theory and the first practical demonstration only.'}
+            {candidateUserId && !pathwayOverridden && held.data
+              ? holdsAwarded
+                ? 'Suggested from their record — they already hold this competency. Change it if you know better.'
+                : 'Suggested from their record — no prior record of this competency. Change it if you know better.'
+              : 'Sets which parts the candidate completes. RPL waives the logged-hours parts and records why.'}
           </p>
         </div>
 

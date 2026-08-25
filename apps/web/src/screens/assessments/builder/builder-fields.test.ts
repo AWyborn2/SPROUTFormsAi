@@ -12,7 +12,9 @@ import type { BuilderStructure, DraftAnswerKey, FormField } from '@formai/shared
 import {
   addField,
   deleteField,
+  duplicateSection,
   mergeIntoDescription,
+  mergeRepeatingTable,
   nextAddedId,
   renameField,
   setOutcomeTarget,
@@ -331,5 +333,244 @@ describe('setOutcomeTarget', () => {
 
     expect(next.fields.find((f) => f.id === 'q1')!.outcomeTarget).toBeUndefined();
     expect(next.keys).toEqual([]);
+  });
+});
+
+describe('duplicateSection', () => {
+  /*
+    The paper this exists for: the Scraper prints ONE practical checklist with
+    a column per stage where the Dozer printed three copies. The webform wants
+    three parts, so the section duplicates and each copy re-bands its column.
+  */
+  const GEOMETRY = {
+    segments: [{ page: 3, x: 40, y: 100, width: 500, height: 300, pageWidth: 595, pageHeight: 842 }],
+  };
+
+  function stagedState(): FieldEditState {
+    const fields = [
+      field({ id: 'hdr', type: 'section_header', label: 'Practical checklist' }),
+      field({ id: 'q1', type: 'radio', options: ['a', 'b'], geometry: GEOMETRY, outcomeTarget: { fieldId: 'o1' } }),
+      field({ id: 'o1', type: 'check_cross', geometry: GEOMETRY }),
+      field({ id: 'outside', type: 'check_cross' }),
+    ];
+    return {
+      fields,
+      structure: [
+        {
+          key: 'sec1',
+          label: 'Part 2 — Practical',
+          cols: 2,
+          headerFieldId: 'hdr',
+          fields: [{ id: 'q1', span: 2 }, { id: 'o1' }],
+        },
+        { key: 'sec2', label: 'Elsewhere', cols: 1, fields: [{ id: 'outside' }] },
+      ],
+      keys: [{ fieldId: 'q1', answerKey: ['a'], source: 'manual' }],
+      excluded: new Set(['o1']),
+    };
+  }
+
+  it('clones the header and every field under fresh added-N ids', () => {
+    const next = duplicateSection(stagedState(), 'sec1');
+
+    // Originals untouched, three clones appended (header + two fields).
+    expect(next.fields.map((f) => f.id)).toEqual([
+      'hdr', 'q1', 'o1', 'outside', 'added-1', 'added-2', 'added-3',
+    ]);
+    // Built, not imported: the paper never had a second copy of these boxes.
+    expect(next.fields.slice(4).every((f) => f.source === 'built')).toBe(true);
+  });
+
+  it('inserts the copy right after the original, ids mapped and label marked', () => {
+    const next = duplicateSection(stagedState(), 'sec1');
+
+    expect(next.structure.map((s) => s.label)).toEqual([
+      'Part 2 — Practical', 'Part 2 — Practical (copy)', 'Elsewhere',
+    ]);
+    const copy = next.structure[1]!;
+    expect(copy.key).not.toBe('sec1');
+    expect(copy.headerFieldId).toBe('added-1');
+    // Arrangement metadata survives — span rides along under the new id.
+    expect(copy.fields).toEqual([{ id: 'added-2', span: 2 }, { id: 'added-3' }]);
+    expect(copy.cols).toBe(2);
+  });
+
+  it('COPIES GEOMETRY VERBATIM, as its own object', () => {
+    /*
+      Verbatim is the point: every copy maps the SAME printed grid, and each
+      copy's tables are then trimmed to that stage's column in PDF mapping.
+      Its own object, because re-banding the copy must not move the original.
+    */
+    const next = duplicateSection(stagedState(), 'sec1');
+
+    const original = next.fields.find((f) => f.id === 'q1')!;
+    const clone = next.fields.find((f) => f.id === 'added-2')!;
+    expect(clone.geometry).toEqual(original.geometry);
+    expect(clone.geometry).not.toBe(original.geometry);
+  });
+
+  it('remaps an outcome target INSIDE the section to the copied twin', () => {
+    // q1 → o1 becomes added-2 → added-3: the copy marks its own verdict box,
+    // not the original's.
+    const next = duplicateSection(stagedState(), 'sec1');
+
+    expect(next.fields.find((f) => f.id === 'added-2')!.outcomeTarget).toEqual({ fieldId: 'added-3' });
+  });
+
+  it('DROPS an outcome target pointing outside the section', () => {
+    /*
+      Two questions writing one printed cell would overdraw each other's
+      verdicts — the copy loses the link rather than sharing the box.
+    */
+    const base = stagedState();
+    base.fields = base.fields.map((f) =>
+      f.id === 'q1' ? { ...f, outcomeTarget: { fieldId: 'outside' } } : f,
+    );
+
+    const next = duplicateSection(base, 'sec1');
+
+    expect(next.fields.find((f) => f.id === 'q1')!.outcomeTarget).toEqual({ fieldId: 'outside' });
+    expect(next.fields.find((f) => f.id === 'added-2')!.outcomeTarget).toBeUndefined();
+  });
+
+  it('does NOT clone answer keys', () => {
+    // A key's verification is a person's attestation on ONE field. The copy
+    // starts unkeyed and gets keyed on its own.
+    const next = duplicateSection(stagedState(), 'sec1');
+
+    expect(next.keys).toEqual([{ fieldId: 'q1', answerKey: ['a'], source: 'manual' }]);
+  });
+
+  it('mirrors exclusions, so a turned-off original does not come back on as its copy', () => {
+    const next = duplicateSection(stagedState(), 'sec1');
+
+    expect(next.excluded.has('o1')).toBe(true);
+    expect(next.excluded.has('added-3')).toBe(true);
+    expect(next.excluded.has('added-2')).toBe(false);
+  });
+
+  it('numbers clones past added-N ids already in the draft', () => {
+    const base = stagedState();
+    base.fields = [...base.fields, field({ id: 'added-7', source: 'built' })];
+
+    const next = duplicateSection(base, 'sec1');
+
+    expect(next.structure[1]!.headerFieldId).toBe('added-8');
+  });
+
+  it('does nothing for a section that is not there', () => {
+    const before = stagedState();
+    const next = duplicateSection(before, 'ghost');
+
+    expect(next.fields).toHaveLength(before.fields.length);
+    expect(next.structure).toHaveLength(2);
+  });
+});
+
+describe('mergeRepeatingTable', () => {
+  /*
+    The paper this exists for: extraction breaks ONE printed checklist across a
+    page or batch boundary into two `repeating_group` tables — the same columns,
+    the rest of the rows. The author needs the stray table's rows back in the
+    first AS FIXED (locked) rows, not the ad-hoc, candidate-editable rows that
+    re-adding them on a fill surface would make.
+  */
+  function checklist(id: string, rows: string[]): FormField {
+    return field({
+      id,
+      type: 'repeating_group',
+      columns: [
+        { key: 'item', label: 'ITEM', type: 'text' },
+        { key: 'ok', label: 'OK', type: 'check_cross' },
+      ],
+      fixedRows: rows,
+    });
+  }
+
+  function twoTables(): FieldEditState {
+    const fields = [
+      checklist('a', ['Service brake', 'Transmission lock']),
+      checklist('b', ['Differential lock', 'Bowl lever']),
+    ];
+    return {
+      fields,
+      structure: [
+        { key: 's1', label: 'Controls', cols: 1, fields: [{ id: 'a' }] },
+        { key: 's2', label: 'Stray', cols: 1, fields: [{ id: 'b' }] },
+      ],
+      keys: [],
+      excluded: new Set(),
+    };
+  }
+
+  it('appends the source’s rows to the target, in printed order', () => {
+    const next = mergeRepeatingTable(twoTables(), 'b', 'a');
+    expect(next.fields.find((f) => f.id === 'a')!.fixedRows).toEqual([
+      'Service brake',
+      'Transmission lock',
+      'Differential lock',
+      'Bowl lever',
+    ]);
+  });
+
+  it('removes the source table from the field list AND the arrangement', () => {
+    const next = mergeRepeatingTable(twoTables(), 'b', 'a');
+    expect(next.fields.some((f) => f.id === 'b')).toBe(false);
+    expect(next.structure.flatMap((s) => s.fields.map((f) => f.id))).toEqual(['a']);
+  });
+
+  it('leaves the target’s own columns in place — the moved rows adopt them', () => {
+    // Only the LABELS move; the target keeps its columns and answer set, which
+    // is what makes the merge robust whatever keys extraction gave each table.
+    const next = mergeRepeatingTable(twoTables(), 'b', 'a');
+    expect(next.fields.find((f) => f.id === 'a')!.columns?.map((c) => c.key)).toEqual(['item', 'ok']);
+  });
+
+  it('cleans up the source’s references, via the one delete that knows them', () => {
+    const base = twoTables();
+    base.keys = [{ fieldId: 'b', answerKey: ['x'], source: 'manual' }];
+    base.excluded = new Set(['b']);
+    const next = mergeRepeatingTable(base, 'b', 'a');
+    expect(next.keys).toEqual([]);
+    expect(next.excluded.has('b')).toBe(false);
+  });
+
+  it('refuses when the source has no fixed rows — an open table has none to move', () => {
+    const base = twoTables();
+    base.fields = base.fields.map((f) => (f.id === 'b' ? { ...f, fixedRows: undefined } : f));
+    const next = mergeRepeatingTable(base, 'b', 'a');
+    expect(next.fields.some((f) => f.id === 'b')).toBe(true);
+    expect(next.fields.find((f) => f.id === 'a')!.fixedRows).toEqual([
+      'Service brake',
+      'Transmission lock',
+    ]);
+  });
+
+  it('refuses when the target is not a checklist — nowhere for the labels to join', () => {
+    const base = twoTables();
+    base.fields = base.fields.map((f) => (f.id === 'a' ? { ...f, fixedRows: undefined } : f));
+    expect(mergeRepeatingTable(base, 'b', 'a').fields.some((f) => f.id === 'b')).toBe(true);
+  });
+
+  it('refuses when either side is not a repeating group', () => {
+    const base = twoTables();
+    base.fields = [checklist('a', ['x']), field({ id: 'b', type: 'text' })];
+    expect(mergeRepeatingTable(base, 'b', 'a').fields.some((f) => f.id === 'b')).toBe(true);
+  });
+
+  it('refuses to merge a table into itself', () => {
+    const before = twoTables();
+    const next = mergeRepeatingTable(before, 'a', 'a');
+    expect(next.fields).toHaveLength(2);
+    expect(next.fields.find((f) => f.id === 'a')!.fixedRows).toEqual([
+      'Service brake',
+      'Transmission lock',
+    ]);
+  });
+
+  it('does nothing when a table is not there', () => {
+    const before = twoTables();
+    expect(mergeRepeatingTable(before, 'ghost', 'a').fields).toHaveLength(2);
+    expect(mergeRepeatingTable(before, 'b', 'ghost').fields).toHaveLength(2);
   });
 });

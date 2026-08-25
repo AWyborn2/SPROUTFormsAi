@@ -62,6 +62,8 @@ function setup(over: Partial<StructurePanelProps> = {}) {
     onRenameSection: vi.fn(),
     onSetColumns: vi.fn(),
     onToggleOwnPage: vi.fn(),
+    onDissolve: vi.fn(),
+    onDuplicate: vi.fn(),
     onMoveField: vi.fn(),
     onCycleSpan: vi.fn(),
     onSetFieldType: vi.fn(),
@@ -71,6 +73,7 @@ function setup(over: Partial<StructurePanelProps> = {}) {
     onDeleteField: vi.fn(),
     onFoldField: vi.fn(),
     onPatchField: vi.fn(),
+    onMergeTable: vi.fn(),
     ...over,
   };
   return { props, ...render(<StructurePanel {...props} />) };
@@ -183,19 +186,77 @@ describe('StructurePanel', () => {
     expect(screen.queryByText(/selected/)).toBeNull();
   });
 
+  it('bulk-deletes the ticked fields and clears the selection', () => {
+    const onDeleteField = vi.fn();
+    setup({ onDeleteField });
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select Candidate name' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select Employee ID' }));
+    fireEvent.click(screen.getByRole('button', { name: /Delete fields/ }));
+
+    expect(onDeleteField).toHaveBeenCalledTimes(2);
+    expect(onDeleteField).toHaveBeenCalledWith('a');
+    expect(onDeleteField).toHaveBeenCalledWith('b');
+    expect(screen.queryByText(/selected/)).toBeNull();
+  });
+
+  it('bulk-moves the ticked fields to the chosen section, in arrangement order', () => {
+    const onMoveField = vi.fn();
+    setup({ onMoveField });
+    expand('Candidate declaration');
+
+    // Ticked in REVERSE order — the move must still follow the arrangement.
+    fireEvent.click(screen.getByRole('button', { name: 'Select Employee ID' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select Candidate name' }));
+    fireEvent.change(screen.getByLabelText('Move selected fields to section'), {
+      target: { value: 's2' },
+    });
+
+    expect(onMoveField.mock.calls).toEqual([
+      ['a', 's2', null, false],
+      ['b', 's2', null, false],
+    ]);
+    expect(screen.queryByText(/selected/)).toBeNull();
+  });
+
+  it('bulk-deletes the ticked sections', () => {
+    const onDissolve = vi.fn();
+    setup({ onDissolve });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select section Candidate declaration' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select section Part 2 — Practical' }));
+    expect(screen.getByText('2 sections selected')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Delete sections/ }));
+
+    expect(onDissolve.mock.calls).toEqual([['s1'], ['s2']]);
+    expect(screen.queryByText(/selected/)).toBeNull();
+  });
+
+  it('reports fields and sections together when both are ticked', () => {
+    setup();
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select Candidate name' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select section Part 2 — Practical' }));
+
+    expect(screen.getByText('1 field · 1 section selected')).toBeTruthy();
+  });
+
   describe('the type palette', () => {
     it('offers what the shared guard allows, not a list of its own', () => {
-      // `typeOptionsFor` on a scalar returns the authorable types only — no
-      // repeating_group, checkbox_group or boolean_yes_no, each of which needs
-      // payload only extraction can supply.
+      // `typeOptionsFor` on a scalar returns every authorable type — including
+      // Checkbox group, which a retype seeds with options — and withholds only
+      // the table, whose columns extraction alone supplies.
       setup();
       expand('Candidate declaration');
       fireEvent.click(screen.getByRole('button', { name: 'Change type of Candidate name' }));
 
       expect(screen.getByRole('button', { name: /Date/ })).toBeTruthy();
       expect(screen.getByRole('button', { name: /Paragraph/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /Checkbox group/ })).toBeTruthy();
       expect(screen.queryByRole('button', { name: /Repeating table/ })).toBeNull();
-      expect(screen.queryByRole('button', { name: /Checkbox group/ })).toBeNull();
     });
 
     it('OFFERS CHECK / CROSS, WHICH IS WHAT AN OUTCOME BOX IS', () => {
@@ -302,6 +363,26 @@ describe('StructurePanel', () => {
     setup({ structure: [{ ...STRUCTURE[0]!, ownPage: true }] });
 
     expect(screen.getByText('Own page')).toBeTruthy();
+  });
+
+  it('deletes a section', () => {
+    const onDissolve = vi.fn();
+    setup({ onDissolve });
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByLabelText('Delete section Candidate declaration'));
+
+    expect(onDissolve).toHaveBeenCalledWith('s1');
+  });
+
+  it('disables delete on the last remaining section', () => {
+    // `dissolveSection` would no-op anyway; the disabled button says so.
+    setup({ structure: [STRUCTURE[0]!] });
+    expand('Candidate declaration');
+
+    expect(
+      (screen.getByLabelText('Delete section Candidate declaration') as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it('renames a section', () => {
@@ -507,6 +588,60 @@ describe('column editing', () => {
         ],
       }),
     );
+  });
+});
+
+/*
+  The fixed (locked) rows of a checklist, editable through the same shared
+  inspector. Extraction mangles the ROWS the same ways it mangles columns — a
+  garbled item, a missed one, the wrong order — and until this there was no way
+  to correct one.
+*/
+describe('checklist rows', () => {
+  it('edits the fixed rows through the shared inspector', () => {
+    const { props } = setup();
+    expand('Part 2 — Practical');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit columns of Pre-start checks' }));
+
+    expect(screen.getByText('Checklist rows')).toBeTruthy();
+    expect((screen.getByLabelText('Checklist row 1') as HTMLInputElement).value).toBe('Oil');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add row' }));
+    expect(props.onPatchField).toHaveBeenCalledWith('tbl', { fixedRows: ['Oil', ''] });
+  });
+});
+
+/*
+  Merging a mis-split checklist. Extraction breaks one printed checklist into two
+  tables; this sends a stray table's rows into another checklist as fixed rows
+  and removes it. Offered only where there IS another checklist to merge into.
+*/
+describe('merging checklist tables', () => {
+  const TWO_TABLES: FormField[] = [
+    field({ id: 'ctrl', label: 'Operational controls', type: 'repeating_group', fixedRows: ['Service brake'] }),
+    field({ id: 'stray', label: 'Unnamed checklist', type: 'repeating_group', fixedRows: ['Differential lock'] }),
+  ];
+  const TWO_STRUCT: BuilderStructure = [
+    { key: 'p', label: 'Part 4 — Practical', cols: 1, fields: [{ id: 'ctrl' }, { id: 'stray' }] },
+  ];
+
+  it('offers no merge when a checklist stands alone', () => {
+    setup();
+    expand('Part 2 — Practical');
+    expect(
+      screen.queryByRole('button', { name: 'Merge Pre-start checks into another table' }),
+    ).toBeNull();
+  });
+
+  it('merges a stray table into the one the author picks', () => {
+    const { props } = setup({ fields: TWO_TABLES, structure: TWO_STRUCT });
+    expand('Part 4 — Practical');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Merge Unnamed checklist into another table' }));
+    // The menu lists the OTHER checklist as a target, not itself.
+    fireEvent.click(screen.getByRole('button', { name: 'Operational controls' }));
+
+    expect(props.onMergeTable).toHaveBeenCalledWith('stray', 'ctrl');
   });
 });
 

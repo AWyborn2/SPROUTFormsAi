@@ -84,8 +84,32 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
   );
 
   /*
+    WRITTEN = a prose answer somebody types. `text`/`textarea` with no matching
+    sides — a matching question extracted as `text` is matching, not written,
+    and gets the pair builder below. Written questions carry a MODEL ANSWER
+    (the assessor's marking guide, `FormField.modelAnswer`) instead of a key,
+    and the guide is opt-in: an empty one is ordinary furniture.
+  */
+  const isMatchingHere = (f: FormField): boolean => {
+    const extracted = extractedById.get(f.id);
+    return (
+      !f.notMatching &&
+      (isMatchingQuestion(f.options) || (!!extracted && hasAnyMatchSide(extracted)))
+    );
+  };
+  const isWritten = (f: FormField): boolean =>
+    (f.type === 'text' || f.type === 'textarea') && !isMatchingHere(f);
+
+  /*
     A question is anything with options — OR a matching question the extraction
-    found, which by contract has NONE.
+    found, which by contract has NONE — OR a WRITTEN question.
+
+    Written questions appear so their model answers can be authored HERE, on
+    the one step that already owns answers, attestations and mark destinations.
+    A verdict-flagged written field is deliberately absent rather than shown
+    with "nothing to key": a written verdict is assessor prose ("comments"),
+    and a card for it would ask the author to write a marking guide for the
+    marker's own words.
 
     THE SECOND HALF IS NOT AN EXTRA CASE, IT IS THE FEATURE. The extraction tool
     schema tells the model, for a matching question, to "leave options empty:
@@ -109,6 +133,7 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
       fields.filter((f) => {
         if (excluded.has(f.id)) return false;
         if (isChoiceField(f.type) && (f.options?.length ?? 0) > 0) return true;
+        if ((f.type === 'text' || f.type === 'textarea') && !f.assessorVerdict) return true;
         const extracted = extractedById.get(f.id);
         return !!extracted && hasAnyMatchSide(extracted);
       }),
@@ -126,9 +151,21 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
     and a genuinely unkeyed question hides among a dozen that were never
     keyable.
   */
-  const keyable = questions.filter((q) => !q.assessorVerdict);
+  /*
+    WRITTEN QUESTIONS NEVER ENTER THE KEYED DENOMINATOR. Keying is what the
+    machine marks; a model answer is a guide a PERSON marks against, and it is
+    opt-in besides — counting written questions keyable would make "N of M
+    keyed" incompletable on every paper with a prose question, which is the
+    verdict-counting failure over again. The guided count is its own clause.
+
+    Verification spans BOTH kinds: a written key row is attestable exactly like
+    a keyed one, and the attestation means the same thing on each.
+  */
+  const keyable = questions.filter((q) => !q.assessorVerdict && !isWritten(q));
+  const written = questions.filter((q) => !q.assessorVerdict && isWritten(q));
   const keyed = keyable.filter((q) => keyById.has(q.id)).length;
-  const verified = keyable.filter((q) => keyById.get(q.id)?.verifiedAt).length;
+  const guided = written.filter((q) => keyById.get(q.id)?.modelAnswer).length;
+  const verified = questions.filter((q) => keyById.get(q.id)?.verifiedAt).length;
 
   if (questions.length === 0) {
     return (
@@ -146,8 +183,11 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
         <span className="min-w-0 flex-1">
           <span className="block text-[14.5px] font-semibold">Answer key</span>
           <span className="mt-0.5 block text-[11.5px] text-text-tertiary">
-            {keyed} of {keyable.length} keyed · {verified} verified · marking is an exact set —
-            the candidate must select every listed answer and nothing else
+            {keyed} of {keyable.length} keyed · {verified} verified
+            {guided > 0 &&
+              ` · ${guided} written question${guided === 1 ? ' has' : 's have'} model answers`}
+            {' · '}marking is an exact set — the candidate must select every listed answer and
+            nothing else
           </span>
         </span>
         <span
@@ -160,7 +200,12 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
         >
           <span
             className="block h-full rounded-full bg-accent"
-            style={{ width: `${Math.round((keyed / questions.length) * 100)}%` }}
+            // Over the KEYABLE count, the same denominator the text reports —
+            // written questions in the list would otherwise cap the bar short
+            // of full on a paper whose every choice question is keyed.
+            style={{
+              width: `${keyable.length > 0 ? Math.round((keyed / keyable.length) * 100) : 0}%`,
+            }}
           />
         </span>
       </div>
@@ -181,9 +226,40 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
           only the first left a freshly-extracted matching question labelled as
           a one-answer question and offered a type dropdown that cannot express
           it.
+
+          `notMatching` is the author's override for the reverse mistake — an
+          ordinary multiple-choice the extraction FALSE-read as matching. It
+          wins outright, because the whole point of it is to reach the type and
+          keying controls this flag otherwise hides.
         */
-        const matching = isMatchingQuestion(question.options) || (!!extracted && hasAnyMatchSide(extracted));
+        const matching = isMatchingHere(question);
+        /*
+          A written card is the model-answer surface and NOTHING else that a
+          choice card offers: no type dropdown (retyping prose to a choice is
+          not an answer-key decision), no hint (hints belong to the interactive
+          quiz, which written questions never enter), no matching conversion.
+          What it keeps is what means the same thing on both kinds — the
+          verified attestation and the "Mark lands in" destination, which for a
+          written question is the box the ASSESSOR ticks after judging.
+        */
+        const written = (question.type === 'text' || question.type === 'textarea') && !matching;
         const open = pairingFor === question.id;
+
+        /*
+          "Not a matching question" — the escape hatch for a false positive.
+          Retype to a plain one-answer question (which clears any stale key and
+          reconciles options), flag it so the match signals stop firing, and
+          recover the choices from the prompt side the extraction read, since on
+          a mis-read multiple-choice that side IS the option list.
+        */
+        const stopMatching = () => {
+          const recovered = extracted?.matchLeft ?? [];
+          draft.structureOps.setFieldType(question.id, 'radio');
+          draft.fieldOps.patch(question.id, {
+            notMatching: true,
+            ...(recovered.length >= 2 ? { options: [...recovered] } : {}),
+          });
+        };
 
         return (
           <div key={question.id} className="rounded-[14px] border border-border bg-surface-card p-4">
@@ -200,11 +276,20 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
               <span className="min-w-0 flex-1">
                 <span className="block text-[12.5px] font-semibold">{question.label}</span>
                 <span className="mt-0.5 block text-[11px] text-text-tertiary">
-                  {matching ? 'Matching' : (question.selectionType === 'multiple' ? 'Several answers' : 'One answer')}
-                  {' · '}
-                  {question.options?.length ?? 0} option
-                  {(question.options?.length ?? 0) === 1 ? '' : 's'}
-                  {key ? ` · ${key.answerKey.length} keyed` : ' · not keyed'}
+                  {written ? (
+                    // No option count and no "not keyed": a written question
+                    // has neither, and "not keyed" would read as unfinished
+                    // work on a guide that is opt-in.
+                    <>Written answer · {key?.modelAnswer ? 'model answer set' : 'no model answer'}</>
+                  ) : (
+                    <>
+                      {matching ? 'Matching' : (question.selectionType === 'multiple' ? 'Several answers' : 'One answer')}
+                      {' · '}
+                      {question.options?.length ?? 0} option
+                      {(question.options?.length ?? 0) === 1 ? '' : 's'}
+                      {key ? ` · ${key.answerKey.length} keyed` : ' · not keyed'}
+                    </>
+                  )}
                 </span>
               </span>
 
@@ -225,7 +310,7 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                   Assessor verdict
                 </label>
               )}
-              {!matching && !question.assessorVerdict && (
+              {!matching && !written && !question.assessorVerdict && (
                 <select
                   aria-label={`Question type for ${question.label}`}
                   value={question.type}
@@ -240,7 +325,7 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                 </select>
               )}
 
-              {!question.assessorVerdict && (
+              {!question.assessorVerdict && !written && (
               <button
                 type="button"
                 onClick={() => setPairingFor(open ? null : question.id)}
@@ -261,6 +346,24 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                       ? 'Build pairs'
                       : 'Edit pairs'}
               </button>
+              )}
+
+              {/*
+                THE ESCAPE HATCH FROM A FALSE-MATCHING READ. When the extraction
+                wrongly took an ordinary multiple-choice for a matching question,
+                every keying control above is hidden and the field is stuck in
+                the pair builder. This is the one way out — visible only while
+                the field IS being treated as matching.
+              */}
+              {matching && !open && (
+                <button
+                  type="button"
+                  onClick={stopMatching}
+                  className="inline-flex h-[28px] flex-none items-center gap-1.5 rounded-lg border border-border px-2.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-hover"
+                >
+                  <Icon name="x" size={12} />
+                  Not matching
+                </button>
               )}
             </div>
 
@@ -316,6 +419,31 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                   ? `Both sides were read — ${extracted.matchLeft?.length ?? 0} prompts and ${extracted.matchRight?.length ?? 0} answers. Open the pairs to set which goes with which.`
                   : 'Only one side of this matching question was read. Open the pairs to type the other.'}
               </p>
+            ) : written ? (
+              /*
+                THE MODEL ANSWER. Prose the ASSESSOR reads beside the
+                candidate's typed answer — published onto the field, stripped
+                from every fill payload, never string-compared. The row it
+                writes into the draft keys is what makes it attestable: the
+                verified checkbox below renders off the same `key` presence a
+                choice key does.
+              */
+              <div className="mt-2.5">
+                <label className="text-[11px] text-text-tertiary">
+                  Model answer
+                  <span className="ml-1 text-text-quaternary">
+                    (shown only to the assessor — never auto-marked, never sent to a candidate)
+                  </span>
+                </label>
+                <textarea
+                  aria-label={`Model answer for ${question.label}`}
+                  placeholder="The expected answer, in the training authority’s words. Leave empty for no marking guide."
+                  value={key?.modelAnswer ?? ''}
+                  onChange={(e) => keyOps.setModelAnswer(question.id, e.target.value)}
+                  rows={3}
+                  className="mt-1 w-full rounded-lg border border-border bg-surface-page px-2.5 py-1.5 text-[11.5px] text-text-primary placeholder:text-text-quaternary"
+                />
+              </div>
             ) : (
               <OptionKeys question={question} draftKey={key} onToggle={keyOps.toggleOption} />
             )}
@@ -379,6 +507,31 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                   </span>
                 )}
               </label>
+            )}
+
+            {/*
+              No hint on a written card: hints are shown in interactive quiz
+              mode, which only choice questions enter — a written question is
+              judged by the assessor, and the retry loop never reaches it.
+            */}
+            {!question.assessorVerdict && !written && key && (
+              <div className="mt-2.5">
+                <label className="text-[11px] text-text-tertiary">
+                  Hint when incorrect
+                  <span className="ml-1 text-text-quaternary">(optional — shown in interactive quiz mode)</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Review Module 5: Safety Data Sheets"
+                  value={question.answerHint ?? ''}
+                  onChange={(e) =>
+                    draft.fieldOps.patch(question.id, {
+                      answerHint: e.target.value || undefined,
+                    })
+                  }
+                  className="mt-1 h-[30px] w-full rounded-lg border border-border bg-surface-page px-2.5 text-[11.5px] text-text-primary placeholder:text-text-quaternary"
+                />
+              </div>
             )}
           </div>
         );

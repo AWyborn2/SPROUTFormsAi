@@ -25,6 +25,7 @@
  * here, and profile-mapped fields are marked `prefill` wherever they appear.
  */
 import {
+  assessorMarkAccess,
   autoSourcesFor,
   type AccessLevel,
   type AssessmentToolManifest,
@@ -82,7 +83,19 @@ export function workflowFromStructure(
         ...base,
         partKey: part.key,
         ...(manifestPart
-          ? { fieldSource: autoSourcesFor(manifest, manifestPart, fields) }
+          ? {
+              fieldSource: autoSourcesFor(manifest, manifestPart, fields),
+              /*
+                The other half of the lock split: `autoSourcesFor` now locks
+                only KEYED questions' ✓/✗ cells (marking writes those), so an
+                unkeyed written question's declared cell stays `entry` — and
+                must come out candidate-view here, or publishing hands the
+                candidate the box that records whether their own answer was
+                satisfactory. Spreads to nothing for all-keyed tools, keeping
+                their emitted sections byte-identical.
+              */
+              ...assessorMarkAccess(manifest, manifestPart, fields),
+            }
           : {}),
       };
     }

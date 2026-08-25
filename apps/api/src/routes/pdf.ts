@@ -2,13 +2,16 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { DOCUMENT_TYPES } from '@formai/shared';
-import type { FormField, SubmissionValue } from '@formai/shared';
+import { CORRECTION_KINDS, DOCUMENT_TYPES, PLACEMENT_EVENT_KINDS, tallyPlacementOutcomes } from '@formai/shared';
+import type { FormField, PlacementEvent, SubmissionValue } from '@formai/shared';
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { getAnthropic } from '../anthropic.js';
-import { extractForm, roundTripExport } from '../pdf/index.js';
+import { auditForm, extractForm, roundTripExport } from '../pdf/index.js';
+import { captureExtraction } from '../pdf/capture.js';
+import { aggregateCorrectionRows, candidateRules } from '../pdf/correction-insights.js';
+import { aggregatePlacementRows, placementSuggestionFor } from '../pdf/placement-insights.js';
 import { getStorageClient } from '../storage/index.js';
 import { env } from '../env.js';
 
@@ -126,10 +129,95 @@ pdfRouter.post(
         model: env.ANTHROPIC_EXTRACTION_MODEL,
         pageBatchSize: env.ANTHROPIC_EXTRACTION_PAGE_BATCH,
       });
-      res.json(result);
+      // Capture the raw extraction as training signal for the (human-gated)
+      // correction loop. Best-effort — awaited so the row lands before we
+      // respond, but it cannot throw and cannot fail the import. The returned
+      // id (null when capture no-ops) rides back on the result so the review
+      // client can echo it at publish and link the correction diff to this raw.
+      const captureId = await captureExtraction(db, {
+        orgId: tenant.orgId,
+        assetId: parsed.data.assetId,
+        fileName: parsed.data.fileName,
+        documentType: parsed.data.documentType,
+        extractedByUserId: tenant.userId,
+        // The AcroForm path uses no model; only stamp one when the AI path ran.
+        model: result.path === 'ai' ? env.ANTHROPIC_EXTRACTION_MODEL : undefined,
+        result,
+      });
+      res.json(captureId ? { ...result, captureId } : result);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'extraction_failed';
       // Flat PDFs with no configured key surface as a 422, not a 500.
+      const status = message.startsWith('extraction_unavailable') ? 422 : 500;
+      res.status(status).json({ error: message });
+    }
+  }),
+);
+
+const auditBody = z
+  .object({
+    fileName: z.string().min(1),
+    /** Base64-encoded PDF bytes. Mutually exclusive with `assetId`. */
+    pdfBase64: z.string().min(1).optional(),
+    /** An id returned by `POST /pdf/upload`. Mutually exclusive with `pdfBase64`. */
+    assetId: z.string().min(1).optional(),
+    /**
+     * The labels already captured in the draft. The second pass is told these
+     * so it does not re-report them, and they filter the result besides. An
+     * empty list is legal — it just means the model reports everything fillable.
+     */
+    knownLabels: z.array(z.string()).max(2000).default([]),
+    documentType: z.enum(DOCUMENT_TYPES).optional(),
+  })
+  .refine((v) => (v.pdfBase64 ? 1 : 0) + (v.assetId ? 1 : 0) === 1, {
+    message: 'exactly one of pdfBase64 or assetId is required',
+  });
+
+/**
+ * The secondary-extraction pass (U-review). A SECOND look for printed input
+ * areas the primary extraction produced no field for — surfaced to the author
+ * as a review aid, never applied on its own. Opt-in on purpose: a second AI
+ * call per import would double cost for the common case where nothing is missed.
+ */
+pdfRouter.post(
+  '/audit',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    const parsed = auditBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tenant = req.tenant!;
+    let bytes: Buffer;
+    if (parsed.data.assetId) {
+      const client = getStorageClient();
+      if (!client) {
+        res.status(503).json({ error: 'storage_unavailable' });
+        return;
+      }
+      const downloaded = await client.download(tenant.orgId, parsed.data.assetId);
+      if (!downloaded) {
+        res.status(404).json({ error: 'asset_not_found' });
+        return;
+      }
+      bytes = downloaded;
+    } else {
+      bytes = Buffer.from(parsed.data.pdfBase64!, 'base64');
+    }
+
+    try {
+      const anthropic = getAnthropic() ?? undefined;
+      const result = await auditForm(bytes, {
+        fileName: parsed.data.fileName,
+        knownLabels: parsed.data.knownLabels,
+        documentType: parsed.data.documentType,
+        anthropic,
+        model: env.ANTHROPIC_EXTRACTION_MODEL,
+      });
+      res.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'audit_failed';
       const status = message.startsWith('extraction_unavailable') ? 422 : 500;
       res.status(status).json({ error: message });
     }
@@ -225,5 +313,291 @@ pdfRouter.post(
       const message = err instanceof Error ? err.message : 'round_trip_failed';
       res.status(500).json({ error: message });
     }
+  }),
+);
+
+/*
+  The corrections diff, validated at the boundary. The per-correction payload is
+  passthrough — the store keeps the whole `ExtractionCorrections` verbatim and
+  the shape's fine detail belongs to `diffExtraction`, not to a second copy of
+  the union here — but `kind` and `fieldId` are checked so a malformed body is a
+  400 at the edge rather than a bad row.
+*/
+const correctionSchema = z
+  .object({ kind: z.enum(CORRECTION_KINDS), fieldId: z.string().min(1) })
+  .passthrough();
+
+const correctionsBody = z.object({
+  /** Storage id of the source PDF, when one exists. */
+  assetId: z.string().min(1).optional(),
+  /** Provenance of the published AFTER. */
+  formId: z.string().min(1).optional(),
+  versionId: z.string().min(1).optional(),
+  /** Fields the raw extraction produced — the metric denominator. */
+  fieldCount: z.number().int().nonnegative(),
+  /** The `ExtractionCorrections` record from `diffExtraction`. */
+  corrections: z.object({
+    captureId: z.string().min(1).optional(),
+    documentType: z.enum(DOCUMENT_TYPES).optional(),
+    path: z.enum(['acroform', 'ai']),
+    pageCount: z.number().int().nonnegative(),
+    corrections: z.array(correctionSchema),
+  }),
+});
+
+/**
+ * Store the reviewer-correction diff for one published import — the learning
+ * loop's training signal (2b). Called by the review client at publish, its own
+ * request off the publish critical path; a failure here never blocks a publish.
+ *
+ * Org-scoped throughout: the row is written under the caller's org, and a
+ * `captureId`, if given, must name a capture in that same org — a caller cannot
+ * attach a correction to another tenant's raw extraction.
+ */
+pdfRouter.post(
+  '/corrections',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const parsed = correctionsBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tenant = req.tenant!;
+    const { corrections: diff } = parsed.data;
+
+    // A supplied capture link must belong to this org, or it is not the caller's
+    // to attach to — reject rather than silently dropping the link.
+    if (diff.captureId) {
+      const capture = await db.query.extractionCaptures.findFirst({
+        where: and(
+          eq(schema.extractionCaptures.id, diff.captureId),
+          eq(schema.extractionCaptures.orgId, tenant.orgId),
+        ),
+        columns: { id: true },
+      });
+      if (!capture) {
+        res.status(404).json({ error: 'capture_not_found' });
+        return;
+      }
+    }
+
+    const [row] = await db
+      .insert(schema.extractionCorrections)
+      .values({
+        orgId: tenant.orgId,
+        captureId: diff.captureId ?? null,
+        assetId: parsed.data.assetId ?? null,
+        documentType: diff.documentType ?? null,
+        formId: parsed.data.formId ?? null,
+        versionId: parsed.data.versionId ?? null,
+        corrections: diff,
+        correctionCount: diff.corrections.length,
+        fieldCount: parsed.data.fieldCount,
+        createdByUserId: tenant.userId,
+      })
+      .returning({ id: schema.extractionCorrections.id });
+
+    res.status(201).json({ id: row?.id });
+  }),
+);
+
+/**
+ * The correction-rate metric and shape clusters for this org's imports (2b/E).
+ *
+ * Two things, from the same rows: (1) the correction RATE per document type —
+ * corrections per extracted field, read off the denormalised counts, so a
+ * promoted extraction rule's effect is measurable; and (2) the recurring
+ * correction SHAPES, each a content-free `shapeOf` key with its count and a few
+ * example captures. The shape is the privacy boundary: it names types, counts
+ * and structural predicates, never field text — so even a cross-org view (a
+ * later platform surface) can show which mistakes recur without exposing what
+ * any one paper said. This endpoint stays ORG-SCOPED; the sample captures are
+ * the caller's own.
+ */
+pdfRouter.get(
+  '/corrections/insights',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const rows = await db.query.extractionCorrections.findMany({
+      where: eq(schema.extractionCorrections.orgId, tenant.orgId),
+      columns: { documentType: true, correctionCount: true, fieldCount: true, corrections: true, captureId: true },
+      // A cap, not a page: insights are an aggregate, and an org with more than
+      // this many imports has plenty of signal already. Paginate if it ever bites.
+      limit: 5000,
+    });
+
+    res.json(aggregateCorrectionRows(rows));
+  }),
+);
+
+/**
+ * The human-gated candidate-rules surface (2c / U10).
+ *
+ * ADMIN-ONLY, because acting on a candidate means writing a general profile rule
+ * (or promoting a LEARNED_EXAMPLE) — a maintainer's decision, not a candidate's.
+ * Returns the recurring correction shapes above a small threshold, each with the
+ * rule it suggests and a few of THIS org's example captures. It proposes; it
+ * changes nothing — promotion is always a reviewed code change (`LEARNED_EXAMPLES`).
+ */
+pdfRouter.get(
+  '/corrections/candidates',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    const tenant = req.tenant!;
+    if (tenant.role !== 'admin' && tenant.role !== 'owner') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    // A shape must recur to be a candidate; one or two corrections are noise.
+    const rawMin = Number(req.query.minCount);
+    const minCount = Number.isInteger(rawMin) && rawMin >= 1 ? Math.min(rawMin, 100) : 3;
+
+    const rows = await db.query.extractionCorrections.findMany({
+      where: eq(schema.extractionCorrections.orgId, tenant.orgId),
+      columns: { documentType: true, correctionCount: true, fieldCount: true, corrections: true, captureId: true },
+      limit: 5000,
+    });
+    const { shapes } = aggregateCorrectionRows(rows);
+    res.json({ minCount, candidates: candidateRules(shapes, minCount) });
+  }),
+);
+
+/*
+  One placement session-slice, validated at the boundary. The per-event payload
+  is passthrough — the store keeps the whole `PlacementOutcomes` verbatim and
+  the fine shape of each event belongs to `placement-outcomes.ts`, not to a
+  second copy of the union here — but `kind` and `fieldId` are checked so a
+  malformed body is a 400 at the edge rather than a bad row.
+*/
+const placementEventSchema = z
+  .object({ kind: z.enum(PLACEMENT_EVENT_KINDS), fieldId: z.string().min(1) })
+  .passthrough();
+
+const placementsBody = z.object({
+  /** Provenance of the placed version — plain ids, stored as such. */
+  formId: z.string().min(1).optional(),
+  versionId: z.string().min(1).optional(),
+  documentType: z.enum(DOCUMENT_TYPES).optional(),
+  context: z.enum(['standalone', 'builder']),
+  /** Fields on the version — the eligibility universe. */
+  fieldCount: z.number().int().nonnegative(),
+  /** The recorder never sends an empty slice; nor does this route store one. */
+  events: z.array(placementEventSchema).min(1),
+});
+
+/**
+ * Store one placement session-slice — the placement learning loop's training
+ * signal. Called by `GeometryEditorScreen` after a successful Save placement,
+ * fire-and-forget off the save's critical path; a failure here never blocks or
+ * slows a save.
+ *
+ * The denormalised tallies are computed SERVER-SIDE from the events, never
+ * read off the request — the jsonb and the counters must agree by
+ * construction, and a client counter is not evidence. Org-scoped throughout:
+ * the row is written under the caller's org.
+ */
+pdfRouter.post(
+  '/placements',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const parsed = placementsBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tenant = req.tenant!;
+    const outcomes = parsed.data;
+    // The zod schema checks kind/fieldId and passes the rest through (the fine
+    // per-kind shape belongs to `placement-outcomes.ts`, not a second copy
+    // here), so the events are widened for the tally. The fold reads only
+    // fields it recognises; anything malformed simply does not count.
+    const tally = tallyPlacementOutcomes(outcomes.events as unknown as PlacementEvent[]);
+
+    const [row] = await db
+      .insert(schema.placementOutcomes)
+      .values({
+        orgId: tenant.orgId,
+        formId: outcomes.formId ?? null,
+        versionId: outcomes.versionId ?? null,
+        documentType: outcomes.documentType ?? null,
+        context: outcomes.context,
+        outcomes,
+        ...tally,
+        fieldCount: outcomes.fieldCount,
+        createdByUserId: tenant.userId,
+      })
+      .returning({ id: schema.placementOutcomes.id });
+
+    res.status(201).json({ id: row?.id });
+  }),
+);
+
+/**
+ * The auto-place hit-rate metric, the recurring placement shapes and the
+ * weekly trend — the placement loop's read surface (R7/R8).
+ *
+ * ADMIN-ONLY like `/corrections/candidates`, and for the same reason: acting
+ * on a shape means a maintainer changing an engine heuristic or constant in a
+ * reviewed PR — nothing here changes the engine, and the suggestion strings
+ * only ever name engine seams. Org-scoped rows; the shape keys are the
+ * cross-org-safe vocabulary should a platform view ever widen this.
+ */
+pdfRouter.get(
+  '/placements/insights',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    const tenant = req.tenant!;
+    if (tenant.role !== 'admin' && tenant.role !== 'owner') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const rows = await db.query.placementOutcomes.findMany({
+      where: eq(schema.placementOutcomes.orgId, tenant.orgId),
+      columns: {
+        documentType: true,
+        createdAt: true,
+        outcomes: true,
+        proposalsAttempted: true,
+        autoConfirmed: true,
+        acceptedAsIs: true,
+        adjusted: true,
+        rejected: true,
+        noMatch: true,
+        manualDraws: true,
+        retargets: true,
+      },
+      // A cap, not a page: insights are an aggregate, and an org with more than
+      // this many saves has plenty of signal already. Paginate if it ever bites.
+      limit: 5000,
+    });
+
+    const { metrics, shapes, trend } = aggregatePlacementRows(rows);
+    res.json({
+      metrics,
+      shapes: shapes.map((s) => ({ ...s, suggestion: placementSuggestionFor(s.shape) })),
+      trend,
+    });
   }),
 );

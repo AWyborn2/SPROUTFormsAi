@@ -3,22 +3,14 @@ import { Button, Icon, Input, useToast } from '@formai/ui';
 import { AUDIT_CATEGORY_META, AUDIT_FILTERS } from '../../lib/data/fixtures.js';
 import { useAuditLog } from '../../lib/data/hooks.js';
 import type { AuditEntry } from '../../lib/data/types.js';
+import { exportCsv } from '../../lib/csv.js';
 
 /** Serialise audit entries to CSV and download. */
-function exportCsv(rows: AuditEntry[]) {
-  const header = ['Actor', 'Action', 'Target', 'Category', 'Time'];
-  const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
-  const lines = [
-    header.join(','),
-    ...rows.map((e) => [e.actor, e.action, e.target, e.category, e.time].map((v) => escape(String(v))).join(',')),
-  ];
-  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'audit-log.csv';
-  a.click();
-  URL.revokeObjectURL(url);
+function exportAuditCsv(rows: AuditEntry[]) {
+  exportCsv('audit-log.csv', [
+    ['Actor', 'Action', 'Target', 'Category', 'Time'],
+    ...rows.map((e) => [e.actor, e.action, e.target, e.category, e.time].map(String)),
+  ]);
 }
 
 /** Audit log — category pills, free-text search, export, live entry list. */
@@ -75,7 +67,7 @@ export function AuditScreen() {
           variant="outline"
           leadingIcon="download"
           onClick={() => {
-            exportCsv(filtered);
+            exportAuditCsv(filtered);
             toast({ variant: 'success', message: 'Audit log exported as CSV (last 90 days).' });
           }}
         >

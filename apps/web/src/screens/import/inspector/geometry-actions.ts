@@ -7,8 +7,8 @@
  * grid and marks drawn onto a competency record. It belongs somewhere it can
  * be read and tested directly.
  */
-import type { FormField, GeometryBand, GroupOrdinal, PageBox, RepeatingColumn } from '@formai/shared';
-import { markPlacement, resolveGeometry } from '@formai/shared';
+import type { DerivationMethod, FormField, GeometryBand, GroupOrdinal, PageBox, RepeatingColumn } from '@formai/shared';
+import { isChoiceField, isMatchingQuestion, markPlacement, resolveGeometry } from '@formai/shared';
 import type {
   FieldProposal,
   MatchAnchorSpec,
@@ -48,6 +48,14 @@ export type DerivableField = Pick<FormField, 'type' | 'columns' | 'fixedRows'> &
  * empty gap between the 0.0 ties it must refuse and the ≥0.2 genuine winners it
  * must keep — so no real single-region derivation is lost (R5) while a true
  * coin-flip between indistinguishable tables refuses.
+ *
+ * One newer separation sits INSIDE the band, deliberately: a rect-anchored
+ * headerless proposal ships at 0.95, so against a confidence-1 text rival on
+ * the same row count the 0.05 gap refuses. That is the intended failure
+ * direction — the rect-anchored tier is a brand-new heuristic and must not
+ * win a coin-flip against corroborated header evidence — and the ordinal and
+ * drawn-box recourses remain. Anyone re-tuning this constant must keep 0.05
+ * inside the band or that tie starts resolving by guess.
  */
 export const NEAR_EQUAL_CONFIDENCE = 0.15;
 
@@ -132,7 +140,40 @@ export type GeometryPanelState =
   | { kind: 'draw-only'; reason: string }
   | { kind: 'no-proposal'; reason: string }
   | { kind: 'needs-subdivision'; box: PageBox; reason: string }
-  | { kind: 'proposed'; segment: PageBox; confidence: number; notes: string[]; confirmed: boolean };
+  | {
+      kind: 'proposed';
+      segment: PageBox;
+      confidence: number;
+      notes: string[];
+      confirmed: boolean;
+      /**
+       * How the derivation placed the COLUMN bands, when a table derivation is
+       * behind this proposal — provenance for the panel's caption, carried
+       * separately from `notes` because notes are warnings and several tests
+       * assert `notes: []` on a clean derivation. Absent for anything that is
+       * not a derived table grid (scalars, hand-drawn boxes).
+       */
+      columnEvidence?: TableProposal['columnEvidence'];
+    };
+
+/**
+ * The one-line provenance caption the geometry panel shows for a derived table
+ * grid — the reviewer-facing half of `columnEvidence` (R7).
+ *
+ * Composed here rather than in the components because two panels render it
+ * (the import review inspector and the placement screen), and two copies of
+ * the wording would drift. It is also the visible tell for the historic
+ * silent-zero rect-extractor regression: if that returns, the measured wording
+ * simply stops appearing.
+ */
+export function columnEvidenceCaption(
+  evidence: TableProposal['columnEvidence'] | undefined,
+): string | null {
+  if (evidence === undefined) return null;
+  return evidence === 'printed-boxes'
+    ? 'Columns measured from printed boxes.'
+    : 'Columns inferred from header text.';
+}
 
 /**
  * Derive a proposal for one field from a page's text.
@@ -159,6 +200,13 @@ export function deriveForField(
   pageText: PositionedText[],
   pageWidth: number,
   pageHeight: number,
+  /**
+   * The page's printed rectangles (`TextPage.rects`), for snapping the answer
+   * columns onto the printed squares and for anchoring headerless checklists.
+   * Optional and trailing so every existing caller compiles unchanged —
+   * `undefined` is NOT MEASURED, and derivation degrades to text-only exactly.
+   */
+  rects?: readonly PrintedRect[],
 ): TableProposal | null {
   if (field.type !== 'repeating_group' || !field.columns || field.columns.length < 2) return null;
 
@@ -168,6 +216,7 @@ export function deriveForField(
     pageHeight,
     items: pageText,
     columns: field.columns,
+    rects,
   });
   if (proposals.length === 0) return null;
 
@@ -177,6 +226,229 @@ export function deriveForField(
   if (wantRows === undefined) return null;
 
   return selectByRowCount(proposals, wantRows);
+}
+
+/* ------------------------------------------------------------------ *
+ * The extraction window as a soft prior
+ *
+ * Every AI-extracted field is stamped with `sourcePages` — the 1-based
+ * inclusive page range of the extraction BATCH that produced it, known to the
+ * splitter in code and never asked of the model. The document-wide derivers
+ * below refuse the moment two pages both claim a field, even when the batch
+ * already says which copy is whose. The helpers here turn that stamp into a
+ * usable window and one shared verdict, so a document-wide ambiguity with
+ * exactly ONE hit inside the field's window becomes a needs-review placement
+ * naming the excluded pages, instead of a refusal — while ambiguity INSIDE a
+ * window keeps refusing, and a field with no window keeps today's exact path.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The ceiling on any window-influenced proposal's confidence (KTD2).
+ *
+ * Strictly below `classifyProposalTier`'s auto-confirm boundary (`=== 1`), so
+ * a placement the window disambiguated always parks as needs-review and flows
+ * through the existing "Confirm all proposed" bulk action. The window is a
+ * batch artifact, not a human judgement, and the one thing it must never do
+ * is push a mark onto a competency record without a reviewer's eyes passing
+ * over the page it chose.
+ */
+export const WINDOW_CONFIDENCE_CAP = 0.95;
+
+/**
+ * How many pages the stamped window is widened on each side before use (KTD3).
+ *
+ * The batch boundary is an artifact of the splitter, not of the printed
+ * document: a batch-start orphan merge or a continuation table can put a
+ * field's printed start one page outside the range it was stamped with.
+ * Dilation trades a little disambiguating power at boundaries — two parts
+ * whose dilated windows overlap on a shared page refuse, the honest answer —
+ * for never excluding the true page.
+ */
+export const WINDOW_MARGIN_PAGES = 1;
+
+/**
+ * A validated extraction window, ready to test pages against.
+ *
+ * `first`/`last` are 0-based inclusive and ALREADY dilated and clamped — the
+ * only bounds scoping ever tests, built in one place so every deriver agrees.
+ * `from`/`to` keep the stamped 1-based range for the reviewer-facing notes:
+ * a note names what the extraction stamped, not the tolerance around it.
+ */
+export interface PageWindow {
+  first: number;
+  last: number;
+  from: number;
+  to: number;
+}
+
+/**
+ * Resolve a field's stamped `sourcePages` into a usable window, or null.
+ *
+ * Null on every malformed shape — absent, non-integer, non-positive,
+ * inverted — and on a window lying wholly past the end of the document,
+ * which is the "PDF replaced with a shorter one" defense: a window that
+ * cannot name any real page says nothing about THIS document, and treating
+ * it as absent routes the field onto the untouched no-window path (R6)
+ * rather than steering every hit into the "outside the window" cap.
+ */
+export function pageWindowOf(
+  sourcePages: { from: number; to: number } | undefined,
+  pageCount: number,
+): PageWindow | null {
+  if (!sourcePages || pageCount <= 0) return null;
+  const { from, to } = sourcePages;
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return null;
+  if (from < 1 || to < from) return null;
+  if (from > pageCount) return null; // wholly past the document's end
+  return {
+    first: Math.max(from - 1 - WINDOW_MARGIN_PAGES, 0),
+    last: Math.min(to - 1 + WINDOW_MARGIN_PAGES, pageCount - 1),
+    from,
+    to,
+  };
+}
+
+/** Is a 0-based page inside the dilated window? */
+function inPageWindow(page: number, window: PageWindow): boolean {
+  return page >= window.first && page <= window.last;
+}
+
+/** 0-based pages as a reader counts them: "page 7", "pages 12 and 17". */
+function pageListText(pages: readonly number[]): string {
+  const printed = [...pages].sort((a, b) => a - b).map((p) => p + 1);
+  if (printed.length === 1) return `page ${printed[0]}`;
+  const last = printed.pop()!;
+  return `pages ${printed.join(', ')} and ${last}`;
+}
+
+/** The STAMPED range, 1-based and undilated: "pages 5–8", or "page 5". */
+function windowRangeText(window: PageWindow): string {
+  return window.from === window.to ? `page ${window.from}` : `pages ${window.from}–${window.to}`;
+}
+
+/**
+ * The note on a placement the window disambiguated (R5). Built here — with
+ * its "outside" counterpart below — so every deriver says it in the same
+ * words: the reviewer must be able to see WHY the other copies lost.
+ */
+function windowExclusionNote(
+  page: number,
+  excludedPages: readonly number[],
+  window: PageWindow,
+): string {
+  return `Matched on page ${page + 1}; ${pageListText(excludedPages)} excluded by the extraction window (${windowRangeText(window)}).`;
+}
+
+/**
+ * The note on a placement OUTSIDE its own window (R4/AE5). The soft prior
+ * never vetoes the only candidate, but either the stamp or the match is
+ * wrong here and a human has to say which.
+ */
+function windowOutsideNote(page: number, window: PageWindow): string {
+  return `Matched on page ${page + 1}, outside the extraction window (${windowRangeText(window)}) — check the page.`;
+}
+
+/** What the window says about a set of per-page hits. */
+export type WindowVerdict =
+  | { kind: 'refuse' }
+  | { kind: 'place'; page: number; windowed: false }
+  | { kind: 'place'; page: number; windowed: true; note: string };
+
+/**
+ * The R2–R5 truth table, over the pages a document-wide scan matched.
+ *
+ * One hit inside the window and none outside: place it untouched — the
+ * window was not needed, and a prior that changed nothing must leave no
+ * fingerprints (R4/AE4). One inside, others outside: place the inside one,
+ * flagged with the pages the window excluded. Two or more inside: refuse —
+ * that is a question the document does not place, and the window has no more
+ * to say (R3/AE2). None inside: a UNIQUE hit elsewhere still places, capped
+ * and flagged, because a soft prior never vetoes the only candidate (AE5);
+ * two or more elsewhere refuse exactly as today.
+ */
+export function windowVerdict(
+  hits: readonly { page: number }[],
+  window: PageWindow,
+): WindowVerdict {
+  const inside = hits.filter((h) => inPageWindow(h.page, window));
+  const outside = hits.filter((h) => !inPageWindow(h.page, window));
+
+  if (inside.length >= 2) return { kind: 'refuse' };
+
+  if (inside.length === 1) {
+    const page = inside[0]!.page;
+    if (outside.length === 0) return { kind: 'place', page, windowed: false };
+    return {
+      kind: 'place',
+      page,
+      windowed: true,
+      note: windowExclusionNote(page, outside.map((h) => h.page), window),
+    };
+  }
+
+  if (outside.length === 1) {
+    const page = outside[0]!.page;
+    return { kind: 'place', page, windowed: true, note: windowOutsideNote(page, window) };
+  }
+
+  return { kind: 'refuse' };
+}
+
+/**
+ * Apply a window verdict to per-page hits: the chosen page's proposal —
+ * untouched when the window was not needed, capped below auto-confirm and
+ * carrying the verdict's note when it was (R5/KTD2) — or null on refusal.
+ * Shared by the option-cell and match-anchor scans so a window-influenced
+ * proposal is shaped identically wherever it came from.
+ */
+function proposalThroughWindow<P extends { confidence: number; notes: string[] }>(
+  hits: readonly { page: number; proposal: P }[],
+  window: PageWindow,
+): P | null {
+  const verdict = windowVerdict(hits, window);
+  if (verdict.kind === 'refuse') return null;
+  const hit = hits.find((h) => h.page === verdict.page)!;
+  if (!verdict.windowed) return hit.proposal;
+  return {
+    ...hit.proposal,
+    confidence: Math.min(hit.proposal.confidence, WINDOW_CONFIDENCE_CAP),
+    notes: [...hit.proposal.notes, verdict.note],
+  };
+}
+
+/**
+ * Window scoping for the TABLE picker (R9) — deliberately not `windowVerdict`.
+ *
+ * The table path never refused on ambiguity (identical repeated parts are why
+ * the window exists at all), and it does not start to: candidates outside the
+ * window are dropped when anything is inside it, and the caller's EXISTING
+ * tiebreak runs over whatever survives. The cap and note apply only when the
+ * window actually changed the field — out-of-window candidates excluded, or
+ * nothing in-window at all (the R4 "outside" case, flagged never vetoed). All
+ * candidates in-window means the window changed nothing and the pick is
+ * returned untouched, fingerprint-free (R4/AE4).
+ */
+function tableThroughWindow(
+  picks: readonly TableProposal[],
+  window: PageWindow,
+  choose: (pool: readonly TableProposal[]) => TableProposal,
+): TableProposal | null {
+  if (picks.length === 0) return null;
+  const inside = picks.filter((p) => inPageWindow(p.segment.page, window));
+  const outside = picks.filter((p) => !inPageWindow(p.segment.page, window));
+
+  const chosen = choose(inside.length > 0 ? inside : picks);
+  if (inside.length > 0 && outside.length === 0) return chosen;
+
+  const note =
+    inside.length > 0
+      ? windowExclusionNote(chosen.segment.page, outside.map((p) => p.segment.page), window)
+      : windowOutsideNote(chosen.segment.page, window);
+  return {
+    ...chosen,
+    confidence: Math.min(chosen.confidence, WINDOW_CONFIDENCE_CAP),
+    notes: [...chosen.notes, note],
+  };
 }
 
 /**
@@ -192,41 +464,87 @@ export function deriveForField(
  * An ordinal field resolves entirely inside one page (the ordinal orders THAT
  * page's proposals), so the first page that yields a pick wins — the same
  * "anchor where it starts" rule the row-count path uses on a tie.
+ *
+ * With a `window`, in-window candidates outrank the rest (R9): the identical
+ * checklist Parts 2, 4 and 6 print on three pages stops landing three times
+ * on the first page that fits. The tiebreakers WITHIN the surviving pool are
+ * unchanged, and no window means the original loop, verbatim (R6/KTD4).
  */
 export function deriveAcrossPages(
   field: DerivableField,
   pages: readonly TextPage[],
+  window?: PageWindow | null,
 ): TableProposal | null {
   if (field.groupOrdinal) {
-    for (const [i, page] of pages.entries()) {
-      const p = deriveForField(field, i, page.items, page.width, page.height);
-      if (p) return p;
+    if (!window) {
+      for (const [i, page] of pages.entries()) {
+        const p = deriveForField(field, i, page.items, page.width, page.height, page.rects);
+        if (p) return p;
+      }
+      return null;
     }
-    return null;
+    // Windowed: the scan must run FULL — the note has to name what it
+    // excluded — and "first page that yields" becomes "first IN-WINDOW page
+    // that yields", the same anchor rule applied to the surviving pool.
+    const picks: TableProposal[] = [];
+    for (const [i, page] of pages.entries()) {
+      const p = deriveForField(field, i, page.items, page.width, page.height, page.rects);
+      if (p) picks.push(p);
+    }
+    return tableThroughWindow(picks, window, (pool) => pool[0]!);
   }
 
   const wantRows = field.fixedRows?.length;
-  let best: TableProposal | null = null;
 
-  for (const [i, page] of pages.entries()) {
-    const p = deriveForField(field, i, page.items, page.width, page.height);
-    if (!p) continue;
-    if (!best) {
-      best = p;
-      continue;
-    }
-    if (wantRows !== undefined) {
-      const d = Math.abs((p.segment.rowBands?.length ?? 0) - wantRows);
-      const bestD = Math.abs((best.segment.rowBands?.length ?? 0) - wantRows);
-      if (d !== bestD) {
-        if (d < bestD) best = p;
+  if (!window) {
+    let best: TableProposal | null = null;
+
+    for (const [i, page] of pages.entries()) {
+      const p = deriveForField(field, i, page.items, page.width, page.height, page.rects);
+      if (!p) continue;
+      if (!best) {
+        best = p;
         continue;
       }
+      if (wantRows !== undefined) {
+        const d = Math.abs((p.segment.rowBands?.length ?? 0) - wantRows);
+        const bestD = Math.abs((best.segment.rowBands?.length ?? 0) - wantRows);
+        if (d !== bestD) {
+          if (d < bestD) best = p;
+          continue;
+        }
+      }
+      if (p.confidence > best.confidence) best = p;
     }
-    if (p.confidence > best.confidence) best = p;
+
+    return best;
   }
 
-  return best;
+  // The existing best-pick — row-count distance, then confidence, earlier
+  // page on a full tie — as a reduction over a pool, so the windowed path
+  // applies the IDENTICAL tiebreak to whichever candidates survive scoping.
+  const pickBest = (pool: readonly TableProposal[]): TableProposal => {
+    let best = pool[0]!;
+    for (const p of pool.slice(1)) {
+      if (wantRows !== undefined) {
+        const d = Math.abs((p.segment.rowBands?.length ?? 0) - wantRows);
+        const bestD = Math.abs((best.segment.rowBands?.length ?? 0) - wantRows);
+        if (d !== bestD) {
+          if (d < bestD) best = p;
+          continue;
+        }
+      }
+      if (p.confidence > best.confidence) best = p;
+    }
+    return best;
+  };
+
+  const picks: TableProposal[] = [];
+  for (const [i, page] of pages.entries()) {
+    const p = deriveForField(field, i, page.items, page.width, page.height, page.rects);
+    if (p) picks.push(p);
+  }
+  return tableThroughWindow(picks, window, pickBest);
 }
 
 /**
@@ -564,6 +882,22 @@ export const RECT_TRACE_MIN_OVERLAP = 0.35;
 export const RECT_TRACE_MIN_DRAG_COVERED = 0.65;
 
 /**
+ * The share of the printed RECTANGLE's extent, on each axis, the drag must
+ * cover — the mirror of `RECT_TRACE_MIN_DRAG_COVERED`, and the gate that refuses
+ * an ENCLOSING border.
+ *
+ * Drag-coverage alone asks only "does the rect contain most of my drag", which a
+ * page frame or a whole-table outline answers yes to for ANY large box drawn
+ * inside it — so a box drawn around a few answer cells snapped straight out to
+ * the full page. Requiring the drag to cover most of the rect too means the two
+ * must be nearly the SAME rectangle: a checkbox trace (drag ≈ box) clears it, a
+ * border several times the drag's size on an axis does not. IoU was meant to
+ * catch this, but 0.35 admits a rect up to ~2.9x the drag's area and a page
+ * border is only ~2x — inside the gap.
+ */
+export const RECT_TRACE_MIN_RECT_COVERED = 0.65;
+
+/**
  * The printed rectangle an author was tracing, if they were tracing one.
  *
  * Snapping four edges INDEPENDENTLY is what deforms a traced checkbox: each
@@ -573,13 +907,15 @@ export const RECT_TRACE_MIN_DRAG_COVERED = 0.65;
  * asks the question the author was answering — *which box did you mean* — and
  * returns that box exactly, at its printed size, with no accumulated error.
  *
- * TWO gates, because they refuse different mistakes. IoU refuses a rect far
- * larger than the drag (the cell around a traced checkbox). Drag-coverage
- * refuses a rect far smaller than the drag (one line of a deliberate two-line
- * box) — a real trace covers its box snugly and clears both with room.
+ * THREE gates, because they refuse different mistakes. Drag-coverage refuses a
+ * rect far SMALLER than the drag (one line of a deliberate two-line box).
+ * Rect-coverage refuses a rect far LARGER than the drag (the enclosing cell, the
+ * page border a big box was drawn inside). IoU is the tie-break between rects
+ * that clear both. A real trace covers its box snugly BOTH ways and clears all
+ * three with room.
  *
- * Returns null when nothing clears both, which is the common case on an
- * unruled page and leaves per-edge snapping to handle it.
+ * Returns null when nothing clears them, which is the common case on an unruled
+ * page and leaves per-edge snapping to handle it.
  */
 export function rectTraced(
   drawn: { x: number; y: number; width: number; height: number },
@@ -597,7 +933,9 @@ export function rectTraced(
     if (ix <= 0 || iy <= 0) continue;
     if (
       ix < RECT_TRACE_MIN_DRAG_COVERED * drawn.width ||
-      iy < RECT_TRACE_MIN_DRAG_COVERED * drawn.height
+      iy < RECT_TRACE_MIN_DRAG_COVERED * drawn.height ||
+      ix < RECT_TRACE_MIN_RECT_COVERED * r.width ||
+      iy < RECT_TRACE_MIN_RECT_COVERED * r.height
     ) {
       continue;
     }
@@ -1176,6 +1514,13 @@ export interface SubdivideInput {
   columns: readonly RepeatingColumn[];
   /** The field's printed row count, when known, to break a multi-header tie. */
   wantRows?: number;
+  /**
+   * The PAGE's printed rectangles — filtered to the drawn box here, by the
+   * same centre test `proposeRectGrid` scopes with, so a square belonging to
+   * the table below the drag can never snap this table's bands. `undefined`
+   * keeps the NOT MEASURED convention and derives text-only.
+   */
+  rects?: readonly PrintedRect[];
 }
 
 /**
@@ -1194,9 +1539,21 @@ export interface SubdivideInput {
  * box happens to catch a repeated header, the row-count match breaks the tie,
  * then confidence.
  */
-export function subdivideBox({ box, items, columns, wantRows }: SubdivideInput): TableProposal | null {
+export function subdivideBox({ box, items, columns, wantRows, rects }: SubdivideInput): TableProposal | null {
   const inside = itemsInBox(items, box);
   if (inside.length === 0) return null;
+
+  // A rectangle belongs to the drag when its CENTRE does — the same test
+  // `proposeRectGrid` uses, for the same reason: a checkbox is 9pt, and full
+  // enclosure punishes a trace for being a few tenths of a point tight, while
+  // the centre test still keeps the next table's squares out.
+  const right = box.x + box.width;
+  const top = box.y + box.height;
+  const rectsInside = rects?.filter((r) => {
+    const cx = r.x + r.width / 2;
+    const cy = r.y + r.height / 2;
+    return cx >= box.x && cx <= right && cy >= box.y && cy <= top;
+  });
 
   const proposals = proposeTableSegments({
     page: box.page,
@@ -1204,6 +1561,7 @@ export function subdivideBox({ box, items, columns, wantRows }: SubdivideInput):
     pageHeight: box.pageHeight,
     items: inside,
     columns: [...columns],
+    rects: rectsInside,
   });
   if (proposals.length === 0) return null;
 
@@ -1413,6 +1771,10 @@ export function panelState(
       confidence: derived?.confidence ?? 1,
       notes: derived?.notes ?? [],
       confirmed,
+      // Provenance travels only where a table derivation stands behind the
+      // proposal — a scalar's box or a hand-drawn grid carries no claim about
+      // how columns were found, so it gets no caption (R7).
+      ...(derived ? { columnEvidence: derived.columnEvidence } : {}),
     };
   }
 
@@ -1440,6 +1802,29 @@ export function panelState(
     reason:
       'The page did not give enough signal to place this table confidently, so nothing could be placed automatically. That is fine to leave — the form still publishes and exports its answers as data. To place it yourself, draw the table’s box on the PDF and lay out its grid inside it.',
   };
+}
+
+/**
+ * Which derivation family `deriveProposal` would dispatch a field to, or null
+ * for a field the engine has no derivation for (a scalar, a section header).
+ *
+ * THE PLACEMENT RECORDER'S METHOD SOURCE, kept beside the dispatch predicates
+ * it mirrors so the recorder and the screen cannot disagree with the
+ * dispatcher: `GeometryEditorScreen`'s `isMatchAnchorField` / `isPerOptionField`
+ * delegate to this, and `deriveProposal` branches on those. The order matters
+ * for the same reason it does there — a matching question IS a choice field,
+ * so it must be claimed before the option-cell test. A new derivation family
+ * (or a new placement action) must extend this AND feed the recorder, or the
+ * hit-rate metric silently undercounts it.
+ */
+export function derivationMethodOf(
+  field: Pick<FormField, 'type' | 'options' | 'printSelectedValue'>,
+): DerivationMethod | null {
+  if (isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0) {
+    return isMatchingQuestion(field.options) ? 'match-anchor' : 'option-cells';
+  }
+  if (field.type === 'repeating_group') return 'table';
+  return null;
 }
 
 /**
@@ -1499,6 +1884,46 @@ export function applyFieldChanges(
 }
 
 /**
+ * Move fields' boxes to another page, SAME position.
+ *
+ * The duplicated-checklist paper: Parts 2, 4 and 6 print the identical
+ * practical checklist on three different pages, and detection — matching by
+ * the text layer — lands all three parts' boxes on the first page that
+ * matches. The x/y/w/h it found are RIGHT (the layouts are identical); only
+ * the page is wrong, and redrawing thirty well-positioned boxes to fix a
+ * page number is the tedium this removes: every segment (bands and option
+ * keys intact) is re-stamped onto the target page verbatim.
+ *
+ * Fields with no boxes are skipped rather than given empty geometry, so a
+ * section-level move can be handed headers and unplaced fields freely.
+ */
+export function retargetPageChanges(
+  fields: readonly FormField[],
+  fieldIds: readonly string[],
+  page: number,
+): FieldChange[] {
+  const wanted = new Set(fieldIds);
+  const changes: FieldChange[] = [];
+  for (const field of fields) {
+    if (!wanted.has(field.id)) continue;
+    const segments = field.geometry?.segments ?? [];
+    if (segments.length === 0) continue;
+    if (segments.every((s) => s.page === page)) continue;
+    changes.push({
+      fieldId: field.id,
+      change: (f) => ({
+        ...f,
+        geometry: {
+          ...f.geometry!,
+          segments: (f.geometry?.segments ?? []).map((s) => ({ ...s, page })),
+        },
+      }),
+    });
+  }
+  return changes;
+}
+
+/**
  * Propose one checkmark box per option for a NON-TABLE choice field, across the
  * whole document.
  *
@@ -1511,22 +1936,27 @@ export function applyFieldChanges(
  * within a page — the dozer repeats "Wearing correct PPE" under several parts,
  * and placing the mark under the wrong one records an assessment against a
  * criterion nobody checked. One confident hit, or nothing.
+ *
+ * A `window` softens exactly one of those refusals: ambiguous document-wide
+ * but unique INSIDE the field's extraction window places, capped below
+ * auto-confirm and naming the excluded pages (R2/R5). Ambiguity inside the
+ * window still refuses, and no window means the original loop, verbatim.
  */
 export function deriveOptionCellsAcrossPages(
   field: { label: string; options?: string[] },
   pages: readonly TextPage[],
+  window?: PageWindow | null,
 ): FieldProposal | null {
   if (!field.options || field.options.length < 2) return null;
 
-  const hits: FieldProposal[] = [];
-  for (const [i, page] of pages.entries()) {
+  const proposeOnPage = (i: number, page: TextPage): FieldProposal | null => {
     const input = {
       page: i,
       pageWidth: page.width,
       pageHeight: page.height,
       items: page.items,
       label: field.label,
-      options: field.options,
+      options: field.options!,
     };
 
     // Two shapes, tried in order and mutually exclusive by construction. The
@@ -1534,14 +1964,35 @@ export function deriveOptionCellsAcrossPages(
     // inline rule refuses one whose options are column glyphs, because those
     // are not printed beside the question at all. Neither can claim the other's
     // field, so the order is for clarity rather than precedence.
-    const p = proposeFieldOptionCells(input) ?? proposeInlineOptionCells(input);
-    if (p) hits.push(p);
-    // Two pages both claiming this question is the ambiguous case that matters;
-    // stop as soon as it is established rather than scanning on.
-    if (hits.length > 1) return null;
+    return proposeFieldOptionCells(input) ?? proposeInlineOptionCells(input);
+  };
+
+  if (!window) {
+    const hits: FieldProposal[] = [];
+    for (const [i, page] of pages.entries()) {
+      const p = proposeOnPage(i, page);
+      if (p) hits.push(p);
+      // Two pages both claiming this question is the ambiguous case that matters;
+      // stop as soon as it is established rather than scanning on.
+      if (hits.length > 1) return null;
+    }
+
+    return hits[0] ?? null;
   }
 
-  return hits[0] ?? null;
+  // Windowed: the scan runs FULL, because the note has to name every excluded
+  // page — but a second IN-WINDOW hit is a refusal nothing later in the
+  // document can undo, so it exits just as early as the loop above (KTD4).
+  const hits: { page: number; proposal: FieldProposal }[] = [];
+  let insideHits = 0;
+  for (const [i, page] of pages.entries()) {
+    const p = proposeOnPage(i, page);
+    if (!p) continue;
+    hits.push({ page: i, proposal: p });
+    if (i >= window.first && i <= window.last && ++insideHits > 1) return null;
+  }
+
+  return proposalThroughWindow(hits, window);
 }
 
 /**
@@ -1558,27 +2009,50 @@ export function deriveOptionCellsAcrossPages(
  * claimed by two pages is a question the document does not place, and anchoring
  * the wrong page's copy draws every one of the candidate's lines onto text they
  * never read.
+ *
+ * Same window semantics as `deriveOptionCellsAcrossPages`, too: unique inside
+ * the window places capped-and-noted, ambiguous inside it refuses, and no
+ * window is the original loop, verbatim (R2–R6).
  */
 export function deriveMatchAnchorsAcrossPages(
   anchors: readonly MatchAnchorSpec[],
   pages: readonly TextPage[],
+  window?: PageWindow | null,
 ): FieldProposal | null {
   if (anchors.length < 2) return null;
 
-  const hits: FieldProposal[] = [];
-  for (const [i, page] of pages.entries()) {
-    const p = proposeMatchAnchorCells({
+  const proposeOnPage = (i: number, page: TextPage): FieldProposal | null =>
+    proposeMatchAnchorCells({
       page: i,
       pageWidth: page.width,
       pageHeight: page.height,
       items: page.items,
       anchors,
     });
-    if (p) hits.push(p);
-    if (hits.length > 1) return null;
+
+  if (!window) {
+    const hits: FieldProposal[] = [];
+    for (const [i, page] of pages.entries()) {
+      const p = proposeOnPage(i, page);
+      if (p) hits.push(p);
+      if (hits.length > 1) return null;
+    }
+
+    return hits[0] ?? null;
   }
 
-  return hits[0] ?? null;
+  // Full scan for the note's excluded pages; early refusal at the second
+  // in-window hit, exactly as the option-cell scan (KTD4).
+  const hits: { page: number; proposal: FieldProposal }[] = [];
+  let insideHits = 0;
+  for (const [i, page] of pages.entries()) {
+    const p = proposeOnPage(i, page);
+    if (!p) continue;
+    hits.push({ page: i, proposal: p });
+    if (i >= window.first && i <= window.last && ++insideHits > 1) return null;
+  }
+
+  return proposalThroughWindow(hits, window);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1711,4 +2185,26 @@ export function removeSegment(
   );
   if (next.length === segments.length) return segments as PageBox[];
   return next.length > 0 ? next : undefined;
+}
+
+/**
+ * Replace the box on ONE page carrying a given option key with `next` — the
+ * page-scoped write a band-edge drag and a whole-box move both route through.
+ *
+ * A repeating table that spans a page break has several whole-field boxes, ALL
+ * with a null option key; matching on the key alone rewrites every page's box to
+ * the one being edited, collapsing the continuation onto the edited page.
+ * Scoping the match to `page` as well keeps each page's box independent. Returns
+ * the input array reference unchanged when nothing matches, so a caller can skip
+ * a no-op write.
+ */
+export function replaceSegmentOnPage(
+  segments: readonly PageBox[],
+  optionKey: string | null,
+  page: number,
+  next: PageBox,
+): PageBox[] {
+  const matches = (s: PageBox) => (s.optionKey ?? null) === optionKey && s.page === page;
+  if (!segments.some(matches)) return segments as PageBox[];
+  return segments.map((s) => (matches(s) ? next : s));
 }

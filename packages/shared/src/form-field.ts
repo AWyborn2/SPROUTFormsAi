@@ -326,6 +326,20 @@ export interface RepeatingColumn {
   required?: boolean;
   /** Present ⇒ the cell auto-computes and is read-only on fill surfaces. */
   calc?: ColumnCalc;
+  /**
+   * `date` / `time` columns only — seed the cell with today's date (or the
+   * current time) the MOMENT a new row is added, instead of leaving it blank
+   * for manual entry. The value stays editable: a shift logged the morning
+   * after can be corrected, and a "Today" / "Now" button re-stamps it. Opt-in,
+   * so a table without it keeps blank-on-add.
+   *
+   * The point on a task logbook: an operator adds a row to start logging what
+   * they are on right now, and the date they started is exactly today — asking
+   * them to type it is a step that only ever produces the value the app already
+   * knows. Not a hard timestamp: it is a default, not a lock, because honest
+   * back-dating of a prior shift must stay possible.
+   */
+  autoStamp?: boolean;
 }
 
 export interface FormField {
@@ -378,6 +392,21 @@ export interface FormField {
 
   /** For PDF-imported fields — round-trip render anchor. */
   sourcePosition?: SourcePosition;
+
+  /**
+   * For AI-extracted fields — the 1-based inclusive page range of the
+   * extraction BATCH that produced this field, stamped in code server-side
+   * (the splitter knows which pages went into each call; the model is never
+   * asked). NOT a page the field is known to sit on: a batch is up to four
+   * pages and the field's printed start can even fall one page outside it
+   * where a batch-boundary merge stitched an orphan back on. Consumers treat
+   * it as a soft prior only — never a hard page trust.
+   *
+   * Absent means: extracted before the stamp existed, extracted via AcroForm
+   * (which carries real geometry instead), or built by hand. Absence must
+   * change nothing — every consumer takes its unscoped path.
+   */
+  sourcePages?: { from: number; to: number };
 
   /**
    * For PDF-imported fields — multi-page footprint with explicit column and
@@ -436,10 +465,46 @@ export interface FormField {
   assessorVerdict?: boolean;
 
   /**
+   * Shown to the candidate when they answer this question incorrectly in
+   * interactive theory mode. Optional — absent means no hint is shown.
+   * Authored in the builder's Answer Key step.
+   */
+  answerHint?: string;
+
+  /**
+   * The ASSESSOR'S marking guide for a WRITTEN (`text`/`textarea`) question —
+   * the expected answer as prose, judged by a person, never by the machine.
+   *
+   * Three contracts, each load-bearing:
+   *
+   * NEVER SERVED TO A FILL SURFACE. This is the answer to the question, in the
+   * same sense `answerKey` is — `stripMarkingSecrets` removes it, and the
+   * assessor reads it through a separate role-gated channel. A candidate who
+   * can open devtools must find nothing.
+   *
+   * NEVER AUTO-COMPARED against the candidate's text. The source answer keys
+   * themselves say written answers are "not a literal exact-string match";
+   * the assessor judges the candidate's wording against this guide and ticks
+   * the ✓/✗ box the question's `outcomeTarget` names. String equality here
+   * would fail every honest paraphrase on a safety-critical record.
+   *
+   * OPT-IN. Absent (or empty) means the written question is ordinary
+   * furniture: still answered, still assessor-judged, just without a guide
+   * beside it. A choice question never carries one — it takes an `answerKey`,
+   * and `validateAnswerKeys` reports the confusion.
+   */
+  modelAnswer?: string;
+
+  /**
    * Where this question's derived ✓/✗ is written. Required whenever
    * `answerKey` is set — a key with nowhere to land would compute a mark that
    * never reaches the page, which on an evidence document reads as an
    * unanswered question rather than a marked one.
+   *
+   * An UNKEYED question may also declare one: a written question's target is
+   * the box the ASSESSOR ticks after judging the answer (see `modelAnswer`).
+   * Marking never writes an unkeyed question's cell, so the workflow leaves it
+   * fillable by the assessor rather than locking it `auto`.
    */
   outcomeTarget?: OutcomeTarget;
 
@@ -452,6 +517,20 @@ export interface FormField {
    * question nobody has chosen a presentation for.
    */
   matchPresentation?: MatchPresentation;
+
+  /**
+   * A builder-authoring override: this question is NOT a matching question,
+   * whatever the extraction read.
+   *
+   * The extraction can false-positive an ordinary multiple-choice as a matching
+   * question — it emits `matchLeft`/`matchRight` and empties `options` — and the
+   * Answer Key step then hides the type and keying controls, because a matching
+   * question is authored through the pair builder. That left the field
+   * unfixable: nothing on the editable copy could say "the extraction was
+   * wrong". This flag is that escape hatch. Builder-only; marking and export
+   * never read it.
+   */
+  notMatching?: boolean;
 }
 
 /**

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Icon } from '@formai/ui';
 import { StructurePanel } from '../StructurePanel.js';
 import { ArtifactPager } from '../ArtifactPager.js';
+import { MissedBoxAudit } from '../MissedBoxAudit.js';
 import { resolveStructure } from '../builder-structure.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
 
@@ -34,7 +35,7 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
   const byId = new Map(draft.fields.map((f) => [f.id, f]));
 
   return (
-    <div className="-mx-7 -mt-1 flex items-start gap-0">
+    <div className="-mx-7 -mt-1 flex h-full min-h-0 items-stretch gap-0">
       <StructurePanel
         structure={draft.structure}
         fields={draft.fields}
@@ -44,6 +45,8 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
         onMoveSection={draft.structureOps.moveSection}
         onRenameSection={draft.structureOps.renameSection}
         onSetColumns={draft.structureOps.setColumns}
+        onDissolve={draft.structureOps.dissolve}
+        onDuplicate={draft.structureOps.duplicate}
         onAddField={draft.fieldOps.add}
         onRenameField={draft.fieldOps.rename}
         onDeleteField={draft.fieldOps.remove}
@@ -54,9 +57,13 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
         onSetFieldType={draft.structureOps.setFieldType}
         onGroup={draft.structureOps.group}
         onPatchField={draft.fieldOps.patch}
+        onMergeTable={draft.fieldOps.mergeTable}
       />
 
-      <div className="min-w-0 flex-1 px-7 pb-10">
+      {/* The preview scrolls INSIDE this column, so the chrome above and the
+          structure panel beside it hold still while an author pages a long
+          document. */}
+      <div className="fai-scroll h-full min-w-0 flex-1 overflow-y-auto px-7 pb-10">
         <div className="mb-3 flex items-start gap-2.5 text-[12px] leading-relaxed text-text-tertiary">
           <Icon name="sparkles" size={14} className="mt-0.5 flex-none text-accent" />
           <span>
@@ -107,6 +114,14 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
             </span>
           </div>
         )}
+
+        {/*
+          THE SECOND LOOK. After the orphan check (fields with no section), the
+          audit answers the opposite question — printed boxes with no field —
+          so the two failure directions of the arrangement are both surfaced
+          here, where the author is looking at the arrangement.
+        */}
+        <MissedBoxAudit draft={draft} />
 
         <ArtifactPager
           structure={draft.structure}

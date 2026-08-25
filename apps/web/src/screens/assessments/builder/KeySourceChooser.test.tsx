@@ -100,6 +100,58 @@ describe('KeySourceChooser — JSON', () => {
     expect(problem.textContent).toContain('none were applied');
   });
 
+  it('reports keys and MODEL ANSWERS as separate numbers', async () => {
+    /*
+      "15 answers seeded" over 4 keys and 11 guides would claim auto-marking
+      for questions the machine never touches. The two numbers are different
+      promises and the banner says both.
+    */
+    const written: FormField = {
+      id: 'w1',
+      label: 'Explain the exclusion zone',
+      type: 'textarea',
+      required: false,
+      source: 'imported',
+    };
+    const onSeed = vi.fn();
+    render(
+      <KeySourceChooser
+        sections={[
+          { key: 'general', label: 'Written or Verbal Questions (General)', cols: 1, fields: [{ id: 'q1' }, { id: 'w1' }] },
+        ]}
+        fields={[question('q1'), written]}
+        excluded={new Set()}
+        onSeed={onSeed}
+      />,
+    );
+
+    upload(
+      /Upload answer key/,
+      jsonFile({
+        sections: {
+          general: {
+            questions: [
+              { n: 1, answers: ['a'] },
+              { n: 2, answers: ['Nobody enters while tipping.'] },
+            ],
+          },
+        },
+      }),
+    );
+
+    await waitFor(() => expect(onSeed).toHaveBeenCalled());
+    expect(onSeed.mock.calls[0]![0]).toEqual([
+      { fieldId: 'q1', answerKey: ['a'], source: 'guide_json' },
+      {
+        fieldId: 'w1',
+        answerKey: [],
+        modelAnswer: 'Nobody enters while tipping.',
+        source: 'guide_json',
+      },
+    ]);
+    expect(screen.getByText(/1 answer · 1 model answer seeded/)).toBeTruthy();
+  });
+
   it('names both accepted shapes when the file is neither', async () => {
     setup();
     upload(/Upload answer key/, jsonFile({ nope: true }));

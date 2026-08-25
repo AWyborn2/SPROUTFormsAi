@@ -5,6 +5,7 @@ import {
   downloadPdf,
   getSupabaseClient,
   type SupabaseStorageClient,
+  uploadCourseFile,
   uploadImage,
   uploadPdf,
 } from './supabase.js';
@@ -174,5 +175,32 @@ describe('deletePrefix', () => {
     });
 
     await expect(deletePrefix(client, 'org-1')).rejects.toThrow('storage_delete_prefix_failed');
+  });
+});
+
+describe('uploadCourseFile', () => {
+  it('writes the caller-validated path under the org course namespace with its content type', async () => {
+    const upload = vi.fn().mockResolvedValue({ error: null });
+    const client = mockClient({ upload });
+
+    const key = await uploadCourseFile(
+      client,
+      'org-1',
+      'course-uuid',
+      'img/cover.png',
+      new Uint8Array([1, 2, 3]),
+      'image/png',
+    );
+
+    expect(key).toBe('org-1/course-course-uuid/img/cover.png');
+    expect(upload).toHaveBeenCalledWith(key, expect.any(Uint8Array), { contentType: 'image/png' });
+  });
+
+  it('throws when the upload errors', async () => {
+    const upload = vi.fn().mockResolvedValue({ error: { message: 'quota' } });
+    const client = mockClient({ upload });
+    await expect(
+      uploadCourseFile(client, 'org-1', 'c1', 'index.html', new Uint8Array([1]), 'text/html'),
+    ).rejects.toThrow(/storage_upload_failed/);
   });
 });
