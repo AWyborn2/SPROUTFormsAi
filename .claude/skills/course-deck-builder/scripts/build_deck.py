@@ -30,7 +30,7 @@ deck.json schema:
   },
   "intro": ["title.html", "how-to.html"],   // optional; intro[0] gets a short beat
   "parts": [
-    { "key": "A", "label": "PART A", "title": "Working Safely…",
+    { "key": "A", "label": "MODULE A", "title": "Working Safely…",
       "blurb": "Safety focus · PPE · hazards", "divider": true,
       "slides": ["a-safety.html", "a-pmh.html"] }
   ],
@@ -145,7 +145,7 @@ def completion_section(comp: dict) -> str:
     logo = comp.get('logo')
     logo_html = f'  <img src="{html.escape(logo)}" style="height:150px;">\n' if logo else ''
     heading = html.escape(comp.get('heading', 'Course Complete'))
-    body = html.escape(comp.get('body', 'You have read every part of this course. Your reading is recorded against the assessment — you can now begin.'))
+    body = html.escape(comp.get('body', 'You have read every module of this course. Your reading is recorded against the assessment — you can now begin.'))
     return (
         '<section style="background:var(--ink); color:#fff; display:flex; flex-direction:column; '
         'justify-content:center; align-items:center; padding:0 var(--pad-x); gap:32px; text-align:center;">\n'

@@ -57,12 +57,12 @@ def part_of(i: int) -> str:
 
 # ── Content for the 6 regenerated (formerly data-bound) slides ────────────────
 PART_DEFS = [
-    ('A', 'PART A', 'Working Safely in the Active Mine Area', 'Safety focus · PPE · principal hazards · exclusion zones'),
-    ('B', 'PART B', 'Communication', 'Two-way radio · emergency response · channels · blasting · pos-coms'),
-    ('C', 'PART C', 'Access & Traffic Rules', 'Area access · pedestrians · CAS · phones · signage'),
-    ('D', 'PART D', 'Operating SME', 'Isolation · horn signals · inspections · faults · blind spots'),
-    ('E', 'PART E', 'Vehicle Interaction', 'Change outs · parking · refuelling · passing · breakdowns · public roads'),
-    ('F', 'PART F', 'Hazardous Events, Ground & Health', 'Fires · lightning · powerlines · gradients · vibration · fatigue'),
+    ('A', 'MODULE A', 'Working Safely in the Active Mine Area', 'Safety focus · PPE · principal hazards · exclusion zones'),
+    ('B', 'MODULE B', 'Communication', 'Two-way radio · emergency response · channels · blasting · pos-coms'),
+    ('C', 'MODULE C', 'Access & Traffic Rules', 'Area access · pedestrians · CAS · phones · signage'),
+    ('D', 'MODULE D', 'Operating SME', 'Isolation · horn signals · inspections · faults · blind spots'),
+    ('E', 'MODULE E', 'Vehicle Interaction', 'Change outs · parking · refuelling · passing · breakdowns · public roads'),
+    ('F', 'MODULE F', 'Hazardous Events, Ground & Health', 'Fires · lightning · powerlines · gradients · vibration · fatigue'),
 ]
 
 PMH = [
@@ -124,14 +124,14 @@ def menu_slide() -> str:
   <div style="display:flex; justify-content:space-between; align-items:flex-end;">
     <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Section Menu</h1>
     <div style="display:flex; align-items:center; gap:16px;">
-      <span class="menu-count" style="font-size:var(--type-small); color:#666;">0 of 6 parts complete</span>
+      <span class="menu-count" style="font-size:var(--type-small); color:#666;">0 of 6 modules complete</span>
       <div style="width:220px; height:12px; background:#ddd; border-radius:6px; overflow:hidden;"><div class="menu-fill" style="height:100%; background:#1a7a2e; width:0%; transition:width .4s;"></div></div>
     </div>
   </div>
   <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:22px; flex:1;">
 {grid}
   </div>
-  <p class="menu-foot" style="font-size:23px; color:#888; text-align:center;">Parts unlock in order — open a section, read every slide and every card, then come back here for the next.</p>
+  <p class="menu-foot" style="font-size:23px; color:#888; text-align:center;">Modules unlock in order — open a module, read every slide and every card, then come back here for the next.</p>
 </section>'''
 
 
@@ -251,7 +251,7 @@ def completion_slide() -> str:
     return '''<section data-label="Completion" style="background:var(--ink); color:#fff; display:flex; flex-direction:column; justify-content:center; align-items:center; padding:0 var(--pad-x); gap:32px; text-align:center;">
   <img src="img/p02-cover.png" style="height:150px;">
   <h1 style="font-size:88px; font-weight:900; letter-spacing:-2px; line-height:1.05;">Induction Complete</h1>
-  <p style="font-size:var(--type-body); color:#ccc; max-width:1200px; line-height:1.45;">You have read every part of the Mine Site SME Operating Manual. Your reading is recorded against the assessment — you can now begin.</p>
+  <p style="font-size:var(--type-body); color:#ccc; max-width:1200px; line-height:1.45;">You have read every module of the Mine Site SME Operating Manual. Your reading is recorded against the assessment — you can now begin.</p>
   <div style="display:flex; gap:20px;">
     <button class="cta" data-action="start" style="background:#EADA23; color:#3C4043; border:0; padding:22px 52px; font-size:28px; font-weight:800; cursor:pointer; border-radius:6px; font-family:'Archivo',sans-serif;">Start Assessment →</button>
     <button class="cta" data-action="menu" style="background:transparent; color:#fff; border:2px solid #555; padding:22px 40px; font-size:24px; font-weight:700; cursor:pointer; border-radius:6px; font-family:'Archivo',sans-serif;">Back to Section Menu</button>
@@ -374,7 +374,7 @@ function readingMs(sl){ var w=(sl.textContent||'').trim().split(/\s+/).length; r
 function nextLabel(i){ var p=partOf(i);
  if(p==='intro') return i===0?'Begin →':'Next →';
  if(p==='done') return 'Start Assessment →';
- var r=PARTS[p]; return (i<r[1])?'Next →':('Finish Part '+p+' →'); }
+ var r=PARTS[p]; return (i<r[1])?'Next →':('Finish Module '+p+' →'); }
 function becomeReady(i){ stopFill(); tick(true); setMsg('Slide complete'); setNext(nextLabel(i), true); }
 
 function reflectCards(sl){ var c=cardsOf(sl), d=0; for(var i=0;i<c.length;i++) if(c[i].classList.contains('viewed')) d++;
@@ -397,9 +397,9 @@ function renderMenu(){ var sl=slides[2], done=0;
   var tag=card.querySelector('.pc-tag'); if(tag) tag.style.color = comp?'#1a7a2e':unl?'#3C4043':'#aaa';
   var tk=card.querySelector('.pc-tick'); if(tk){ tk.textContent=comp?'✓ complete':unl?'start →':'locked'; tk.style.color=comp?'#1a7a2e':unl?'#B26A00':'#aaa'; }
  });
- var mc=sl.querySelector('.menu-count'); if(mc) mc.textContent=done+' of 6 parts complete';
+ var mc=sl.querySelector('.menu-count'); if(mc) mc.textContent=done+' of 6 modules complete';
  var mf=sl.querySelector('.menu-fill'); if(mf) mf.style.width=Math.round(done/6*100)+'%';
- var ft=sl.querySelector('.menu-foot'); if(ft) ft.textContent=allDone()?'All sections complete — press Finish to reach the assessment.':'Parts unlock in order — open a section, read every slide and every card, then come back here for the next.'; }
+ var ft=sl.querySelector('.menu-foot'); if(ft) ft.textContent=allDone()?'All modules complete — press Finish to reach the assessment.':'Modules unlock in order — open a module, read every slide and every card, then come back here for the next.'; }
 
 function setExp(card, open){
  var d=card.querySelector('.detail'); if(d) d.style.display = open ? (d.tagName==='P'?'block':'flex') : 'none';
@@ -422,7 +422,7 @@ function handleCard(card){ var sl=slides[current];
 
 function enterSlide(i){ var sl=slides[i], p=partOf(i);
  crumb.textContent = p==='intro'?'Introduction' : p==='menu'?'Section Menu' : p==='done'?'Complete'
-   : ('Part '+p+' · slide '+(i-PARTS[p][0]+1)+' of '+(PARTS[p][1]-PARTS[p][0]+1));
+   : ('Module '+p+' · slide '+(i-PARTS[p][0]+1)+' of '+(PARTS[p][1]-PARTS[p][0]+1));
  tick(false); stopFill(); nextBtn.style.display='';
  if(p==='menu'){ renderMenu(); markComplete(i); menuBar(); return; }
  // The final slide counts as read on ARRIVAL — reaching it required finishing

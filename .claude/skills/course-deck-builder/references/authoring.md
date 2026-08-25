@@ -2,7 +2,7 @@
 
 How to turn a source PDF into the `deck.json` + `slides/` + `img/` that
 `build_deck.py` consumes. The packager handles the chrome (menu, dividers,
-completion, engine); your job is the content: extract it, split it into parts,
+completion, engine); your job is the content: extract it, split it into modules,
 and write one `<section>` per slide.
 
 ## 1. Extract the PDF
@@ -30,14 +30,15 @@ Read the text to understand the manual's structure, and keep the images you'll
 actually use (diagrams, signage, equipment photos) in `deck/img/`. Re-encode
 huge images down (a course zip should be tens of MB, not hundreds).
 
-## 2. Plan the parts (hub-and-spoke)
+## 2. Plan the modules (hub-and-spoke)
 
 The deck is a hub-and-spoke: an intro, a **Section Menu**, then several
-**parts** the reader unlocks in order and returns to the menu between. Map the
-manual's chapters to 4–8 parts, each with ~4–8 slides. Give every part a
-`key` (short: `A`,`B`,… or a slug), a `label` ("PART A"), a `title`, and a
-one-line `blurb`. Put a `divider:true` on a part to get a generated title
-slide before its content.
+**modules** the reader unlocks in order and returns to the menu between. Map the
+manual's chapters to 4–8 modules, each with ~4–8 slides. (In `deck.json` the
+modules live in the `parts` array — the key name is historical; what the reader
+sees is "MODULE".) Give every module a `key` (short: `A`,`B`,… or a slug), a
+`label` ("MODULE A"), a `title`, and a one-line `blurb`. Put a `divider:true`
+on a module to get a generated title slide before its content.
 
 Keep one idea per slide. A wall of text is worse than three focused slides —
 the reading-beat timer scales with word count, so dense slides also make the
@@ -179,11 +180,11 @@ clearly. Give every interactive element on a slide a unique `data-touch`.
              "fontsHref": "https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800;900&display=swap" },
   "intro": ["title.html", "how-to.html"],
   "parts": [
-    { "key": "A", "label": "PART A", "title": "Working Safely", "blurb": "PPE · hazards",
+    { "key": "A", "label": "MODULE A", "title": "Working Safely", "blurb": "PPE · hazards",
       "divider": true, "slides": ["a-ppe.html", "a-hazards.html"] }
   ],
   "completion": { "heading": "Induction Complete",
-                  "body": "You have read every part. You can now begin.",
+                  "body": "You have read every module. You can now begin.",
                   "logo": "img/cover.png" }
 }
 ```
