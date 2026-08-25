@@ -94,6 +94,15 @@ async function run() {
   check('engine boots in sandbox', boot.canvas && boot.active === 1, JSON.stringify(boot));
   check('one slide visible, no page scroll', boot.active === 1 && boot.scrollH <= boot.winH + 5, 'scrollH=' + boot.scrollH);
   const total = boot.total;
+  // The host counts a deck's slides by matching <section…> over index.html and
+  // gates completion on the engine reporting that many. Prove the two agree — a
+  // stray "<section" (e.g. inside an inlined comment) inflates the host total, so
+  // a fully-read deck reports one slide short forever and the assessment gate
+  // never opens. This is invisible to the drive-through below, so assert it here.
+  const rawHtml = fs.readFileSync(path.join(pkgDir, 'index.html'), 'utf8');
+  const hostCount = (rawHtml.match(/<section\b[^>]*>/g) || []).length
+    - (rawHtml.match(/<section\b[^>]*\bdata-deck-skip\b[^>]*>/g) || []).length;
+  check('host slide count matches the engine (completion reachable)', hostCount === total, `host ${hostCount} vs engine ${total}`);
 
   // menu structure
   const partKeys = await ev(() => [...new Set([...document.querySelectorAll('.slide[data-part]')].map((s) => s.getAttribute('data-part')).filter((p) => !['intro', 'menu', 'done'].includes(p)))]);

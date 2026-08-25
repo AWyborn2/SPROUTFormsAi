@@ -30,7 +30,7 @@
   catch (e) { var m = {}; store = { getItem: function (k) { return (k in m) ? m[k] : null; }, setItem: function (k, v) { m[k] = String(v); } }; }
   var KEY = (window.__courseKey || 'course-deck') + '-progress';
 
-  var viewport, canvas, slides, crumb, statusEl, msgEl, nextBtn, nextFill, nextLbl;
+  var viewport, canvas, slides, crumb, statusEl, msgEl, nextBtn, nextFill, nextLbl, backBtn;
   var TOTAL = 0, PARTS = {}, ORDER = [];
   var completed = new Set(), touched = new Set(), current = 0, readTimer = null;
 
@@ -136,6 +136,11 @@
 
   function enterSlide(i) {
     var sl = slides[i], p = partOf(i);
+    // A visible Back button lets the reader cycle back through slides they have
+    // already seen; hidden only on the very first slide, where there is nowhere
+    // to go. Going back never re-gates — an already-completed slide is ready at
+    // once (see the completed.has(i) paths below).
+    if (backBtn) backBtn.hidden = (i <= 0);
     crumb.textContent = p === 'intro' ? 'Introduction' : p === 'menu' ? 'Section Menu' : p === 'done' ? 'Complete'
       : ('Part ' + p + ' · slide ' + (i - PARTS[p][0] + 1) + ' of ' + (PARTS[p][1] - PARTS[p][0] + 1));
     tick(false); stopFill(); nextBtn.style.display = '';
@@ -171,6 +176,7 @@
 
   function bind() {
     nextBtn.addEventListener('click', advance);
+    if (backBtn) backBtn.addEventListener('click', back);
     canvas.addEventListener('click', function (e) {
       // close a hotspot popover (X button or a click on the detail's own
       // backdrop) without counting as a new interaction
@@ -189,8 +195,18 @@
     window.addEventListener('message', function (e) {
       var d = e.data;
       if (d && d.type === 'course-progress-seed' && Array.isArray(d.visited)) {
+        var had = completed.size;
         d.visited.forEach(function (n) { if (typeof n === 'number' && n >= 0 && n < TOTAL) completed.add(n); });
-        save(); enterSlide(current);
+        save();
+        // RESUME, don't restart. localStorage is dead in the host's opaque-origin
+        // sandbox, so without this a returning reader lands on the title with
+        // their progress invisible and has to click back through the intro — the
+        // "it makes me start again" report. The seed says which slides are done;
+        // drop them at the natural continuation point: the completion slide if
+        // everything is read (Start Assessment ready), otherwise the Section Menu
+        // hub, where finished parts show ticked and the next part is one click on.
+        if (completed.size > had) { var mi = menuIdx(); go(allDone() ? doneIdx() : (mi >= 0 ? mi : current)); }
+        else { enterSlide(current); }
       }
     });
   }
@@ -200,6 +216,7 @@
     var bar = document.getElementById('bar'); crumb = bar.querySelector('.crumb'); statusEl = bar.querySelector('.status');
     msgEl = statusEl.querySelector('.msg'); nextBtn = document.getElementById('next');
     nextFill = nextBtn.querySelector('.fill'); nextLbl = nextBtn.querySelector('.lbl');
+    backBtn = document.getElementById('back');
     derive(); load(); fit(); bind(); if (current < 0 || current >= TOTAL) current = 0; go(current);
   }
   if (document.readyState !== 'loading') init(); else document.addEventListener('DOMContentLoaded', init);

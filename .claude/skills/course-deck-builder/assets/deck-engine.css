@@ -1,6 +1,9 @@
 /* course-deck-builder engine — theme + slideshow chrome.
-   Content-agnostic: slides are 1920x1080 <section>s with their own inline
-   styles; this only positions/scales them and paints the nav bar.
+   Content-agnostic: slides are 1920x1080 section elements with their own
+   inline styles; this only positions/scales them and paints the nav bar.
+   (No literal section tag in this comment — the host counts a deck's slides
+   by matching that tag over index.html, and a stray one here would inflate
+   the total so completion could never be reached.)
    Brand tokens (--ink,--grey,--accent,--accent-ink,--good) are overwritten
    per deck by build_deck.py injecting a :root override after this file. */
 *{box-sizing:border-box;}
@@ -87,3 +90,7 @@ section h1,section h2,section p,section ul{margin:0;}
 #next.ready{box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent);}
 #next .fill{position:absolute;left:0;top:0;bottom:0;width:0;background:rgba(255,255,255,.16);pointer-events:none;}
 #next .lbl{position:relative;}
+#back{border:1px solid #3a3a42;background:transparent;color:#cfcfcf;border-radius:8px;height:46px;padding:0 20px;
+  font:inherit;font-size:15px;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s,color .15s,border-color .15s;}
+#back:hover{background:#26262d;color:#fff;border-color:#4a4a54;}
+#back[hidden]{display:none;}
