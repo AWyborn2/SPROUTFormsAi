@@ -24,6 +24,9 @@ vi.mock('../fields/FieldRenderer.js', () => ({
 vi.mock('./QuizOptionCards.js', () => ({
   QuizOptionCards: ({ field }: { field: FormField }) => <div data-testid={`quiz-${field.id}`} />,
 }));
+vi.mock('../fields/MatchingField.js', () => ({
+  MatchingField: ({ labelId }: { labelId: string }) => <div data-testid={`match-${labelId}`} />,
+}));
 vi.mock('./TheoryResults.js', () => ({
   TheoryResults: () => <div data-testid="results" />,
 }));
@@ -155,5 +158,44 @@ describe('TheoryQuiz — retry mode gates the on-the-spot retry (task #45)', () 
     answerWrong('off');
     await waitFor(() => expect(button(/finish/i)).toBeTruthy());
     expect(screen.queryByRole('button', { name: /try again/i })).toBeNull();
+  });
+});
+
+describe('matching questions', () => {
+  it('renders a matching question as a MatchingField, not flat option cards', () => {
+    renderQuiz({
+      pages: [
+        page([
+          field({
+            id: 'm1',
+            type: 'checkbox_group',
+            required: true,
+            options: ['1 blast -> Start engine', '2 blasts -> Move forward'],
+            matchPresentation: { mode: 'line' },
+          }),
+        ]),
+      ],
+      writable: new Set(['m1']),
+    });
+    expect(screen.getByTestId('match-m1-q')).toBeTruthy();
+    expect(screen.queryByTestId('quiz-m1')).toBeNull();
+  });
+
+  it('a matching question with no presentation still falls back to the option cards', () => {
+    renderQuiz({
+      pages: [
+        page([
+          field({
+            id: 'm2',
+            type: 'checkbox_group',
+            required: true,
+            options: ['1 blast -> Start engine', '2 blasts -> Move forward'],
+          }),
+        ]),
+      ],
+      writable: new Set(['m2']),
+    });
+    expect(screen.getByTestId('quiz-m2')).toBeTruthy();
+    expect(screen.queryByTestId('match-m2-q')).toBeNull();
   });
 });

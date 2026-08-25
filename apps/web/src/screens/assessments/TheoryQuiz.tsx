@@ -1,8 +1,9 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { FormField, SubmissionValue, TheoryRetryMode } from '@formai/shared';
-import { isChoiceField } from '@formai/shared';
+import { isChoiceField, isMatchingQuestion } from '@formai/shared';
 import { Button, Icon } from '@formai/ui';
 import { FieldInput } from '../fields/FieldRenderer.js';
+import { MatchingField } from '../fields/MatchingField.js';
 import { fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
 import type { TheoryPage } from '../../lib/theory-pages.js';
 import { QuizOptionCards } from './QuizOptionCards.js';
@@ -273,22 +274,40 @@ export function TheoryQuiz({
         {page.fields.map((f) => {
           const isOption = isChoiceField(f.type) && (f.options?.length ?? 0) > 0;
           if (isOption) {
+            const locked = !writable.has(f.id) || (currentSubmitted && !canRetry);
+            /*
+              A MATCHING QUESTION RENDERS AS A MATCH, NOT A FLAT LIST — the same
+              choice as `FieldRenderer`. It is stored as a choice field whose
+              options are the pairings, so it reaches this branch; without this
+              the case quiz drew it as "select all correct answers" cards and
+              dropped the pictures entirely. Presentation only — the value is
+              the same array of pairing strings `markTheory` reads.
+            */
+            const matching = isMatchingQuestion(f.options) && f.matchPresentation;
             return (
               <div key={f.id} className="col-span-12">
-                <div className="mb-3 text-[13px] font-semibold text-text-primary">
+                <div id={`${f.id}-q`} className="mb-3 text-[13px] font-semibold text-text-primary">
                   {f.label}
                   {f.required && <span className="ml-0.5 text-danger">*</span>}
                 </div>
-                <QuizOptionCards
-                  field={f}
-                  value={values[f.id] ?? null}
-                  disabled={
-                    !writable.has(f.id) ||
-                    (currentSubmitted && !canRetry)
-                  }
-                  onChange={(v) => onValueChange(f.id, v)}
-                  feedback={currentSubmitted && questionId === f.id ? currentFeedback ?? null : null}
-                />
+                {matching ? (
+                  <MatchingField
+                    options={f.options ?? []}
+                    value={Array.isArray(values[f.id]) ? (values[f.id] as string[]) : []}
+                    presentation={f.matchPresentation!}
+                    disabled={locked}
+                    labelId={`${f.id}-q`}
+                    onChange={(v) => onValueChange(f.id, v)}
+                  />
+                ) : (
+                  <QuizOptionCards
+                    field={f}
+                    value={values[f.id] ?? null}
+                    disabled={locked}
+                    onChange={(v) => onValueChange(f.id, v)}
+                    feedback={currentSubmitted && questionId === f.id ? currentFeedback ?? null : null}
+                  />
+                )}
               </div>
             );
           }
