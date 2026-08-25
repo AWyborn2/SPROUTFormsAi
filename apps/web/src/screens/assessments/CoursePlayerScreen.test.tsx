@@ -25,9 +25,17 @@ const courseResult: {
 } = { data: undefined, isLoading: false, error: null };
 
 const saveMutate = vi.fn();
+const openMutate = vi.fn((_partKey: string, opts?: { onSuccess?: (r: { id: string }) => void }) =>
+  opts?.onSuccess?.({ id: 'att-9' }),
+);
+const caseResult: { data: { parts: { key: string; state: string }[] } | undefined } = {
+  data: { parts: [{ key: 'theory', state: 'open' }] },
+};
 vi.mock('../../lib/data/hooks.js', () => ({
   useCaseCourse: () => courseResult,
   useSaveCourseProgress: () => ({ mutate: saveMutate, isPending: false }),
+  useAssessmentCase: () => caseResult,
+  useOpenAttempt: () => ({ mutate: openMutate, isPending: false }),
 }));
 
 const toast = vi.fn();
@@ -73,6 +81,7 @@ afterEach(() => {
   courseResult.data = undefined;
   courseResult.isLoading = false;
   courseResult.error = null;
+  caseResult.data = { parts: [{ key: 'theory', state: 'open' }] };
 });
 
 describe('CoursePlayerScreen', () => {
@@ -117,7 +126,8 @@ describe('CoursePlayerScreen', () => {
     expect(saveMutate).not.toHaveBeenCalled();
   });
 
-  it('the deck’s Start Assessment message navigates back to the case', () => {
+  it('the deck’s Start Assessment message opens the first part and jumps to its questions', () => {
+    caseResult.data = { parts: [{ key: 'theory', state: 'open' }] };
     courseResult.data = { course: deckCourse({ viewedCount: 3, completedAt: '2026-08-24T03:00:00Z' }) };
     render(<CoursePlayerScreen />);
     const frame = document.querySelector('iframe')!;
@@ -126,6 +136,21 @@ describe('CoursePlayerScreen', () => {
     act(() => {
       window.dispatchEvent(event);
     });
+    expect(openMutate).toHaveBeenCalledWith('theory', expect.anything());
+    expect(navigate).toHaveBeenCalledWith('/app/assessments/case-1/attempts/att-9');
+  });
+
+  it('Start Assessment falls back to the case overview when no part is open', () => {
+    caseResult.data = { parts: [{ key: 'theory', state: 'satisfactory' }] };
+    courseResult.data = { course: deckCourse({ viewedCount: 3, completedAt: '2026-08-24T03:00:00Z' }) };
+    render(<CoursePlayerScreen />);
+    const frame = document.querySelector('iframe')!;
+    const event = new MessageEvent('message', { data: { type: 'course-start-assessment' } });
+    Object.defineProperty(event, 'source', { value: frame.contentWindow });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(openMutate).not.toHaveBeenCalled();
     expect(navigate).toHaveBeenCalledWith('/app/assessments/case-1');
   });
 

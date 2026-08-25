@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
-import { useCaseCourse, useSaveCourseProgress } from '../../lib/data/hooks.js';
+import {
+  useAssessmentCase,
+  useCaseCourse,
+  useOpenAttempt,
+  useSaveCourseProgress,
+} from '../../lib/data/hooks.js';
 
 /**
  * The course player: the case's course package running in a sandboxed iframe,
@@ -25,8 +30,44 @@ export function CoursePlayerScreen() {
   const { toast } = useToast();
   const { data, isLoading, error } = useCaseCourse(id ?? '');
   const save = useSaveCourseProgress(id ?? '');
+  // The case's parts, so the deck's Start Assessment can drop the reader
+  // straight into the first part's questions rather than back at the case
+  // overview.
+  const { data: caseDetail } = useAssessmentCase(id);
+  const openAttempt = useOpenAttempt(id ?? '');
 
   const course = data?.course ?? null;
+
+  /**
+   * Reached from the deck's "Start Assessment" button. Open an attempt on the
+   * first part the reader can start and go straight to its questions; if
+   * nothing is open (all parts done, or the workflow hands the first step to
+   * someone else) or the open fails, fall back to the case overview so they're
+   * never stranded. Guarded so a double-tap can't open two attempts.
+   */
+  const startingRef = useRef(false);
+  const startAssessment = useCallback(() => {
+    if (!id || startingRef.current) return;
+    const target = (caseDetail?.parts ?? []).find((p) => p.state === 'open');
+    if (!target) {
+      navigate(`/app/assessments/${id}`);
+      return;
+    }
+    startingRef.current = true;
+    openAttempt.mutate(target.key, {
+      onSuccess: (res) => navigate(`/app/assessments/${id}/attempts/${res.id}`),
+      onError: () => {
+        startingRef.current = false;
+        navigate(`/app/assessments/${id}`);
+      },
+    });
+  }, [id, caseDetail, navigate, openAttempt]);
+  // Held in a ref so the message listener stays stable (re-subscribing it could
+  // drop or double-count slide reports).
+  const startRef = useRef(startAssessment);
+  useEffect(() => {
+    startRef.current = startAssessment;
+  }, [startAssessment]);
 
   // Live reading state — seeded from the fetched record once, then driven by
   // PATCH responses. Kept outside react-query so a progress tick never
@@ -83,7 +124,7 @@ export function CoursePlayerScreen() {
       // allow-top-navigation), so it asks us to. Send the reader back to the
       // case, where the now-satisfied gate lets them open the first part.
       if (d.type === 'course-start-assessment') {
-        navigate(`/app/assessments/${id}`);
+        startRef.current();
         return;
       }
       if (d.type !== 'course-slide' || typeof d.index !== 'number') return;
@@ -97,7 +138,7 @@ export function CoursePlayerScreen() {
       window.removeEventListener('message', onMessage);
       if (timerRef.current !== null) clearTimeout(timerRef.current);
     };
-  }, [scheduleFlush, navigate, id]);
+  }, [scheduleFlush]);
 
   if (isLoading) {
     return (
