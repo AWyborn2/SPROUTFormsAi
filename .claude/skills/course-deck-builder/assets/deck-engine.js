@@ -72,7 +72,7 @@
     if (p === 'intro') return i === 0 ? 'Begin →' : 'Next →';
     if (p === 'done') return 'Start Assessment →';
     var r = PARTS[p];
-    return (i < r[1]) ? 'Next →' : ('Finish Part ' + p + ' →');
+    return (i < r[1]) ? 'Next →' : ('Finish Module ' + p + ' →');
   }
   function becomeReady(i) { stopFill(); tick(true); setMsg('Slide complete'); setNext(nextLabel(i), true); }
 
@@ -102,9 +102,9 @@
       var tag = card.querySelector('.pc-tag'); if (tag) tag.style.color = comp ? 'var(--good)' : unl ? 'var(--ink)' : '#aaa';
       var tk = card.querySelector('.pc-tick'); if (tk) { tk.textContent = comp ? '✓ complete' : unl ? 'start →' : 'locked'; tk.style.color = comp ? 'var(--good)' : unl ? '#B26A00' : '#aaa'; }
     });
-    var mc = sl.querySelector('.menu-count'); if (mc) mc.textContent = done + ' of ' + ORDER.length + ' parts complete';
+    var mc = sl.querySelector('.menu-count'); if (mc) mc.textContent = done + ' of ' + ORDER.length + ' modules complete';
     var mf = sl.querySelector('.menu-fill'); if (mf) mf.style.width = Math.round(done / ORDER.length * 100) + '%';
-    var ft = sl.querySelector('.menu-foot'); if (ft) ft.textContent = allDone() ? 'All sections complete — press Finish to reach the assessment.' : 'Parts unlock in order — open a section, read every slide and every card, then come back here for the next.';
+    var ft = sl.querySelector('.menu-foot'); if (ft) ft.textContent = allDone() ? 'All modules complete — press Finish to reach the assessment.' : 'Modules unlock in order — open a module, read every slide and every card, then come back here for the next.';
   }
 
   function setExp(card, open) {
@@ -142,7 +142,7 @@
     // once (see the completed.has(i) paths below).
     if (backBtn) backBtn.hidden = (i <= 0);
     crumb.textContent = p === 'intro' ? 'Introduction' : p === 'menu' ? 'Section Menu' : p === 'done' ? 'Complete'
-      : ('Part ' + p + ' · slide ' + (i - PARTS[p][0] + 1) + ' of ' + (PARTS[p][1] - PARTS[p][0] + 1));
+      : ('Module ' + p + ' · slide ' + (i - PARTS[p][0] + 1) + ' of ' + (PARTS[p][1] - PARTS[p][0] + 1));
     tick(false); stopFill(); nextBtn.style.display = '';
     if (p === 'menu') { renderMenu(); markComplete(i); menuBar(); return; }
     // The final slide counts as read on ARRIVAL, not after a reading beat:
