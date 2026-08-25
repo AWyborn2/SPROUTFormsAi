@@ -65,7 +65,7 @@
   function setNext(label, on) { nextLbl.textContent = label; nextBtn.disabled = !on; nextBtn.classList.toggle('ready', !!on); }
   function stopFill() { if (readTimer) { clearTimeout(readTimer); readTimer = null; } nextFill.style.transition = 'none'; nextFill.style.width = '0%'; }
   function runFill(ms) { nextFill.style.transition = 'none'; nextFill.style.width = '0%'; void nextFill.offsetWidth; nextFill.style.transition = 'width ' + ms + 'ms linear'; nextFill.style.width = '100%'; }
-  function readingMs(sl) { var w = (sl.textContent || '').trim().split(/\s+/).length; return Math.min(11000, Math.max(3500, w * 170)); }
+  function readingMs(sl) { var w = (sl.textContent || '').trim().split(/\s+/).length; return Math.min(8000, Math.max(2000, w * 130)); }
 
   function nextLabel(i) {
     var p = partOf(i);
@@ -152,7 +152,7 @@
       else { reflectCards(sl); }
     } else {
       if (completed.has(i)) { becomeReady(i); }
-      else { setMsg('Read the slide…'); setNext('Next →', false); var ms = sl.hasAttribute('data-quick') ? 1500 : readingMs(sl); runFill(ms); readTimer = setTimeout(function () { markComplete(i); becomeReady(i); }, ms); }
+      else { setMsg('Read the slide…'); setNext('Next →', false); var ms = sl.hasAttribute('data-quick') ? 1000 : readingMs(sl); runFill(ms); readTimer = setTimeout(function () { markComplete(i); becomeReady(i); }, ms); }
     }
   }
   function go(i) {
