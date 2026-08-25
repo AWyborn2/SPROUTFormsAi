@@ -11,6 +11,7 @@ import {
 import {
   useAssessmentCases,
   useDeleteProfilePhoto,
+  useGamificationStats,
   useHeldCompetencies,
   useMemberPlacement,
   useMyProfileMembership,
@@ -29,6 +30,7 @@ import { CaseStateBadge } from '../statusBadges.js';
 import { RecommendedTrainingList } from '../recommended-training.js';
 import { sourcesLine } from '../../lib/competency-sources.js';
 import type {
+  GamificationStats,
   HeldCompetencyRow,
   MemberProfile,
   ProfileAccess,
@@ -155,6 +157,7 @@ function badgeCodeFromName(name: string): string {
 function buildProfileViewModel(
   profile: MemberProfile,
   held: HeldCompetencyRow[],
+  gamification?: GamificationStats | null,
 ): ProfileViewModel {
   const sorted = [...held].sort(
     (a, b) =>
@@ -248,12 +251,35 @@ function buildProfileViewModel(
     name: profile.displayName || 'Member record',
     meta,
     heroAlert,
-    xp: PLACEHOLDER_XP,
+    xp: gamification
+      ? {
+          current: gamification.xp - gamification.levelMin,
+          max: gamification.levelMax - gamification.levelMin,
+          level: gamification.level,
+          pct: gamification.levelMax > gamification.levelMin
+            ? Math.round(((gamification.xp - gamification.levelMin) / (gamification.levelMax - gamification.levelMin)) * 100)
+            : 0,
+        }
+      : PLACEHOLDER_XP,
     stats: [
       { v: String(currentCount), label: 'Competencies held' },
-      { v: '0', label: 'XP earned' },
-      { v: '—', label: 'Zero-lapse streak' },
-      { v: '—', label: 'Site leaderboard' },
+      { v: gamification ? String(gamification.xp) : '0', label: 'XP earned' },
+      {
+        v: gamification
+          ? gamification.streakDays > 0
+            ? `${gamification.streakDays}d`
+            : '0d'
+          : '—',
+        label: 'Zero-lapse streak',
+      },
+      {
+        v: gamification
+          ? gamification.leaderboardRank > 0
+            ? `#${gamification.leaderboardRank}`
+            : '—'
+          : '—',
+        label: 'Site leaderboard',
+      },
     ],
     badges,
     earnedCount,
@@ -383,7 +409,11 @@ function ProfileContent({
 }) {
   const held = useHeldCompetencies(userId);
   const rows = held.data ?? EMPTY_ROWS;
-  const vm = useMemo(() => buildProfileViewModel(profile, rows), [profile, rows]);
+  const gamification = useGamificationStats(userId);
+  const vm = useMemo(
+    () => buildProfileViewModel(profile, rows, gamification.data),
+    [profile, rows, gamification.data],
+  );
   const { toast } = useToast();
   const navigate = useNavigate();
 
@@ -393,11 +423,12 @@ function ProfileContent({
         setEditing(true);
         break;
       case 'download':
-        if (role === 'admin' && membershipId) {
+        if (membershipId) {
           window.open(`/api/profiles/${membershipId}/export`, '_blank');
-        } else {
-          toast({ variant: 'info', message: 'Export is available to administrators.' });
         }
+        break;
+      case 'upload':
+        navigate('/app/forms');
         break;
       case 'startCase':
         navigate(`/app/assessments/new?memberId=${userId}`);
@@ -701,10 +732,10 @@ function HeroCard({
           {/* Chips */}
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="inline-flex items-center gap-1.5 rounded-pill bg-success-soft px-2.5 py-0 text-[12px] font-semibold text-success-text">
-              Zero-lapse streak
+              {vm.stats[2]?.v !== '—' ? `${vm.stats[2]?.v} streak` : 'Zero-lapse streak'}
             </span>
             <span className="inline-flex items-center gap-1.5 rounded-pill bg-info-soft px-2.5 py-0 text-[12px] font-semibold text-info-text">
-              Leaderboard
+              {vm.stats[3]?.v !== '—' ? `${vm.stats[3]?.v} site` : 'Leaderboard'}
             </span>
           </div>
         </div>

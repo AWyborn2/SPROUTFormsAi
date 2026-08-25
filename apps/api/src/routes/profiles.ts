@@ -16,6 +16,7 @@ import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { membershipForProfile, profileTierOrg, resolveProfileAccess } from '../lib/profile-access.js';
 import { isUniqueViolation } from '../lib/db-errors.js';
+import { permissionScope } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
 import { storeAttachment, ATTACHMENT_KEY_RE, EXT_CONTENT_TYPE } from './uploads.js';
@@ -459,14 +460,6 @@ profilesRouter.get(
       return;
     }
     const tenant = req.tenant!;
-    if (!isAdmin(tenant.role)) {
-      res.status(403).json({ error: 'forbidden' });
-      return;
-    }
-    // The tier gate resolveProfileAccess applies to every matrix-gated read and
-    // write, applied directly here because this Admin act resolves no matrix.
-    // The org row is kept: the export names each field by the identifier the
-    // organisation chose (R24).
     const org = await profileTierOrg(db, tenant.orgId);
     if (!org) {
       res.status(403).json({ error: 'forbidden' });
@@ -475,6 +468,12 @@ profilesRouter.get(
     const membership = await membershipForProfile(db, tenant.orgId, req.params.membershipId!);
     if (!membership) {
       res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const isSelf = membership.userId === tenant.userId;
+    const hasViewScope = (await permissionScope(tenant, 'profiles', 'view')) === 'all';
+    if (!isSelf && !isAdmin(tenant.role) && !hasViewScope) {
+      res.status(403).json({ error: 'forbidden' });
       return;
     }
 
