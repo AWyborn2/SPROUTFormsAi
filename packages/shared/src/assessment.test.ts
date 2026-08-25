@@ -939,6 +939,30 @@ describe('fieldsInPart', () => {
 
     expect(fieldsInPart(docFields, reversed, 'one').map((f) => f.id)).toEqual(['q1', 'q2', 'h-mid']);
   });
+
+  it('does not adopt a prerequisite box a cover section prints between two parts', () => {
+    // A cover section (here "Prerequisites") placed AFTER a part rather than at
+    // the document head has no anchor of its own, so this part's [anchor, next
+    // anchor) range runs straight through it. The prerequisite box is answered
+    // from the register, never by the part — it must not be sliced in, or a
+    // required box no candidate can fill jams the declaration's hand-in gate.
+    const withPrereq: FormField[] = [
+      question('sig'), // the declaration part's only real field
+      question('prereq'), // the cover "Prerequisites" section's licence box
+      question('q3'), // the next part starts here
+    ];
+    const manifestWithPrereq: AssessmentToolManifest = {
+      parts: [
+        part({ key: 'decl', ordinal: 1, startFieldId: 'sig' }),
+        part({ key: 'next', ordinal: 2, startFieldId: 'q3' }),
+      ],
+      prerequisiteChecks: [{ fieldId: 'prereq', competencyIds: ['licence-c'] }],
+    };
+
+    expect(fieldsInPart(withPrereq, manifestWithPrereq, 'decl').map((f) => f.id)).toEqual(['sig']);
+    // The next part is unaffected — the box sat before its anchor either way.
+    expect(fieldsInPart(withPrereq, manifestWithPrereq, 'next').map((f) => f.id)).toEqual(['q3']);
+  });
 });
 
 describe('duration units', () => {
