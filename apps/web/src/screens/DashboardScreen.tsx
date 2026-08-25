@@ -94,7 +94,7 @@ function CandidateDashboard({ session }: { session: SessionInfo }) {
 
   const rows = held.data ?? [];
   const current = rows.filter((c) => c.current).length;
-  const attention = rows.filter((c) => c.status !== 'held');
+  const attention = rows.filter((c) => c.status !== 'held' && c.status !== 'undated');
   const due = (cases ?? []).filter((c) => !isTerminalCaseState(c.state));
 
   const stats = [

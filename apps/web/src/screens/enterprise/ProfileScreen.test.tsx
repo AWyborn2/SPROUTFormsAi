@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
+import { ToastProvider } from '@formai/ui';
 import { PROFILE_FIELDS } from '@formai/shared';
 import type {
   HeldCompetencyRow,
@@ -181,7 +182,7 @@ function show(access: Partial<ProfileAccess> = {}, profile: Partial<MemberProfil
     isLoading: false,
     isError: false,
   };
-  return render(<ProfileScreen membershipId="m-1" />);
+  return render(<ToastProvider><ProfileScreen membershipId="m-1" /></ToastProvider>);
 }
 
 afterEach(() => {
@@ -265,8 +266,8 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     show();
     expect(screen.getByText('required')).toBeDefined();
     expect(screen.getByText('held')).toBeDefined();
-    // The NAME renders, never the row's database id (the id stays an attribute).
-    expect(screen.getByText('Track Dozer')).toBeDefined();
+    // The NAME renders (badge wall + register), never the raw database id.
+    expect(screen.getAllByText('Track Dozer').length).toBeGreaterThan(0);
     expect(screen.queryByText('c-dozer')).toBeNull();
   });
 
@@ -384,7 +385,7 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     show();
     expect(screen.getByText('optional')).toBeDefined();
     expect(screen.getByText('expired')).toBeDefined();
-    expect(screen.getByText('Voluntary Ticket')).toBeDefined();
+    expect(screen.getAllByText('Voluntary Ticket').length).toBeGreaterThan(0);
   });
 
   /*
