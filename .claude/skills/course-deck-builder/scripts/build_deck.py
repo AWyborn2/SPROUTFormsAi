@@ -219,6 +219,7 @@ def build(deck_dir: Path, out_dir: Path) -> None:
 {body}
 </div></div>
 <div id="bar">
+  <button id="back" type="button" hidden>← Back</button>
   <span class="crumb"></span>
   <span class="status"><span class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l6 6L20 6"/></svg></span><span class="msg"></span></span>
   <button id="next" disabled><span class="fill"></span><span class="lbl">Next →</span></button>
@@ -246,8 +247,23 @@ def build(deck_dir: Path, out_dir: Path) -> None:
         for path in sorted(pkg.rglob('*')):
             if path.is_file():
                 zf.write(path, path.relative_to(pkg).as_posix())
-    n_sections = page.count('<section')
-    print(f'wrote {zip_path} ({zip_path.stat().st_size:,} bytes) — {n_sections} slides, index.html {len(page):,} bytes')
+    # The host counts a deck's slides by matching THIS regex over index.html
+    # (see deckSlideCount in apps/api courses route) and gates completion on the
+    # engine reporting that many. The engine reports one per `.slide` wrapper, so
+    # the two counts MUST agree: a stray "<section …>" anywhere else in the page
+    # — an inlined CSS/JS comment, an example in the chrome — inflates the host's
+    # total, so the reader can finish every slide and still sit one short, and
+    # the assessment gate never opens. Fail the build rather than ship that.
+    host_count = (len(re.findall(r'<section\b[^>]*>', page))
+                  - len(re.findall(r'<section\b[^>]*\bdata-deck-skip\b[^>]*>', page)))
+    n_slides = page.count('class="slide"')
+    if host_count != n_slides:
+        raise SystemExit(
+            f'slide-count mismatch: the host would count {host_count} slides from '
+            f'index.html but the engine drives {n_slides} (.slide wrappers). A stray '
+            f'"<section" outside a slide (often an inlined comment) inflates the host '
+            f'total and makes completion unreachable — remove it.')
+    print(f'wrote {zip_path} ({zip_path.stat().st_size:,} bytes) — {n_slides} slides, index.html {len(page):,} bytes')
 
 
 def main() -> None:
