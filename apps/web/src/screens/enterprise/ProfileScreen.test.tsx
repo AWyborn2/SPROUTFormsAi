@@ -121,6 +121,7 @@ vi.mock('../../lib/data/hooks.js', () => ({
   }),
   useUploadProfilePhoto: () => ({ mutate: vi.fn(), isPending: false }),
   useDeleteProfilePhoto: () => ({ mutate: vi.fn(), isPending: false }),
+  useBadgeIcons: () => ({ data: [] }),
 }));
 
 // The recommended card toasts on request outcomes; the provider is app chrome

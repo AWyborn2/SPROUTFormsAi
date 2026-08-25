@@ -215,6 +215,7 @@ export const keys = {
    * already sweep that prefix.
    */
   myRecommended: ['competencies', 'recommended', 'mine'] as const,
+  badgeIcons: ['badgeIcons'] as const,
 };
 
 /**
@@ -2146,5 +2147,50 @@ export function useActiveWorkforceImport() {
     queryKey: keys.activeImportRun,
     queryFn: () => store.getActiveWorkforceImport(),
     staleTime: 0,
+  });
+}
+
+/* ── Badge icons ───────────────────────────────────────────────────────────── */
+
+export function useBadgeIcons() {
+  return useQuery({
+    queryKey: keys.badgeIcons,
+    queryFn: () => store.listBadgeIcons(),
+  });
+}
+
+export function useCreateBadgeIcon() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { fileBase64: string; slug: string; displayName: string; keywords?: string[] }) =>
+      store.createBadgeIcon(input),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.badgeIcons });
+    },
+  });
+}
+
+export function useUpdateBadgeIcon() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { id: string; displayName?: string; keywords?: string[]; sortOrder?: number }) =>
+      store.updateBadgeIcon(input.id, {
+        displayName: input.displayName,
+        keywords: input.keywords,
+        sortOrder: input.sortOrder,
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.badgeIcons });
+    },
+  });
+}
+
+export function useDeleteBadgeIcon() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => store.deleteBadgeIcon(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.badgeIcons });
+    },
   });
 }

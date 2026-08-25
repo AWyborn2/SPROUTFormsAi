@@ -1225,6 +1225,16 @@ export interface PlacementInsights {
   trend: PlacementTrendPoint[];
 }
 
+/** A custom SVG badge icon uploaded by an admin and mapped to competency keywords. */
+export interface BadgeIcon {
+  id: string;
+  slug: string;
+  displayName: string;
+  iconUrl: string;
+  keywords: string[];
+  sortOrder: number;
+}
+
 /** One column of the training matrix (U5) — the org's competencies, name-sorted by the API. */
 export interface TrainingMatrixCompetency {
   id: string;

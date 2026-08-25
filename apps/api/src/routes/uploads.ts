@@ -46,7 +46,7 @@ export const uploadsRouter: Router = Router();
  * checks the same shape rather than writing a second regex that could drift
  * into accepting a PDF asset id or a logo key.
  */
-export const ATTACHMENT_KEY_RE = /^[^/]+\/upload-[^/]+\.(png|jpe?g|webp|pdf)$/;
+export const ATTACHMENT_KEY_RE = /^[^/]+\/upload-[^/]+\.(png|jpe?g|webp|pdf|svg)$/;
 
 /** Key extension → response `Content-Type`. The adapters store bare bytes. */
 export const EXT_CONTENT_TYPE: Record<string, string> = {
@@ -55,6 +55,7 @@ export const EXT_CONTENT_TYPE: Record<string, string> = {
   jpeg: 'image/jpeg',
   webp: 'image/webp',
   pdf: 'application/pdf',
+  svg: 'image/svg+xml',
 };
 
 /**

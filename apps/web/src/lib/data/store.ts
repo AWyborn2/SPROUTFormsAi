@@ -96,6 +96,7 @@ import type {
   RequirementScopeRef,
   RequirementTiers,
   ScopeRequirementsState,
+  BadgeIcon,
 } from './types.js';
 import type {
   AssessmentToolManifest,
@@ -1501,6 +1502,21 @@ export const store = {
 
   removeRule(id: string): Promise<void> {
     return apiClient.delete(`/competency-rules/${id}`);
+  },
+
+  /* ── Badge icons ──────────────────────────────────────────────────────── */
+
+  listBadgeIcons(): Promise<BadgeIcon[]> {
+    return apiClient.get<BadgeIcon[]>('/badge-icons');
+  },
+  createBadgeIcon(input: { fileBase64: string; slug: string; displayName: string; keywords?: string[] }): Promise<BadgeIcon> {
+    return apiClient.post<BadgeIcon>('/badge-icons', input);
+  },
+  updateBadgeIcon(id: string, input: { displayName?: string; keywords?: string[]; sortOrder?: number }): Promise<BadgeIcon> {
+    return apiClient.patch<BadgeIcon>(`/badge-icons/${id}`, input);
+  },
+  deleteBadgeIcon(id: string): Promise<void> {
+    return apiClient.delete(`/badge-icons/${id}`);
   },
 
   /* ── Mobile field app ──────────────────────────────────────────────────── */

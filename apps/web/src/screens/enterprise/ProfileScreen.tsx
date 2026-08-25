@@ -22,6 +22,7 @@ import {
   useSession,
   useTaxonomy,
   useUploadProfilePhoto,
+  useBadgeIcons,
 } from '../../lib/data/hooks.js';
 import { ApiError } from '../../lib/data/api-client.js';
 import { CaseStateBadge } from '../statusBadges.js';
@@ -776,6 +777,7 @@ function badgeCodeColor(b: BadgeItem): string {
 }
 
 function BadgeWall({ badges, earnedCount }: { badges: BadgeItem[]; earnedCount: number }) {
+  const { data: customIcons } = useBadgeIcons();
   if (badges.length === 0) return null;
 
   return (
@@ -805,7 +807,7 @@ function BadgeWall({ badges, earnedCount }: { badges: BadgeItem[]; earnedCount: 
                 className="flex h-full w-full items-center justify-center rounded-full"
                 style={badgeInnerStyle(b)}
               >
-                {miningBadgeIcon(b.name, 32, badgeCodeColor(b))}
+                {miningBadgeIcon(b.name, 32, badgeCodeColor(b), customIcons)}
               </div>
             </div>
             <span

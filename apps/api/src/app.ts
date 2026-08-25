@@ -40,6 +40,7 @@ import { competencyDocumentsRouter } from './routes/competency-documents.js';
 import { coursesRouter } from './routes/courses.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { voiceRouter } from './routes/voice.js';
+import { badgeIconsRouter } from './routes/badge-icons.js';
 
 /**
  * Builds the Express app. Route groups (auth, forms, import, submissions,
@@ -204,6 +205,7 @@ export function createApp(): Express {
   // Smart Fill for authed surfaces. The public respondent's door is
   // POST /fill/:token/smart-fill, mounted with the rest of publicFillRouter.
   app.use('/voice', voiceRouter);
+  app.use('/badge-icons', badgeIconsRouter);
 
   // Fallthrough 404.
   app.use((_req, res) => {
