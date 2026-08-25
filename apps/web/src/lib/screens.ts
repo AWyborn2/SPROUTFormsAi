@@ -176,6 +176,7 @@ export const SCREENS: ScreenDef[] = [
   { key: 'assessment-part-fill', path: '/app/assessments/:id/attempts/:attemptId', group: 'Assessments', label: 'Complete assessment part', icon: 'pen-line', shell: 'app' },
   { key: 'api-keys', path: '/app/settings/api-keys', group: 'Enterprise & org', label: 'API keys', icon: 'key', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
   { key: 'whitelabel', path: '/app/settings/branding', group: 'Enterprise & org', label: 'Branding', icon: 'sliders-horizontal', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
+  { key: 'badge-icons', path: '/app/settings/badge-icons', group: 'Enterprise & org', label: 'Badge icons', icon: 'image', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
   // The identities this org's forms are presented in — usually clients', not
   // its own. Declared AFTER `whitelabel` so the more specific static path is
   // matched on its own terms rather than by the branding route.

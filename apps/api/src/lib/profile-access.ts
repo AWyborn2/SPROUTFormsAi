@@ -187,7 +187,7 @@ export async function membershipForProfile(
   db: Db,
   orgId: string,
   membershipId: string,
-): Promise<{ id: string; userId: string; orgId: string } | null> {
+): Promise<{ id: string; userId: string; orgId: string; photoKey: string | null } | null> {
   const membership = await db.query.memberships.findFirst({
     where: and(eq(schema.memberships.id, membershipId), eq(schema.memberships.orgId, orgId)),
   });

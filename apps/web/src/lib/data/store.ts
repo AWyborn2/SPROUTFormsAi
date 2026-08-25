@@ -96,6 +96,7 @@ import type {
   RequirementScopeRef,
   RequirementTiers,
   ScopeRequirementsState,
+  BadgeIcon,
 } from './types.js';
 import type {
   AssessmentToolManifest,
@@ -1334,6 +1335,12 @@ export const store = {
   updateProfile(membershipId: string, values: Record<string, string>): Promise<{ membershipId: string }> {
     return apiClient.patch<{ membershipId: string }>(`/profiles/${membershipId}`, values);
   },
+  uploadProfilePhoto(membershipId: string, body: { fileBase64: string; mimeType: string; fileName: string }): Promise<{ photoUrl: string }> {
+    return apiClient.put<{ photoUrl: string }>(`/profiles/${membershipId}/photo`, body);
+  },
+  deleteProfilePhoto(membershipId: string): Promise<{ photoUrl: null }> {
+    return apiClient.delete<{ photoUrl: null }>(`/profiles/${membershipId}/photo`);
+  },
   getMemberPlacement(membershipId: string): Promise<MemberPlacement> {
     return apiClient.get<MemberPlacement>(`/team/members/${membershipId}/placement`);
   },
@@ -1495,6 +1502,21 @@ export const store = {
 
   removeRule(id: string): Promise<void> {
     return apiClient.delete(`/competency-rules/${id}`);
+  },
+
+  /* ── Badge icons ──────────────────────────────────────────────────────── */
+
+  listBadgeIcons(): Promise<BadgeIcon[]> {
+    return apiClient.get<BadgeIcon[]>('/badge-icons');
+  },
+  createBadgeIcon(input: { fileBase64: string; slug: string; displayName: string; keywords?: string[] }): Promise<BadgeIcon> {
+    return apiClient.post<BadgeIcon>('/badge-icons', input);
+  },
+  updateBadgeIcon(id: string, input: { displayName?: string; keywords?: string[]; sortOrder?: number }): Promise<BadgeIcon> {
+    return apiClient.patch<BadgeIcon>(`/badge-icons/${id}`, input);
+  },
+  deleteBadgeIcon(id: string): Promise<void> {
+    return apiClient.delete(`/badge-icons/${id}`);
   },
 
   /* ── Mobile field app ──────────────────────────────────────────────────── */

@@ -272,6 +272,7 @@ export const memberships = pgTable(
       .references(() => organizations.id, { onDelete: 'cascade' }),
     role: roleEnum().notNull().default('viewer'),
     status: membershipStatusEnum().notNull().default('invited'),
+    photoKey: text('photo_key'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
@@ -280,9 +281,35 @@ export const memberships = pgTable(
   ],
 );
 
+/** Per-org custom SVG badge icons, uploaded by admins and mapped to competency keywords. */
+export const badgeIcons = pgTable(
+  'badge_icons',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    slug: text().notNull(),
+    displayName: text('display_name').notNull(),
+    storageKey: text('storage_key').notNull(),
+    keywords: text().array().notNull().default(sql`'{}'::text[]`),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('badge_icons_org_slug_uq').on(t.orgId, t.slug),
+    index('badge_icons_org_idx').on(t.orgId),
+  ],
+);
+
+export const badgeIconsRelations = relations(badgeIcons, ({ one }) => ({
+  org: one(organizations, { fields: [badgeIcons.orgId], references: [organizations.id] }),
+}));
+
 export const organizationsRelations = relations(organizations, ({ many }) => ({
   memberships: many(memberships),
   invites: many(invites),
+  badgeIcons: many(badgeIcons),
 }));
 
 export const invitesRelations = relations(invites, ({ one }) => ({

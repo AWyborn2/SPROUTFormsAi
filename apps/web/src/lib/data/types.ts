@@ -883,6 +883,8 @@ export interface MemberProfile {
   email: string | null;
   /** Set where an Admin flagged the address as reaching nobody (U36, R16). */
   emailUnreachableAt: string | null;
+  /** Authenticated URL to the member's profile photo, if one has been uploaded. */
+  photoUrl: string | null;
 }
 
 /**
@@ -1221,6 +1223,16 @@ export interface PlacementInsights {
   metrics: PlacementTypeMetric[];
   shapes: PlacementShapeCluster[];
   trend: PlacementTrendPoint[];
+}
+
+/** A custom SVG badge icon uploaded by an admin and mapped to competency keywords. */
+export interface BadgeIcon {
+  id: string;
+  slug: string;
+  displayName: string;
+  iconUrl: string;
+  keywords: string[];
+  sortOrder: number;
 }
 
 /** One column of the training matrix (U5) — the org's competencies, name-sorted by the API. */

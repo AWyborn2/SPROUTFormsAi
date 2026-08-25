@@ -26,6 +26,7 @@ import { AuditScreen } from './screens/enterprise/AuditScreen.js';
 import { BillingScreen } from './screens/enterprise/BillingScreen.js';
 import { ClientBrandsScreen } from './screens/enterprise/ClientBrandsScreen.js';
 import { WhiteLabelScreen } from './screens/enterprise/WhiteLabelScreen.js';
+import { BadgeIconsScreen } from './screens/enterprise/BadgeIconsScreen.js';
 import { CompetencyScreen } from './screens/enterprise/CompetencyScreen.js';
 import { ExtractionInsightsScreen } from './screens/enterprise/ExtractionInsightsScreen.js';
 import { WorkingListScreen } from './screens/enterprise/WorkingListScreen.js';
@@ -69,6 +70,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   audit: <AuditScreen />,
   billing: <BillingScreen />,
   whitelabel: <WhiteLabelScreen />,
+  'badge-icons': <BadgeIconsScreen />,
   'client-brands': <ClientBrandsScreen />,
   competency: <CompetencyScreen />,
   'extraction-insights': <ExtractionInsightsScreen />,

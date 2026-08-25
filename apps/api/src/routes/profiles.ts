@@ -18,6 +18,8 @@ import { membershipForProfile, profileTierOrg, resolveProfileAccess } from '../l
 import { isUniqueViolation } from '../lib/db-errors.js';
 import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
+import { storeAttachment, ATTACHMENT_KEY_RE, EXT_CONTENT_TYPE } from './uploads.js';
+import { getStorageClient } from '../storage/index.js';
 
 /**
  * A member's profile — the organisation's workforce record for that person
@@ -165,26 +167,12 @@ profilesRouter.get(
     res.json({
       profile: {
         ...profileDto(profile, org?.displayIdentifier ?? 'employee_number'),
-        /*
-          The inventory lists Email as a required field, but it is stored on
-          `users` — unique product-wide and the person-record lookup key (R16),
-          which is exactly why it is not on the profile row. Read from there so
-          the record renders it rather than showing the field blank; it is not
-          writable through this route, and `editableFields` already says so.
-        */
         email: user?.email ?? null,
+        photoUrl: membership.photoKey
+          ? `/uploads/file/${membership.photoKey}`
+          : null,
       },
-      /*
-        The PERSON behind the membership. Competency grants and assessment cases
-        are recorded against the user, not the membership, so a screen showing
-        both needs this — and deriving it client-side would mean a second lookup
-        for something this call already holds.
-      */
       userId: membership.userId,
-      /*
-        What this reader may do, so the screen renders the sections it is
-        admitted to rather than guessing and 403ing on click.
-      */
       access: {
         canViewDocuments: access.canViewDocuments,
         canViewCompetencies: access.canViewCompetencies,
@@ -596,5 +584,81 @@ profilesRouter.get(
       return;
     }
     res.json({ membershipId: membership.id });
+  }),
+);
+
+// ── PUT /profiles/:membershipId/photo ─────────────────────────────────────
+
+profilesRouter.put(
+  '/:membershipId/photo',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const membership = await membershipForProfile(db, tenant.orgId, req.params.membershipId!);
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const access = await resolveProfileAccess(db, tenant, membership);
+    if (!access.isSubject && access.editableFields.length === 0) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown>;
+    if (body.mimeType && !String(body.mimeType).startsWith('image/')) {
+      res.status(400).json({ error: 'unsupported_file_type', message: 'Profile photos must be an image.' });
+      return;
+    }
+
+    const result = await storeAttachment(tenant.orgId, body);
+    if (!result.ok) {
+      res.status(result.failure.status).json(result.failure.body);
+      return;
+    }
+
+    await db
+      .update(schema.memberships)
+      .set({ photoKey: result.ref.key })
+      .where(eq(schema.memberships.id, membership.id));
+
+    res.json({ photoUrl: `/uploads/file/${result.ref.key}` });
+  }),
+);
+
+// ── DELETE /profiles/:membershipId/photo ──────────────────────────────────
+
+profilesRouter.delete(
+  '/:membershipId/photo',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const membership = await membershipForProfile(db, tenant.orgId, req.params.membershipId!);
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const access = await resolveProfileAccess(db, tenant, membership);
+    if (!access.isSubject && access.editableFields.length === 0) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+
+    await db
+      .update(schema.memberships)
+      .set({ photoKey: null })
+      .where(eq(schema.memberships.id, membership.id));
+
+    res.json({ photoUrl: null });
   }),
 );
