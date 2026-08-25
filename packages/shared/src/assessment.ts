@@ -1183,7 +1183,23 @@ export function fieldsInPart(
     }
   }
 
-  return fields.slice(start, end);
+  /*
+    A PREREQUISITE BOX BELONGS TO NO PART, WHEREVER IT PRINTS.
+
+    This slice runs from a part's anchor to the NEXT PART's anchor, and cover
+    sections (identity, eligibility, verdict) are not parts — so a cover section
+    printed AFTER a part, rather than at the document head where the rest of the
+    codebase assumes it, falls inside the preceding part's range and is silently
+    adopted by it. The one cover field the manifest names explicitly is the
+    prerequisite check: it is answered from the competency register, never typed,
+    and must never be a part's field. Left in, a required "Drivers Licence C or
+    higher" printed between the candidate declaration and the next part is sliced
+    into the declaration, and the hand-in gate then refuses a sign-off over a box
+    no candidate can fill. Excluded here, every consumer — the completeness gate,
+    marking, the publish warnings and the export — agrees it is no part's.
+  */
+  const nonPart = new Set((manifest.prerequisiteChecks ?? []).map((c) => c.fieldId));
+  return fields.slice(start, end).filter((f) => !nonPart.has(f.id));
 }
 
 /**
