@@ -77,9 +77,24 @@ async function run() {
   const port = server.address().port;
   const browser = await chromium.launch({ executablePath: chrome, args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 1650, height: 950 } });
-  const forwarded = []; let started = false;
-  await page.exposeFunction('__rec', (m) => { if (m.type === 'course-slide') forwarded.push(m.index); if (m.type === 'course-start-assessment') started = true; });
-  await page.addInitScript(() => { window.addEventListener('message', (e) => { if (e.data && e.data.type) window.__rec(e.data); }); });
+  const forwarded = []; const answered = []; let started = false;
+  await page.exposeFunction('__rec', (m) => {
+    if (m.type === 'course-slide') forwarded.push(m.index);
+    if (m.type === 'course-start-assessment') started = true;
+    if (m.type === 'course-answer') answered.push(m.fieldId);
+  });
+  // Stand in for the host: record every message, and RELAY a graded answer back
+  // with a verdict (always "correct" here — enough to prove the round-trip and
+  // that the slide completes on the result). The real host relays to the server.
+  await page.addInitScript(() => {
+    window.addEventListener('message', (e) => {
+      if (!e.data || !e.data.type) return;
+      window.__rec(e.data);
+      if (e.data.type === 'course-answer' && e.source) {
+        e.source.postMessage({ type: 'course-answer-result', fieldId: e.data.fieldId, correct: true }, '*');
+      }
+    });
+  });
   await page.goto(`http://127.0.0.1:${port}/outer.html`);
   await page.waitForTimeout(1200);
   const F = () => page.frames().find((fr) => fr.url().includes('index.html'));
@@ -151,6 +166,19 @@ async function run() {
         await ev(() => { const b = document.querySelector('#quizfb .fbbtn'); if (b) b.click(); });
         await page.waitForTimeout(250);
       }
+      // Graded slide: pick any option, Submit (posts course-answer), let the host
+      // relay above answer with a verdict, then dismiss the modal (Continue).
+      const isGraded = await ev(() => !!document.querySelector('.slide.active section[data-graded]'));
+      if (isGraded) {
+        const gated = await ns();
+        if (gated.disabled) sawInteractiveGate = true;
+        await ev(() => { const s = document.querySelector('.slide.active section'); const o = s.querySelector('.qopt'); if (o) o.click(); });
+        await page.waitForTimeout(150);
+        await ev(() => document.getElementById('next').click()); // Submit → course-answer
+        await page.waitForTimeout(350); // host relay round-trip → course-answer-result
+        await ev(() => { const b = document.querySelector('#quizfb .fbbtn'); if (b) b.click(); });
+        await page.waitForTimeout(250);
+      }
       const hasCards = await ev(() => document.querySelectorAll('.slide.active [data-touch]').length);
       if (hasCards) {
         const s = await ns();
@@ -181,6 +209,10 @@ async function run() {
   const uniq = [...new Set(forwarded)].sort((a, b) => a - b);
   check('reported every slide exactly once (count == total)', uniq.length === total, `reported ${uniq.length}/${total}`);
   check('no reported index out of range', uniq.every((n) => n >= 0 && n < total), JSON.stringify(uniq.slice(-4)));
+  // Every graded question must have relayed its answer to the host — that is the
+  // only path by which a keyless in-deck question can be marked + recorded.
+  const gradedCount = await ev(() => document.querySelectorAll('.slide section[data-graded]').length);
+  check('every graded question posted an answer to the host', answered.length === gradedCount, `answered ${answered.length}/${gradedCount}`);
 
   await browser.close();
   server.close();

@@ -205,6 +205,45 @@ with a `data-val`, and set `data-title` for the header. Two layouts:
 The engine handles selection highlight, Submit, the feedback modal, and gating —
 don't wire any of it. Keep one question per slide.
 
+## Graded questions (the in-deck assessment)
+
+A slide can also carry a **graded** assessment question — part of the real,
+recorded assessment rather than ungraded practice. It looks and behaves like a
+knowledge check (same cards, same Correct/Incorrect modal), with three
+differences:
+
+- Use **`data-graded`** (`"tf"` or `"mc"`) instead of `data-quiz`.
+- Give it **`data-field-id`** = the assessment tool's field id for this question.
+- Put **no `data-answer`** — the answer key never ships in the deck.
+
+On Submit the deck posts `{type:'course-answer', fieldId, value}` to the host,
+which relays it to the server (`POST …/attempts/:attemptId/answer`) to grade
+against the stored key **and record** the answer on the open attempt; the verdict
+returns as `course-answer-result` and drives the modal. The slide completes on
+**any** answer (right or wrong) — the selection is recorded and the overall
+outcome is marked later, at submit — so there is no in-deck retry loop.
+
+```html
+<section data-title="Assessment: Operational Requirements" data-graded="mc" data-field-id="q-123"
+  style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:52px var(--pad-x) 40px; gap:24px;">
+  <div class="quiz">
+    <div class="qhead"><span class="qno">Q3</span><span class="qtext">Graded question…</span></div>
+    <div class="qsub">Select the correct answer — this is a graded assessment question.</div>
+    <div class="qopts mc">
+      <div class="qopt mc" data-val="a"><span class="letter">A</span><span class="otext">First option</span></div>
+      <div class="qopt mc" data-val="b"><span class="letter">B</span><span class="otext">Second option</span></div>
+    </div>
+  </div>
+</section>
+```
+
+`data-val` must be the **server option value** the tool's `answerKey` matches
+(the actual option text/value, not just a display letter). Place a graded slide
+inside the module its topic belongs to (`data-part` = that module) — the module
+won't complete until the question is answered, which is what makes the
+assessment *interleaved* with the reading. Requires the host to open the theory
+attempt at course start; see `host-contract.md`.
+
 ## 5. deck.json
 
 ```json
