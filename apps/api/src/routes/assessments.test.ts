@@ -6100,6 +6100,42 @@ describe('POST /:id/attempts/:attemptId/answer — grade-and-save for the in-dec
       server.close();
     }
   });
+
+  it('an in-deck answer reaches the evidence PDF — /answer then resolve derives the ✓ at the mark cell', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      // Answer the keyed question through the in-deck relay (grade + record).
+      const graded = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/answer`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: JSON.stringify({ fieldId: 'q-k1', value: 'a' }),
+      });
+      expect(((await graded.json()) as { correct: boolean }).correct).toBe(true);
+      // Fill the rest so the part can be resolved, then the assessor signs it off.
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'q-k2': ['a'], 'q-w1': 'ok', 'q-w2': 'ok' } }),
+      });
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat Assessor' }),
+      });
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === attemptId)!;
+      const values = row.values as Record<string, unknown>;
+      // The ✓ derived from the in-deck answer lands at the question's
+      // outcomeTarget — the exact cell the evidence PDF prints.
+      expect(values['q-k1-out']).toBe(true);
+      // …and the recorded selection itself survived onto the attempt.
+      expect(values['q-k1']).toBe('a');
+    } finally {
+      server.close();
+    }
+  });
 });
 
 
