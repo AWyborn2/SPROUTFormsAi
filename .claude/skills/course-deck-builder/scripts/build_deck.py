@@ -200,6 +200,8 @@ def build(deck_dir: Path, out_dir: Path) -> None:
     )
     course_key = json.dumps(spec.get('courseKey', slugify(spec.get('title', 'course'))))
     fonts_link = f'<link href="{html.escape(brand["fontsHref"])}" rel="stylesheet">' if brand.get('fontsHref') else ''
+    logo = brand.get('logo')
+    header_logo = f'<img class="logo" src="{html.escape(logo)}" alt="">' if logo else ''
 
     page = f'''<!doctype html>
 <!-- deck-stage: self-contained course slideshow — no external runtime, no fetch (sandbox-safe) -->
@@ -215,15 +217,18 @@ def build(deck_dir: Path, out_dir: Path) -> None:
 </head>
 <body>
 <script>window.__courseKey = {course_key};</script>
+<div id="topbar">{header_logo}<span class="title"></span><button id="help" type="button">HELP</button></div>
 <div id="viewport"><div id="canvas">
 {body}
 </div></div>
 <div id="bar">
-  <button id="back" type="button" hidden>← Back</button>
+  <button id="back" type="button" hidden>« Back</button>
   <span class="crumb"></span>
   <span class="status"><span class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l6 6L20 6"/></svg></span><span class="msg"></span></span>
-  <button id="next" disabled><span class="fill"></span><span class="lbl">Next →</span></button>
+  <button id="next" disabled><span class="fill"></span><span class="lbl">Next »</span></button>
 </div>
+<div id="quizfb"><div class="card"><div class="badge fb-badge"></div><h3 class="fb-h"></h3><p class="fb-p"></p><button class="fbbtn" type="button">Continue</button></div></div>
+<div id="helpov"><div class="card"><h3>Using this course</h3><p>Work through each module from the Module Menu. Read every slide, open every card, and answer each question — <strong>Next</strong> lights up once a slide is done. Use <strong>Back</strong> to revisit. Finish all modules to start your assessment.</p><button class="fbbtn" type="button">Got it</button></div></div>
 <script>{ENGINE_JS}</script>
 </body>
 </html>'''

@@ -139,6 +139,18 @@ async function run() {
     await page.waitForTimeout(350);
     guard = 0;
     while ((await part()) !== 'menu' && guard++ < 40) {
+      // Quiz slide: pick the correct option, Submit, dismiss the feedback modal.
+      const isQuiz = await ev(() => !!document.querySelector('.slide.active section[data-quiz]'));
+      if (isQuiz) {
+        const gated = await ns();
+        if (gated.disabled) sawInteractiveGate = true;
+        await ev(() => { const s = document.querySelector('.slide.active section'); const ans = s.getAttribute('data-answer'); const o = [...s.querySelectorAll('.qopt')].find((x) => x.getAttribute('data-val') === ans); if (o) o.click(); });
+        await page.waitForTimeout(150);
+        await ev(() => document.getElementById('next').click());
+        await page.waitForTimeout(200);
+        await ev(() => { const b = document.querySelector('#quizfb .fbbtn'); if (b) b.click(); });
+        await page.waitForTimeout(250);
+      }
       const hasCards = await ev(() => document.querySelectorAll('.slide.active [data-touch]').length);
       if (hasCards) {
         const s = await ns();
