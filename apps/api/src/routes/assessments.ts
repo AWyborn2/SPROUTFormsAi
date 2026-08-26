@@ -611,6 +611,10 @@ const pathwayMarksSchema = z.record(z.enum(ASSESSMENT_PATHWAYS), declaredMarkSch
 const courseLinkSchema = z.object({
   courseId: z.string().uuid(),
   required: z.boolean(),
+  // Graded questions live inside the deck (interleaved): open the theory attempt
+  // at course start so answers can be recorded as the candidate reads, rather
+  // than gating attempt-open on the reading being complete.
+  assessmentInDeck: z.boolean().optional(),
 });
 
 /*
@@ -3513,7 +3517,16 @@ assessmentCasesRouter.post(
       link as missing so someone fixes it.
     */
     const courseLink = tool.manifest.course;
-    if (courseLink?.required) {
+    /*
+      When the graded questions are embedded IN the deck (`assessmentInDeck`),
+      the attempt has to be OPEN while the course is read — that is the record
+      each in-deck answer is saved onto. So the reading-complete gate is skipped
+      for those tools: reading order is still enforced (the deck unlocks a
+      module's questions only after its slides, and `POST …/answer` records each
+      answer against the open attempt). For every other course-gated tool the
+      assessment still comes strictly after the reading.
+    */
+    if (courseLink?.required && !courseLink.assessmentInDeck) {
       const courseRow = await db.query.courses.findFirst({
         where: and(
           eq(schema.courses.id, courseLink.courseId),

@@ -7082,6 +7082,28 @@ describe('course material', () => {
     }
   });
 
+  it('assessmentInDeck opens the attempt at course START — interleaved answering needs it open before reading is done', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    seedCourse(store);
+    const { server, base } = startApp();
+    try {
+      // Same required course, but the graded questions live IN the deck.
+      const tool = await seedTool(base, {
+        ...MANIFEST,
+        course: { courseId: COURSE, required: true, assessmentInDeck: true },
+      });
+      const c = await newCase(base, tool.id);
+      // No reading recorded yet — a plain required course would 409 here, but an
+      // in-deck assessment must be able to open the attempt to record answers as
+      // the candidate reads each module.
+      const opened = await openPart(base, c.id);
+      expect(opened.status).toBe(201);
+    } finally {
+      server.close();
+    }
+  });
+
   it('unions monotonically, ignores out-of-range indexes, and never uncompletes', async () => {
     const { db, store } = makeDb();
     mockDbValue = db;
