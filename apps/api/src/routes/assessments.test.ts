@@ -5987,6 +5987,157 @@ describe('the marking pass: staff writes on a submitted attempt (U4/D5)', () => 
   });
 });
 
+/*
+  POST /answer — grade AND record, for the in-deck interleaved quiz. Same grading
+  as check-question, but it SAVES the candidate's selection onto the open attempt
+  so it flows to the evidence PDF, while never returning the answer key.
+*/
+describe('POST /:id/attempts/:attemptId/answer — grade-and-save for the in-deck quiz', () => {
+  it('grades a correct answer and records the selection on the attempt', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/answer`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: JSON.stringify({ fieldId: 'q-k1', value: 'a' }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ correct: true });
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === attemptId)!;
+      expect((row.values as Record<string, unknown>)['q-k1']).toBe('a');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('grades a wrong answer, returns the hint field, and still records the selection', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/answer`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: JSON.stringify({ fieldId: 'q-k1', value: 'b' }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { correct: boolean; hint: string | null };
+      expect(body.correct).toBe(false);
+      expect(body).toHaveProperty('hint'); // q-k1 authored no hint → null, but the key is present
+      // The wrong pick is saved so it prints as a ✗ on the evidence PDF.
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === attemptId)!;
+      expect((row.values as Record<string, unknown>)['q-k1']).toBe('b');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('never returns the answer key or the mark target', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/answer`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: JSON.stringify({ fieldId: 'q-k1', value: 'b' }),
+      });
+      const raw = JSON.stringify(await res.json());
+      expect(raw).not.toContain('answerKey');
+      expect(raw).not.toContain('outcomeTarget');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a written (unkeyed) field — no key, no grade', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/answer`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: JSON.stringify({ fieldId: 'q-w1', value: 'any prose' }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('not_a_keyed_question');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s once the attempt is resolved — signed evidence is never rewritten', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'q-k1': 'a', 'q-k2': ['a'], 'q-w1': 'ok', 'q-w2': 'ok' } }),
+      });
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat Assessor' }),
+      });
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/answer`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: JSON.stringify({ fieldId: 'q-k1', value: 'a' }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('attempt_resolved');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('an in-deck answer reaches the evidence PDF — /answer then resolve derives the ✓ at the mark cell', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      // Answer the keyed question through the in-deck relay (grade + record).
+      const graded = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/answer`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: JSON.stringify({ fieldId: 'q-k1', value: 'a' }),
+      });
+      expect(((await graded.json()) as { correct: boolean }).correct).toBe(true);
+      // Fill the rest so the part can be resolved, then the assessor signs it off.
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'q-k2': ['a'], 'q-w1': 'ok', 'q-w2': 'ok' } }),
+      });
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat Assessor' }),
+      });
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === attemptId)!;
+      const values = row.values as Record<string, unknown>;
+      // The ✓ derived from the in-deck answer lands at the question's
+      // outcomeTarget — the exact cell the evidence PDF prints.
+      expect(values['q-k1-out']).toBe(true);
+      // …and the recorded selection itself survived onto the attempt.
+      expect(values['q-k1']).toBe('a');
+    } finally {
+      server.close();
+    }
+  });
+});
+
 
 /*
   ── Review-round pins ────────────────────────────────────────────────────────
@@ -6962,6 +7113,28 @@ describe('course material', () => {
           (e) => e.action === 'Completed course material',
         ),
       ).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('assessmentInDeck opens the attempt at course START — interleaved answering needs it open before reading is done', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    seedCourse(store);
+    const { server, base } = startApp();
+    try {
+      // Same required course, but the graded questions live IN the deck.
+      const tool = await seedTool(base, {
+        ...MANIFEST,
+        course: { courseId: COURSE, required: true, assessmentInDeck: true },
+      });
+      const c = await newCase(base, tool.id);
+      // No reading recorded yet — a plain required course would 409 here, but an
+      // in-deck assessment must be able to open the attempt to record answers as
+      // the candidate reads each module.
+      const opened = await openPart(base, c.id);
+      expect(opened.status).toBe(201);
     } finally {
       server.close();
     }

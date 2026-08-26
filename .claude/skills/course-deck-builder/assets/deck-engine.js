@@ -21,7 +21,12 @@
  *   out {type:'course-slide', index, total}   — a slide was completed (read).
  *       Only completed slides are reported, so a blocked jump never counts.
  *   out {type:'course-start-assessment'}       — the final CTA was pressed.
+ *   out {type:'course-answer', fieldId, value} — a GRADED in-deck question was
+ *       submitted; the host relays it to the server to grade AND record. The
+ *       answer key is never in the deck, so the deck cannot self-mark it.
  *   in  {type:'course-progress-seed', visited:[…]} — resume: mark these done.
+ *   in  {type:'course-answer-result', fieldId, correct, hint} — the server's
+ *       verdict for a course-answer; drives the Correct/Incorrect modal.
  */
 (function () {
   'use strict';
@@ -36,6 +41,8 @@
   var CROSS_SVG = '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>';
   var TOTAL = 0, PARTS = {}, ORDER = [];
   var completed = new Set(), touched = new Set(), current = 0, readTimer = null;
+  // Set while a GRADED answer is out with the host awaiting the server's verdict.
+  var pendingGraded = null; // { slide, fieldId, timer }
 
   function partOf(i) { return slides[i].getAttribute('data-part') || 'intro'; }
   function derive() {
@@ -157,6 +164,7 @@
     if (p === 'done') { markComplete(i); becomeReady(i); return; }
     var sec = sl.querySelector('section');
     if (sec && sec.getAttribute('data-quiz')) { enterQuiz(i, sec); return; }
+    if (sec && sec.getAttribute('data-graded')) { enterGraded(i, sec); return; }
     var c = cardsOf(sl);
     if (c.length) {
       if (completed.has(i) || cardsDone(sl)) { Array.prototype.forEach.call(c, function (x) { x.classList.add('viewed'); if (x.classList.contains('expander')) setExp(x, false); if (x.classList.contains('checkitem')) x.classList.add('checked'); }); markComplete(i); becomeReady(i); }
@@ -175,6 +183,7 @@
     if (nextBtn.disabled) return;
     var qsec = slides[current].querySelector('section');
     if (qsec && qsec.getAttribute('data-quiz') && !completed.has(current)) { submitQuiz(current, qsec); return; }
+    if (qsec && qsec.getAttribute('data-graded') && !completed.has(current)) { submitGraded(current, qsec); return; }
     var p = partOf(current);
     if (p === 'intro') { go(current + 1); return; }
     if (p === 'menu') { if (allDone()) go(doneIdx()); return; }
@@ -218,6 +227,7 @@
     var ok = sel.getAttribute('data-val') === sec.getAttribute('data-answer');
     quizFb.className = 'open ' + (ok ? 'correct' : 'incorrect');
     quizFb.setAttribute('data-correct', ok ? '1' : '0');
+    quizFb.setAttribute('data-graded', '0'); // ungraded: only a CORRECT answer completes the slide
     quizFb.setAttribute('data-slide', String(i));
     quizFb.querySelector('.fb-badge').innerHTML = ok ? TICK_SVG : CROSS_SVG;
     quizFb.querySelector('.fb-h').textContent = ok ? 'Correct' : 'Incorrect';
@@ -226,11 +236,63 @@
       : 'Not quite. Review the options and try again.';
     quizFb.querySelector('.fbbtn').textContent = ok ? 'Continue' : 'Try again';
   }
+
+  // ── In-deck GRADED question (the real assessment). Same card + modal as the
+  // knowledge check, but the answer key is NOT in the deck: on Submit the deck
+  // posts {fieldId, value} to the host, which relays it to the server to grade
+  // AND record against the open attempt. The verdict returns as
+  // course-answer-result and drives the modal. The slide completes EITHER way —
+  // the selection is saved and the overall outcome is marked later, at submit —
+  // so a wrong answer still lets the reader move on (the deck has no key to loop
+  // against, and a whole re-attempt is offered in the app, not here).
+  function postAnswer(fieldId, value) {
+    try { window.parent.postMessage({ type: 'course-answer', fieldId: fieldId, value: value }, '*'); } catch (e) {}
+  }
+  function enterGraded(i, sec) {
+    if (completed.has(i)) { becomeReady(i); return; }
+    Array.prototype.forEach.call(sec.querySelectorAll('.qopt'), function (o) { o.classList.remove('sel'); });
+    tick(false);
+    setMsg(sec.getAttribute('data-graded') === 'tf' ? 'Choose True or False, then Submit' : 'Select an answer, then Submit');
+    nextLbl.textContent = 'Submit'; nextBtn.classList.add('submit'); nextBtn.classList.remove('ready'); nextBtn.disabled = true;
+  }
+  function submitGraded(i, sec) {
+    var sel = sec.querySelector('.qopt.sel'); if (!sel || pendingGraded) return;
+    var fieldId = sec.getAttribute('data-field-id'); if (!fieldId) return;
+    setMsg('Checking…'); nextBtn.disabled = true;
+    pendingGraded = { slide: i, fieldId: fieldId, timer: null };
+    postAnswer(fieldId, sel.getAttribute('data-val'));
+    // Never strand the reader on "Checking…" if the host never answers.
+    pendingGraded.timer = setTimeout(function () {
+      if (pendingGraded && pendingGraded.fieldId === fieldId) {
+        pendingGraded = null;
+        setMsg('Could not reach the server — press Submit to try again');
+        nextBtn.disabled = false;
+      }
+    }, 12000);
+  }
+  function resolveGraded(fieldId, correct, hint) {
+    if (!pendingGraded || pendingGraded.fieldId !== fieldId) return;
+    if (pendingGraded.timer) clearTimeout(pendingGraded.timer);
+    var i = pendingGraded.slide; pendingGraded = null;
+    quizFb.className = 'open ' + (correct ? 'correct' : 'incorrect');
+    quizFb.setAttribute('data-correct', correct ? '1' : '0');
+    quizFb.setAttribute('data-graded', '1'); // graded: completes the slide either way
+    quizFb.setAttribute('data-slide', String(i));
+    quizFb.querySelector('.fb-badge').innerHTML = correct ? TICK_SVG : CROSS_SVG;
+    quizFb.querySelector('.fb-h').textContent = correct ? 'Correct' : 'Incorrect';
+    quizFb.querySelector('.fb-p').textContent = correct
+      ? "That's right — your answer has been recorded."
+      : (hint || 'Your answer has been recorded. Review this topic before your result.');
+    quizFb.querySelector('.fbbtn').textContent = 'Continue';
+  }
   function closeFb() {
     var ok = quizFb.getAttribute('data-correct') === '1';
+    var graded = quizFb.getAttribute('data-graded') === '1';
     var i = parseInt(quizFb.getAttribute('data-slide'), 10);
     quizFb.className = '';
-    if (ok && !isNaN(i)) { markComplete(i); becomeReady(i); }
+    // A graded question completes on ANY answer (it's recorded); an ungraded
+    // knowledge check only on a correct one (a wrong one stays open to retry).
+    if ((graded || ok) && !isNaN(i)) { markComplete(i); becomeReady(i); }
   }
 
   function bind() {
@@ -244,13 +306,13 @@
       // backdrop) without counting as a new interaction
       var closer = e.target.closest('.hotspot-close');
       if (closer) { Array.prototype.forEach.call(slides[current].querySelectorAll('.hotspot-detail.open'), function (x) { x.classList.remove('open'); }); return; }
-      var qo = e.target.closest('.qopt'); if (qo && slides[current].contains(qo) && !completed.has(current)) { selectOpt(slides[current].querySelector('section'), qo); return; }
+      var qo = e.target.closest('.qopt'); if (qo && slides[current].contains(qo) && !completed.has(current) && !pendingGraded) { selectOpt(slides[current].querySelector('section'), qo); return; }
       var card = e.target.closest('[data-touch]'); if (card && slides[current].contains(card)) { handleCard(card); return; }
       var pc = e.target.closest('.part-card'); if (pc && partOf(current) === 'menu') { var p = pc.getAttribute('data-part'); if (unlocked(p)) go(PARTS[p][0]); return; }
       var cta = e.target.closest('[data-action]'); if (cta) { var a = cta.getAttribute('data-action'); if (a === 'start') startAssessment(); else if (a === 'menu') go(menuIdx()); return; }
-      // A quiz slide advances only via the Submit button, never a click on the slide.
+      // A quiz slide (graded or not) advances only via Submit, never a slide click.
       var qsec2 = slides[current].querySelector('section');
-      if (qsec2 && qsec2.getAttribute('data-quiz')) return;
+      if (qsec2 && (qsec2.getAttribute('data-quiz') || qsec2.getAttribute('data-graded'))) return;
       if (!cardsOf(slides[current]).length && partOf(current) !== 'menu' && !nextBtn.disabled) advance();
     });
     document.addEventListener('keydown', function (e) {
@@ -260,6 +322,10 @@
     window.addEventListener('resize', fit);
     window.addEventListener('message', function (e) {
       var d = e.data;
+      if (d && d.type === 'course-answer-result' && typeof d.fieldId === 'string') {
+        resolveGraded(d.fieldId, !!d.correct, typeof d.hint === 'string' ? d.hint : null);
+        return;
+      }
       if (d && d.type === 'course-progress-seed' && Array.isArray(d.visited)) {
         var had = completed.size;
         d.visited.forEach(function (n) { if (typeof n === 'number' && n >= 0 && n < TOTAL) completed.add(n); });

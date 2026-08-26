@@ -110,7 +110,7 @@ def menu_slide() -> str:
     cards = []
     for tag, label, title, contents in PART_DEFS:
         cards.append(
-            f'''      <div class="part-card" data-part="{tag}" style="background:#fff; padding:30px 34px; display:flex; flex-direction:column; gap:10px; border-top:6px solid #3C4043;">
+            f'''      <div class="part-card" data-part="{tag}" style="background:#fff; padding:30px 34px; display:flex; flex-direction:column; gap:10px; border-top:6px solid #2B3A42;">
         <div style="display:flex; justify-content:space-between; align-items:center;">
           <span class="pc-tag" style="font-size:23px; font-weight:700; letter-spacing:2px;">{label}</span>
           <span class="pc-tick" style="font-size:22px; font-weight:700;"></span>
@@ -139,8 +139,8 @@ def pmh_slide() -> str:
     cards = []
     for i, (code, name, controls) in enumerate(PMH):
         cards.append(
-            f'''      <div class="expander card" data-touch="pmh{i}" style="background:#4A4F53; border-top:5px solid #EADA23; padding:26px 30px; display:flex; flex-direction:column; gap:10px;">
-        <span style="font-size:23px; font-weight:700; letter-spacing:2px; color:#EADA23;">{code}</span>
+            f'''      <div class="expander card" data-touch="pmh{i}" style="background:#4A4F53; border-top:5px solid #F5B301; padding:26px 30px; display:flex; flex-direction:column; gap:10px;">
+        <span style="font-size:23px; font-weight:700; letter-spacing:2px; color:#F5B301;">{code}</span>
         <h2 style="font-size:29px; font-weight:800; line-height:1.15;">{name}</h2>
         <p class="detail" style="font-size:23px; line-height:1.4; color:#ccc; font-family:'Archivo Narrow'; display:none;">{controls}</p>
         <span class="closed-label" style="font-size:23px; color:#9a9a9a;">+ Critical controls</span>
@@ -197,7 +197,7 @@ def horn_slide() -> str:
             <span style="font-size:29px; font-weight:700;">{label}</span>
             <span class="rc-hint" style="font-size:22px; color:#888;">tap to reveal</span>
           </div>
-          <div class="flipface flipback" style="background:#EADA23; color:#3C4043;">
+          <div class="flipface flipback" style="background:#F5B301; color:#2B3A42;">
             <span style="font-size:38px; font-weight:800; text-align:center; padding:0 28px; line-height:1.25;">{meaning}</span>
           </div>
         </div>
@@ -253,7 +253,7 @@ def completion_slide() -> str:
   <h1 style="font-size:88px; font-weight:900; letter-spacing:-2px; line-height:1.05;">Induction Complete</h1>
   <p style="font-size:var(--type-body); color:#ccc; max-width:1200px; line-height:1.45;">You have read every module of the Mine Site SME Operating Manual. Your reading is recorded against the assessment — you can now begin.</p>
   <div style="display:flex; gap:20px;">
-    <button class="cta" data-action="start" style="background:#EADA23; color:#3C4043; border:0; padding:22px 52px; font-size:28px; font-weight:800; cursor:pointer; border-radius:6px; font-family:'Archivo',sans-serif;">Start Assessment →</button>
+    <button class="cta" data-action="start" style="background:#F5B301; color:#2B3A42; border:0; padding:22px 52px; font-size:28px; font-weight:800; cursor:pointer; border-radius:6px; font-family:'Archivo',sans-serif;">Start Assessment →</button>
     <button class="cta" data-action="menu" style="background:transparent; color:#fff; border:2px solid #555; padding:22px 40px; font-size:24px; font-weight:700; cursor:pointer; border-radius:6px; font-family:'Archivo',sans-serif;">Back to Module Menu</button>
   </div>
 </section>'''
@@ -267,13 +267,14 @@ CSS = r'''
 *{box-sizing:border-box;}
 html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#1D1D1B;}
 body{font-family:'Archivo','Arial Narrow','Helvetica Neue',system-ui,sans-serif;}
-:root{--red:#3C4043;--ink:#3C4043;--paper:#FFFFFF;--grey:#F4F3F1;--amber:#EADA23;
+:root{--red:#2B3A42;--ink:#2B3A42;--paper:#FFFFFF;--grey:#F4F3F1;--amber:#F5B301;
+ --good:#1FA463;--chrome:#2B3A42;--head-h:104px;
  --type-title:64px;--type-subtitle:40px;--type-body:32px;--type-small:26px;
  --pad-x:110px;--pad-top:96px;--pad-bottom:84px;--gap-item:24px;--bar-h:78px;}
 section h1,section h2,section p,section ul{margin:0;}
-a{color:#3C4043;}
+a{color:#2B3A42;}
 
-#viewport{position:fixed;left:0;right:0;top:0;bottom:var(--bar-h);overflow:hidden;background:var(--ink);}
+#viewport{position:fixed;left:0;right:0;top:var(--head-h);bottom:var(--bar-h);overflow:hidden;background:var(--chrome);}
 #canvas{position:absolute;left:50%;top:50%;width:1920px;height:1080px;transform:translate(-50%,-50%) scale(1);transform-origin:center center;}
 .slide{position:absolute;inset:0;width:1920px;height:1080px;opacity:0;visibility:hidden;pointer-events:none;}
 .slide.active{opacity:1;visibility:visible;pointer-events:auto;}
@@ -313,27 +314,41 @@ a{color:#3C4043;}
 .part-card.avail:hover{box-shadow:0 8px 24px rgba(0,0,0,.13);}
 .part-card.locked{opacity:.5;cursor:not-allowed;}
 
-/* nav bar */
-#bar{position:fixed;left:0;right:0;bottom:0;height:var(--bar-h);background:#141418;border-top:1px solid #2b2b30;
- display:flex;align-items:center;gap:18px;padding:0 24px;z-index:20;color:#fff;
+/* ── South32 chrome: dark header (logo · title · HELP) + footer (Back/Next) ── */
+#topbar{position:fixed;left:0;right:0;top:0;height:var(--head-h);background:var(--chrome);z-index:20;
+ display:flex;align-items:center;gap:24px;padding:0 34px;color:#fff;font-family:'Archivo','Arial Narrow',system-ui,sans-serif;}
+#topbar .logo{height:66px;width:auto;flex:none;}
+#topbar .title{flex:1;min-width:0;font-size:32px;font-weight:900;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#help{flex:none;border:1.5px solid rgba(255,255,255,.55);background:transparent;color:#fff;border-radius:6px;height:40px;padding:0 20px;font:inherit;font-size:15px;font-weight:700;letter-spacing:1.5px;cursor:pointer;transition:background .15s;}
+#help:hover{background:rgba(255,255,255,.14);}
+#bar{position:fixed;left:0;right:0;bottom:0;height:var(--bar-h);background:var(--chrome);
+ display:flex;align-items:center;gap:18px;padding:0 30px;z-index:20;color:#fff;
  font-family:'Archivo','Arial Narrow',system-ui,sans-serif;}
-.crumb{font-size:14px;color:#9a9a9a;min-width:210px;white-space:nowrap;letter-spacing:.3px;}
-.status{flex:1;display:flex;align-items:center;justify-content:center;gap:11px;font-size:15.5px;color:#cfcfcf;}
-.status .tick{display:none;width:26px;height:26px;color:#43c463;}
+.crumb{font-size:14px;color:#aeb6ba;min-width:190px;white-space:nowrap;letter-spacing:.4px;}
+.status{flex:1;display:flex;align-items:center;justify-content:center;gap:11px;font-size:15.5px;color:#c9d0d3;}
+.status .tick{display:none;width:26px;height:26px;color:var(--good);}
 .status .tick svg{width:100%;height:100%;}
 .status .tick path{stroke-dasharray:34;stroke-dashoffset:34;}
-.status.done{color:#5fd47a;font-weight:700;}
+.status.done{color:#6fe08a;font-weight:700;}
 .status.done .tick{display:inline-flex;animation:tick-pop .34s cubic-bezier(.2,1.5,.4,1) both;}
 .status.done .tick path{animation:tick-draw .5s .06s ease forwards;}
 @keyframes tick-pop{from{transform:scale(.3);opacity:0;}to{transform:scale(1);opacity:1;}}
 @keyframes tick-draw{to{stroke-dashoffset:0;}}
-#next{position:relative;overflow:hidden;border:0;border-radius:8px;height:46px;padding:0 28px;min-width:160px;
- font-size:16px;font-weight:800;font-family:inherit;background:#EADA23;color:#1D1D1B;cursor:pointer;
- transition:box-shadow .2s,background .2s,color .2s;}
-#next[disabled]{background:#31313a;color:#8a8a92;cursor:default;}
-#next.ready{box-shadow:0 0 0 3px rgba(234,218,35,.4);}
-#next .fill{position:absolute;left:0;top:0;bottom:0;width:0;background:rgba(255,255,255,.16);pointer-events:none;}
+#back,#next{position:relative;overflow:hidden;border:1.5px solid rgba(255,255,255,.55);background:transparent;color:#fff;
+ border-radius:7px;height:48px;padding:0 26px;min-width:150px;font:inherit;font-size:16px;font-weight:800;letter-spacing:.6px;cursor:pointer;
+ transition:background .18s,border-color .18s,color .18s,box-shadow .18s;}
+#back:hover,#next.ready:hover{background:rgba(255,255,255,.12);}
+#back[hidden]{display:none;}
+#next[disabled]{border-color:rgba(255,255,255,.2);color:rgba(255,255,255,.4);cursor:default;}
+#next.ready{border-color:var(--amber);color:#fff;box-shadow:inset 0 0 0 1px var(--amber);}
+#next .fill{position:absolute;left:0;top:0;bottom:0;width:0;background:rgba(245,179,1,.28);pointer-events:none;}
 #next .lbl{position:relative;}
+#helpov{display:none;position:fixed;inset:0;z-index:40;align-items:center;justify-content:center;background:rgba(10,15,18,.7);}
+#helpov.open{display:flex;}
+#helpov .card{width:min(640px,86vw);background:#fff;border-radius:14px;padding:40px 48px;border-top:6px solid var(--amber);font-family:'Archivo',system-ui,sans-serif;}
+#helpov h3{font-size:30px;font-weight:800;margin:0 0 16px;color:var(--ink);}
+#helpov p{font-size:20px;line-height:1.55;color:#555;margin:0 0 12px;}
+#helpov .fbbtn{margin-top:14px;border:2px solid var(--ink);background:var(--ink);color:#fff;border-radius:8px;height:50px;padding:0 34px;font:inherit;font-size:17px;font-weight:800;cursor:pointer;}
 '''
 
 JS = r'''
@@ -345,7 +360,7 @@ var KEY='sme-course-v3', DW=1920, DH=1080, TOTAL=52;
 var PARTS={A:[3,7],B:[8,13],C:[14,19],D:[20,27],E:[28,37],F:[38,50]}, ORDER=['A','B','C','D','E','F'];
 function partOf(i){ if(i===0||i===1)return 'intro'; if(i===2)return 'menu'; if(i===51)return 'done';
  for(var k=0;k<ORDER.length;k++){var r=PARTS[ORDER[k]]; if(i>=r[0]&&i<=r[1])return ORDER[k];} return 'intro'; }
-var viewport,canvas,slides,crumb,statusEl,msgEl,nextBtn,nextFill,nextLbl;
+var viewport,canvas,slides,crumb,statusEl,msgEl,nextBtn,nextFill,nextLbl,backBtn,helpBtn,helpOv;
 var completed=new Set(), touched=new Set(), current=0, readTimer=null;
 
 function load(){ try{ var s=JSON.parse(store.getItem(KEY)||'null'); if(s){
@@ -393,8 +408,8 @@ function renderMenu(){ var sl=slides[2], done=0;
  Array.prototype.forEach.call(sl.querySelectorAll('.part-card'), function(card){
   var p=card.getAttribute('data-part'), comp=partComplete(p), unl=unlocked(p); if(comp) done++;
   card.classList.toggle('avail', unl); card.classList.toggle('locked', !unl);
-  card.style.borderTopColor = comp?'#1a7a2e':unl?'#3C4043':'#c9c7c3';
-  var tag=card.querySelector('.pc-tag'); if(tag) tag.style.color = comp?'#1a7a2e':unl?'#3C4043':'#aaa';
+  card.style.borderTopColor = comp?'#1a7a2e':unl?'#2B3A42':'#c9c7c3';
+  var tag=card.querySelector('.pc-tag'); if(tag) tag.style.color = comp?'#1a7a2e':unl?'#2B3A42':'#aaa';
   var tk=card.querySelector('.pc-tick'); if(tk){ tk.textContent=comp?'✓ complete':unl?'start →':'locked'; tk.style.color=comp?'#1a7a2e':unl?'#B26A00':'#aaa'; }
  });
  var mc=sl.querySelector('.menu-count'); if(mc) mc.textContent=done+' of 6 modules complete';
@@ -421,6 +436,7 @@ function handleCard(card){ var sl=slides[current];
  card.classList.add('viewed'); touched.add(card.getAttribute('data-touch')); reflectCards(sl); save(); }
 
 function enterSlide(i){ var sl=slides[i], p=partOf(i);
+ if(backBtn) backBtn.hidden=(i<=0);
  crumb.textContent = p==='intro'?'Introduction' : p==='menu'?'Module Menu' : p==='done'?'Complete'
    : ('Module '+p+' · slide '+(i-PARTS[p][0]+1)+' of '+(PARTS[p][1]-PARTS[p][0]+1));
  tick(false); stopFill(); nextBtn.style.display='';
@@ -455,6 +471,9 @@ function back(){ if(current>0) go(current-1); }
 
 function bind(){
  nextBtn.addEventListener('click', advance);
+ if(backBtn) backBtn.addEventListener('click', function(){ if(current>0) go(current-1); });
+ if(helpBtn) helpBtn.addEventListener('click', function(){ if(helpOv) helpOv.classList.add('open'); });
+ if(helpOv) helpOv.addEventListener('click', function(e){ if(e.target===helpOv || e.target.closest('.fbbtn')) helpOv.classList.remove('open'); });
  canvas.addEventListener('click', function(e){
   var closer=e.target.closest('.hotspot-close'); if(closer){ Array.prototype.forEach.call(slides[current].querySelectorAll('.hotspot-detail.open'), function(x){ x.classList.remove('open'); }); return; }
   var card=e.target.closest('[data-touch]'); if(card && slides[current].contains(card)){ handleCard(card); return; }
@@ -474,6 +493,7 @@ function bind(){
 function init(){ viewport=document.getElementById('viewport'); canvas=document.getElementById('canvas');
  slides=Array.prototype.slice.call(document.querySelectorAll('.slide'));
  var bar=document.getElementById('bar'); crumb=bar.querySelector('.crumb'); statusEl=bar.querySelector('.status');
+ backBtn=document.getElementById('back'); helpBtn=document.getElementById('help'); helpOv=document.getElementById('helpov');
  msgEl=statusEl.querySelector('.msg'); nextBtn=document.getElementById('next');
  nextFill=nextBtn.querySelector('.fill'); nextLbl=nextBtn.querySelector('.lbl');
  load(); fit(); bind(); if(current<0||current>=TOTAL) current=0; go(current); }
@@ -493,14 +513,17 @@ PAGE = '''<!doctype html>
 <style>__CSS__</style>
 </head>
 <body>
+<div id="topbar"><img class="logo" src="img/logo-header.png" alt=""><span class="title">Mine Site SME Operating Manual</span><button id="help" type="button">HELP</button></div>
 <div id="viewport"><div id="canvas">
 __SLIDES__
 </div></div>
 <div id="bar">
+  <button id="back" type="button" hidden>« Back</button>
   <span class="crumb"></span>
   <span class="status"><span class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l6 6L20 6"/></svg></span><span class="msg"></span></span>
-  <button id="next" disabled><span class="fill"></span><span class="lbl">Next →</span></button>
+  <button id="next" disabled><span class="fill"></span><span class="lbl">Next »</span></button>
 </div>
+<div id="helpov"><div class="card"><h3>Using this course</h3><p>Work through each module from the Module Menu. Read every slide and open every interactive card — <strong>Next</strong> lights up once a slide is done. Use <strong>Back</strong> to revisit. Finish all modules to start your assessment.</p><button class="fbbtn" type="button">Got it</button></div></div>
 <script>__JS__</script>
 </body>
 </html>'''

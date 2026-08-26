@@ -149,6 +149,9 @@ h6 {
 .fai-rise {
   animation: faiRise var(--duration-slow) var(--ease-entrance);
 }
+.fai-pop {
+  animation: faiPop var(--duration-base) var(--ease-entrance);
+}
 
 a {
   color: var(--text-link);

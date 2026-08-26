@@ -1,0 +1,37 @@
+{
+  "title": "BBM Scraper Operating Manual",
+  "courseKey": "bbm-scraper",
+  "brand": {
+    "ink": "#2B3A42",
+    "grey": "#F4F3F1",
+    "accent": "#F5B301",
+    "accentInk": "#2B3A42",
+    "good": "#1FA463",
+    "logo": "img/logo-header.png",
+    "fontBody": "'Archivo','Arial Narrow','Helvetica Neue',system-ui,sans-serif",
+    "fontsHref": "https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Archivo+Narrow:wght@400;500;600;700&display=swap"
+  },
+  "intro": ["title.html", "how-to.html"],
+  "parts": [
+    { "key": "A", "label": "MODULE A", "title": "Authority & Accountability",
+      "blurb": "Who can operate · operator & supervisor duties · signage & access", "divider": true,
+      "slides": ["a1-intro.html", "a2-authorised.html", "a3-operator.html", "a4-supervisor.html"] },
+    { "key": "B", "label": "MODULE B", "title": "Hazards, Tracks & Separation",
+      "blurb": "Scraper tracks · travel separation · haul-route preparation", "divider": true,
+      "slides": ["b1-hazards.html", "b2-separation.html", "b3-haul-route.html"] },
+    { "key": "C", "label": "MODULE C", "title": "Loading Methods",
+      "blurb": "Overburden & dieback · push-pull · dozer-assist · self-loading", "divider": true,
+      "slides": ["c1-overburden.html", "c2-pushpull.html", "c3-pushpull-steps.html", "c4-dozer-self.html"] },
+    { "key": "D", "label": "MODULE D", "title": "Scraper Stockpiles",
+      "blurb": "Design · building · pit limits · reclaiming · the edge", "divider": true,
+      "slides": ["d1-overview.html", "d2-design.html", "d3-building.html", "d4-pit-limits.html", "d5-reclaiming.html", "d6-edge-hazards.html"] },
+    { "key": "E", "label": "MODULE E", "title": "Special Situations",
+      "blurb": "Stripping gravel · large rock · rehabilitation · incidents", "divider": true,
+      "slides": ["e1-gravel.html", "e2-large-rock.html", "e3-rehab.html", "e4-incident.html"] }
+  ],
+  "completion": {
+    "heading": "Manual Complete",
+    "body": "You have read every module of the BBM Scraper Operating Manual. You are now ready to begin the Authorised to Operate — Scraper assessment.",
+    "logo": "img/logo.png"
+  }
+}

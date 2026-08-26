@@ -611,6 +611,10 @@ const pathwayMarksSchema = z.record(z.enum(ASSESSMENT_PATHWAYS), declaredMarkSch
 const courseLinkSchema = z.object({
   courseId: z.string().uuid(),
   required: z.boolean(),
+  // Graded questions live inside the deck (interleaved): open the theory attempt
+  // at course start so answers can be recorded as the candidate reads, rather
+  // than gating attempt-open on the reading being complete.
+  assessmentInDeck: z.boolean().optional(),
 });
 
 /*
@@ -3513,7 +3517,16 @@ assessmentCasesRouter.post(
       link as missing so someone fixes it.
     */
     const courseLink = tool.manifest.course;
-    if (courseLink?.required) {
+    /*
+      When the graded questions are embedded IN the deck (`assessmentInDeck`),
+      the attempt has to be OPEN while the course is read — that is the record
+      each in-deck answer is saved onto. So the reading-complete gate is skipped
+      for those tools: reading order is still enforced (the deck unlocks a
+      module's questions only after its slides, and `POST …/answer` records each
+      answer against the open attempt). For every other course-gated tool the
+      assessment still comes strictly after the reading.
+    */
+    if (courseLink?.required && !courseLink.assessmentInDeck) {
       const courseRow = await db.query.courses.findFirst({
         where: and(
           eq(schema.courses.id, courseLink.courseId),
@@ -4356,6 +4369,135 @@ function setEquals(a: readonly string[], b: readonly string[]): boolean {
   for (const item of left) if (!right.has(item)) return false;
   return true;
 }
+
+/*
+  ANSWER A SINGLE QUESTION — grade AND record, for the in-deck interleaved quiz.
+
+  The sandboxed course deck has no network of its own, so the host relays each
+  answer here as the candidate works a module. Unlike check-question this SAVES
+  the answer onto the open attempt, so it flows to the evidence PDF through the
+  question's outcomeTarget. Grading is still server-side and the answer key
+  never reaches the client — only the boolean (and, when wrong, the author's
+  hint) is returned; the overall part outcome is still computed later, at submit.
+
+  Security mirrors the save route: the field must be a keyed question this party
+  may write in THIS attempt's part, and the attempt must be open (a resolved
+  attempt is signed evidence; a submitted one has frozen candidate answers).
+*/
+const answerQuestionBody = z.object({
+  fieldId: z.string(),
+  value: z.unknown(),
+});
+
+assessmentCasesRouter.post(
+  '/:id/attempts/:attemptId/answer',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const attempt = await db.query.assessmentPartAttempts.findFirst({
+      where: and(
+        eq(schema.assessmentPartAttempts.id, req.params.attemptId!),
+        eq(schema.assessmentPartAttempts.caseId, row.id),
+      ),
+    });
+    if (!attempt) {
+      res.status(404).json({ error: 'attempt_not_found' });
+      return;
+    }
+    // A resolved attempt is signed evidence — never rewrite it.
+    if (attempt.outcome !== null) {
+      res.status(409).json({ error: 'attempt_resolved' });
+      return;
+    }
+    // Handed in, not yet marked: the candidate's answers are frozen, the same
+    // rule the save route enforces. Interleaved answering runs while the attempt
+    // is still open, so this only guards a late or duplicate post.
+    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
+    if (attempt.submittedAt && party === 'candidate') {
+      res.status(409).json({ error: 'attempt_submitted' });
+      return;
+    }
+
+    const parsed = answerQuestionBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_body' });
+      return;
+    }
+    const { fieldId, value } = parsed.data;
+
+    // UNSTRIPPED fields so answerKey/outcomeTarget are visible.
+    const versionFields = await fieldsForVersion(db, attempt.templateVersionId);
+    const field = versionFields.find((f) => f.id === fieldId);
+    if (!field || !field.answerKey || field.answerKey.length === 0) {
+      res.status(400).json({ error: 'not_a_keyed_question' });
+      return;
+    }
+
+    /*
+      The field must be one THIS PARTY MAY WRITE in THIS attempt's part — the
+      same union the save route uses — so a candidate cannot grade-and-save a
+      field outside their surface (another part's checklist, a marking-owned
+      cell). A tool with no authored workflow resolves to the whole part, so a
+      plain theory tool keeps working.
+    */
+    const tool = await loadTool(db, row.toolId, tenant.orgId);
+    if (!tool) {
+      res.status(409).json({ error: 'tool_missing' });
+      return;
+    }
+    const workflow = workflowOf(tool.manifest, versionFields);
+    const partFields = fieldsInPart(versionFields, tool.manifest, attempt.partKey);
+    const selfAssessing = await isSelfAssessing(db, tenant, row.candidateUserId);
+    const labelled = await labelledSignoffAllowed(db, tenant.orgId);
+    const allowed = new Set(
+      unionPartFieldAccess(
+        workflow,
+        attempt.partKey,
+        partFields,
+        fillParties({ party, selfAssessing, labelled }),
+      ).writable,
+    );
+    if (!allowed.has(fieldId)) {
+      res.status(403).json({ error: 'field_not_in_part', fields: [fieldId] });
+      return;
+    }
+
+    // Grade server-side (exact-set-match, same rule as markTheory).
+    const selected = normalizeSelected(value);
+    const correct = selected !== undefined && setEquals(selected, field.answerKey);
+
+    // Record the candidate's actual selection (right OR wrong) so it prints on
+    // the evidence PDF via the question's outcomeTarget. Merge, never replace.
+    const stored = (attempt.values ?? {}) as Record<string, SubmissionValue>;
+    const values: Record<string, SubmissionValue> = {
+      ...stored,
+      [fieldId]: value as SubmissionValue,
+    };
+    await db
+      .update(schema.assessmentPartAttempts)
+      .set({ values })
+      .where(eq(schema.assessmentPartAttempts.id, attempt.id));
+
+    res.status(200).json({
+      correct,
+      ...(correct ? {} : { hint: field.answerHint ?? null }),
+    });
+  }),
+);
 
 const saveValuesBody = z.object({ values: z.record(z.string(), z.unknown()) });
 

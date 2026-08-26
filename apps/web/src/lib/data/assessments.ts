@@ -545,6 +545,17 @@ export const assessmentsApi = {
       { fieldId, value },
     ),
 
+  /**
+   * Grade AND record one in-deck graded answer against an open attempt. Used by
+   * the course player to relay a `course-answer` from the sandboxed deck; the
+   * server grades server-side and returns only the verdict.
+   */
+  answerQuestion: (caseId: string, attemptId: string, fieldId: string, value: SubmissionValue) =>
+    apiClient.post<{ correct: boolean; hint?: string | null }>(
+      `/assessment-cases/${caseId}/attempts/${attemptId}/answer`,
+      { fieldId, value },
+    ),
+
   /** Opens a new attempt, or returns the one already open for that part. */
   openAttempt: (caseId: string, partKey: string) =>
     apiClient.post<{ id: string; attemptNumber: number; reused: boolean }>(

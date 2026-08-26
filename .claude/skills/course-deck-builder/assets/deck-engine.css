@@ -18,7 +18,7 @@ body{font-family:var(--font-body,'Archivo','Arial Narrow','Helvetica Neue',syste
 }
 section h1,section h2,section p,section ul{margin:0;}
 
-#viewport{position:fixed;left:0;right:0;top:var(--head-h);bottom:var(--bar-h);overflow:hidden;background:#0f171b;}
+#viewport{position:fixed;left:0;right:0;top:var(--head-h);bottom:var(--bar-h);overflow:hidden;background:var(--chrome);}
 #canvas{position:absolute;left:50%;top:50%;width:1920px;height:1080px;transform:translate(-50%,-50%) scale(1);transform-origin:center center;}
 .slide{position:absolute;inset:0;width:1920px;height:1080px;opacity:0;visibility:hidden;pointer-events:none;}
 .slide.active{opacity:1;visibility:visible;pointer-events:auto;}

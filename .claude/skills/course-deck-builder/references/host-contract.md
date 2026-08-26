@@ -42,12 +42,23 @@ The engine and the player (`CoursePlayerScreen.tsx`) speak this small protocol.
 | --- | --- | --- |
 | `{type:'course-slide', index, total}` | a slide is completed (read) | batches indexes, `PATCH /assessment-cases/:id/course-progress {visitedSlides}` |
 | `{type:'course-start-assessment'}` | the final CTA is pressed | `navigate` back to the assessment case |
+| `{type:'course-answer', fieldId, value}` | a **graded** in-deck question (`data-graded`) is submitted | relay to `POST /assessment-cases/:id/attempts/:attemptId/answer {fieldId,value}` — the server grades against the stored key **and records** the answer on the open attempt — then post the verdict back as `course-answer-result` |
 
 **Player → engine (posted into the iframe):**
 
 | message | when | engine does |
 | --- | --- | --- |
 | `{type:'course-progress-seed', visited:[…]}` | on iframe load, from the case's recorded reading | marks those slides complete so a reopened course resumes at its frontier |
+| `{type:'course-answer-result', fieldId, correct, hint?}` | after the server grades a `course-answer` | shows the Correct/Incorrect modal; the slide completes **either way** (the answer is recorded; the overall outcome is marked later, at submit) |
+
+**Graded questions (the in-deck assessment).** A `data-graded` slide carries
+`data-field-id` (the server field to grade) and **no `data-answer`** — the key
+never ships in the package. The candidate picks an option → Submit posts
+`course-answer` → the host **must** relay it to the server (the deck has no
+network of its own) and post the verdict back. This requires the theory attempt
+to be **open** while the course is read (the host opens it at course start), and
+the `POST …/answer` endpoint enforces the same write scope as the save route.
+Grading is always server-side; only `{correct, hint?}` ever returns to the deck.
 
 ## Completion rule (why it's strict)
 

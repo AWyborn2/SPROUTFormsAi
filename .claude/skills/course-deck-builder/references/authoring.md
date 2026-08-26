@@ -168,6 +168,82 @@ All three interactive types (flip, expander, checkbox, hotspot) share one gate
 a slide can mix them, but keeping one interaction style per slide reads more
 clearly. Give every interactive element on a slide a unique `data-touch`.
 
+## Quiz slides (in-deck knowledge check)
+
+A slide can be a **knowledge check** — a single question the reader answers,
+with an instant green-tick **Correct** / red-cross **Incorrect** modal. It is
+ungraded practice (the FormAI assessment stays the graded record), so the
+answer lives in the DOM. The slide's Next becomes **Submit** (disabled until an
+option is picked) and only advances once the answer is **correct**; an incorrect
+answer shows the modal and lets them try again.
+
+Put `data-quiz` and `data-answer` on the `<section>`, give each option a `.qopt`
+with a `data-val`, and set `data-title` for the header. Two layouts:
+
+**True / False** (`data-quiz="tf"`, thumbs cards; `data-val` is `true`/`false`):
+```html
+<section data-title="Quiz: Operational Requirements" data-quiz="tf" data-answer="false"
+  style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:52px var(--pad-x) 40px; gap:26px;">
+  <div class="quiz">
+    <div class="qhead"><span class="qno">Q1</span><span class="qtext">Statement to judge…</span></div>
+    <div class="qsub">Choose whether the statement is true or false.</div>
+    <div class="qopts">
+      <div class="qopt tf" data-val="true"><svg viewBox="0 0 24 24"><path d="…thumb…"/></svg><span class="lab">TRUE</span></div>
+      <div class="qopt tf" data-val="false"><svg viewBox="0 0 24 24" style="transform:rotate(180deg);"><path d="…thumb…"/></svg><span class="lab">FALSE</span></div>
+    </div>
+  </div>
+</section>
+```
+
+**Multiple choice** (`data-quiz="mc"`, A/B/C rows; `data-answer` is the letter):
+```html
+<div class="qopts mc">
+  <div class="qopt mc" data-val="A"><span class="letter">A</span><span class="otext">First option</span></div>
+  <div class="qopt mc" data-val="B"><span class="letter">B</span><span class="otext">Second option</span></div>
+</div>
+```
+The engine handles selection highlight, Submit, the feedback modal, and gating —
+don't wire any of it. Keep one question per slide.
+
+## Graded questions (the in-deck assessment)
+
+A slide can also carry a **graded** assessment question — part of the real,
+recorded assessment rather than ungraded practice. It looks and behaves like a
+knowledge check (same cards, same Correct/Incorrect modal), with three
+differences:
+
+- Use **`data-graded`** (`"tf"` or `"mc"`) instead of `data-quiz`.
+- Give it **`data-field-id`** = the assessment tool's field id for this question.
+- Put **no `data-answer`** — the answer key never ships in the deck.
+
+On Submit the deck posts `{type:'course-answer', fieldId, value}` to the host,
+which relays it to the server (`POST …/attempts/:attemptId/answer`) to grade
+against the stored key **and record** the answer on the open attempt; the verdict
+returns as `course-answer-result` and drives the modal. The slide completes on
+**any** answer (right or wrong) — the selection is recorded and the overall
+outcome is marked later, at submit — so there is no in-deck retry loop.
+
+```html
+<section data-title="Assessment: Operational Requirements" data-graded="mc" data-field-id="q-123"
+  style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:52px var(--pad-x) 40px; gap:24px;">
+  <div class="quiz">
+    <div class="qhead"><span class="qno">Q3</span><span class="qtext">Graded question…</span></div>
+    <div class="qsub">Select the correct answer — this is a graded assessment question.</div>
+    <div class="qopts mc">
+      <div class="qopt mc" data-val="a"><span class="letter">A</span><span class="otext">First option</span></div>
+      <div class="qopt mc" data-val="b"><span class="letter">B</span><span class="otext">Second option</span></div>
+    </div>
+  </div>
+</section>
+```
+
+`data-val` must be the **server option value** the tool's `answerKey` matches
+(the actual option text/value, not just a display letter). Place a graded slide
+inside the module its topic belongs to (`data-part` = that module) — the module
+won't complete until the question is answered, which is what makes the
+assessment *interleaved* with the reading. Requires the host to open the theory
+attempt at course start; see `host-contract.md`.
+
 ## 5. deck.json
 
 ```json
@@ -181,7 +257,14 @@ clearly. Give every interactive element on a slide a unique `data-touch`.
   "intro": ["title.html", "how-to.html"],
   "parts": [
     { "key": "A", "label": "MODULE A", "title": "Working Safely", "blurb": "PPE · hazards",
-      "divider": true, "slides": ["a-ppe.html", "a-hazards.html"] }
+      "divider": true, "slides": ["a-ppe.html", "a-hazards.html"],
+      "questions": [
+        { "fieldId": "q-123", "type": "mc", "number": "Q1",
+          "question": "Which PPE is mandatory in the pit?",
+          "options": [ { "val": "a", "text": "Hi-vis only" }, { "val": "b", "text": "Full PPE" } ] },
+        { "fieldId": "q-124", "type": "tf", "number": "Q2",
+          "question": "You may enter the pit without a permit." }
+      ] }
   ],
   "completion": { "heading": "Induction Complete",
                   "body": "You have read every module. You can now begin.",
@@ -194,6 +277,14 @@ Notes:
   full-bleed hero.
 - The **Module Menu**, part **dividers**, and the **completion** slide (with a
   Start Assessment CTA) are generated from this JSON — don't author them.
+- **`questions`** (optional, per part) generates the module's **graded** slides —
+  the interleaved in-deck assessment — after its reading slides, so the module
+  gates on them being answered. Each is `{ fieldId, type: "tf"|"mc", question,
+  number?, title? }`; `mc` adds `options: [{ val, text }]` where `val` is the
+  server option value the tool's `answerKey` matches. **No answer** is authored —
+  grading is server-side (see the "Graded questions" section above and
+  `host-contract.md`). Set `course.assessmentInDeck: true` on the assessment
+  tool's manifest so the attempt opens at course start.
 - Match the brand to the manual's owner; pull an accent from its logo. Keep a
   real font fallback stack.
 - Don't reproduce document-control watermark text (manual numbers, version

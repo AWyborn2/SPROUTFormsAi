@@ -1074,6 +1074,15 @@ export interface AssessmentCourseLink {
   courseId: string;
   /** Gate part attempts on the case's reading record being complete. */
   required: boolean;
+  /**
+   * The graded theory questions are embedded IN the deck (interleaved), answered
+   * as the candidate reads each module. When true the theory attempt may be
+   * opened at course START — so the deck can record answers as it goes — instead
+   * of being gated on the reading being complete. Reading order is still
+   * enforced: the deck unlocks a module's questions only after its slides, and
+   * the server records each answer against the open attempt.
+   */
+  assessmentInDeck?: boolean;
 }
 
 /**
