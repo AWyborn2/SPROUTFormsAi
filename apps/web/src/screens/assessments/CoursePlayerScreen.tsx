@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import type { SubmissionValue } from '@formai/shared';
 import { Button, Icon, useToast } from '@formai/ui';
 import {
   useAssessmentCase,
@@ -7,6 +8,7 @@ import {
   useOpenAttempt,
   useSaveCourseProgress,
 } from '../../lib/data/hooks.js';
+import { assessmentsApi } from '../../lib/data/assessments.js';
 
 /**
  * The course player: the case's course package running in a sandboxed iframe,
@@ -112,6 +114,49 @@ export function CoursePlayerScreen() {
     timerRef.current = setTimeout(flush, 900);
   }, [flush]);
 
+  // ── In-deck graded answers ────────────────────────────────────────────────
+  // The sandboxed deck can't reach the API, so it posts each graded answer and
+  // we relay it to the server, then post the verdict back into the frame. The
+  // theory attempt is opened LAZILY on the first answer — the attempt-open gate
+  // is relaxed for an in-deck assessment (course.assessmentInDeck) — and reused
+  // after. Held as a promise so several quick answers await one open rather than
+  // racing to open several attempts.
+  const attemptPromiseRef = useRef<Promise<string | null> | null>(null);
+  const relayAnswer = useCallback(
+    async (fieldId: string, value: SubmissionValue) => {
+      const win = frameRef.current?.contentWindow;
+      if (!id || !win) return;
+      if (!attemptPromiseRef.current) {
+        attemptPromiseRef.current = (async () => {
+          const target = (caseDetail?.parts ?? []).find((p) => p.state === 'open');
+          if (!target) return null;
+          try {
+            return (await assessmentsApi.openAttempt(id, target.key)).id;
+          } catch {
+            attemptPromiseRef.current = null; // let a later answer retry the open
+            return null;
+          }
+        })();
+      }
+      const attemptId = await attemptPromiseRef.current;
+      if (!attemptId) return; // the deck surfaces the failure via its own timeout
+      try {
+        const res = await assessmentsApi.answerQuestion(id, attemptId, fieldId, value);
+        win.postMessage(
+          { type: 'course-answer-result', fieldId, correct: res.correct, hint: res.hint ?? undefined },
+          '*',
+        );
+      } catch {
+        // Leave the deck on its "Checking…" timeout; a retry re-posts the answer.
+      }
+    },
+    [id, caseDetail],
+  );
+  const relayRef = useRef(relayAnswer);
+  useEffect(() => {
+    relayRef.current = relayAnswer;
+  }, [relayAnswer]);
+
   useEffect(() => {
     function onMessage(e: MessageEvent) {
       // Only the embedded package's frame is listened to — any other window
@@ -125,6 +170,15 @@ export function CoursePlayerScreen() {
       // case, where the now-satisfied gate lets them open the first part.
       if (d.type === 'course-start-assessment') {
         startRef.current();
+        return;
+      }
+      // A graded in-deck question was submitted: relay it to the server (the
+      // sandboxed deck has no network of its own) and post the verdict back.
+      if (d.type === 'course-answer' && typeof (d as { fieldId?: unknown }).fieldId === 'string') {
+        relayRef.current(
+          (d as { fieldId: string }).fieldId,
+          (d as { value?: SubmissionValue }).value ?? null,
+        );
         return;
       }
       if (d.type !== 'course-slide' || typeof d.index !== 'number') return;

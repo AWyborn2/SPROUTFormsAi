@@ -9,7 +9,7 @@
  * posts — because jsdom does not run the frame's scripts.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { CaseCourseView } from '../../lib/data/assessments.js';
 
 const navigate = vi.fn();
@@ -36,6 +36,17 @@ vi.mock('../../lib/data/hooks.js', () => ({
   useSaveCourseProgress: () => ({ mutate: saveMutate, isPending: false }),
   useAssessmentCase: () => caseResult,
   useOpenAttempt: () => ({ mutate: openMutate, isPending: false }),
+}));
+
+// The in-deck answer relay calls the API object directly (not a hook), so it is
+// mocked separately. openAttempt is lazy; answerQuestion grades + records.
+const openAttemptApi = vi.fn(async () => ({ id: 'att-9', attemptNumber: 1, reused: false }));
+const answerQuestionApi = vi.fn(async () => ({ correct: true, hint: null as string | null }));
+vi.mock('../../lib/data/assessments.js', () => ({
+  assessmentsApi: {
+    openAttempt: (...a: unknown[]) => openAttemptApi(...(a as [])),
+    answerQuestion: (...a: unknown[]) => answerQuestionApi(...(a as [])),
+  },
 }));
 
 const toast = vi.fn();
@@ -152,6 +163,52 @@ describe('CoursePlayerScreen', () => {
     });
     expect(openMutate).not.toHaveBeenCalled();
     expect(navigate).toHaveBeenCalledWith('/app/assessments/case-1');
+  });
+
+  it('relays a graded in-deck answer to the server and posts the verdict back', async () => {
+    courseResult.data = { course: deckCourse() };
+    render(<CoursePlayerScreen />);
+    const frame = document.querySelector('iframe')!;
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+
+    const event = new MessageEvent('message', {
+      data: { type: 'course-answer', fieldId: 'q-1', value: 'a' },
+    });
+    Object.defineProperty(event, 'source', { value: frame.contentWindow });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+
+    // Lazily opens the first OPEN part's attempt, grades+records via /answer,
+    // then posts the verdict back into the frame.
+    await waitFor(() => expect(answerQuestionApi).toHaveBeenCalledWith('case-1', 'att-9', 'q-1', 'a'));
+    expect(openAttemptApi).toHaveBeenCalledWith('case-1', 'theory');
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        { type: 'course-answer-result', fieldId: 'q-1', correct: true, hint: undefined },
+        '*',
+      ),
+    );
+  });
+
+  it('opens the attempt only once across several in-deck answers', async () => {
+    courseResult.data = { course: deckCourse() };
+    render(<CoursePlayerScreen />);
+    const frame = document.querySelector('iframe')!;
+    const fire = (fieldId: string) => {
+      const event = new MessageEvent('message', {
+        data: { type: 'course-answer', fieldId, value: 'a' },
+      });
+      Object.defineProperty(event, 'source', { value: frame.contentWindow });
+      act(() => {
+        window.dispatchEvent(event);
+      });
+    };
+    fire('q-1');
+    fire('q-2');
+    await waitFor(() => expect(answerQuestionApi).toHaveBeenCalledTimes(2));
+    // Two answers, but exactly one attempt opened (held as a shared promise).
+    expect(openAttemptApi).toHaveBeenCalledTimes(1);
   });
 
   it('a message from any other window is ignored', () => {
