@@ -112,6 +112,12 @@
   --info-soft:    var(--blue-50);
   --info-text:    var(--blue-700);
 
+  /* Quiz option selection (South32 look) — yellow "picked", kept distinct from
+     green "correct" and red "wrong" so a chosen answer never reads as marked. */
+  --quiz-pick:        #fce300;
+  --quiz-pick-border: #d9b800;
+  --quiz-pick-ink:    #1c1c1c;
+
   /* Focus */
   --focus-ring: var(--accent-ring);
 }
@@ -162,4 +168,9 @@
   --warning-text: #e8b866;
   --danger-text:  #e59089;
   --info-text:    #9dc3dc;
+
+  /* Bright yellow reads on the dark ink; only the border edges up for contrast. */
+  --quiz-pick:        #fce300;
+  --quiz-pick-border: #fce300;
+  --quiz-pick-ink:    #1c1c1c;
 }

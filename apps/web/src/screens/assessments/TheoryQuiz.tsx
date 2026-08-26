@@ -324,41 +324,16 @@ export function TheoryQuiz({
         })}
       </div>
 
-      {/* Feedback area */}
-      {currentFeedback && (
-        <div
-          className={`mt-5 flex flex-col items-center gap-2 rounded-xl p-5 text-center transition-all duration-300 ${
-            currentFeedback.correct
-              ? 'bg-[var(--success-bg,oklch(0.95_0.02_145))]'
-              : 'bg-[var(--danger-bg,oklch(0.95_0.02_25))]'
-          }`}
-        >
-          <div
-            className={`flex h-12 w-12 items-center justify-center rounded-full ${
-              currentFeedback.correct
-                ? 'bg-[var(--success)] text-white'
-                : 'bg-[var(--danger)] text-white'
-            }`}
-          >
-            <Icon
-              name={currentFeedback.correct ? 'check' : 'x'}
-              size={24}
-            />
-          </div>
-          <p className="text-[15px] font-semibold">
-            {currentFeedback.correct ? 'Correct' : 'Incorrect'}
-          </p>
-          {!currentFeedback.correct && currentFeedback.hint && (
-            <p className="text-[12.5px] text-text-secondary">{currentFeedback.hint}</p>
-          )}
-        </div>
-      )}
-
-      {/* Action buttons */}
+      {/*
+        Action buttons — only the way IN to a check lives inline: Submit for a
+        choice question, or Finish for a page with no choice question (a
+        signature/short answer), unlocked once its required inputs are filled.
+        Everything AFTER a submit — the result and the way forward — lives in
+        the result modal below, matching the South32 LMS moment.
+      */}
       <div className="mt-6 flex items-center justify-center gap-3">
-        {questionId ? (
-          <>
-            {!currentSubmitted && (
+        {questionId
+          ? !currentSubmitted && (
               <Button
                 onClick={handleCheckAnswer}
                 disabled={!currentAnswered || checking}
@@ -366,48 +341,75 @@ export function TheoryQuiz({
               >
                 {checking ? 'Checking…' : 'Submit'}
               </Button>
-            )}
-
-            {canRetry && (
-              <Button
-                variant="outline"
-                leadingIcon="rotate-ccw"
-                onClick={handleRetry}
-              >
-                Try again
-              </Button>
-            )}
-
-            {currentSubmitted && !canRetry && (
+            )
+          : (
               <Button
                 onClick={handleNext}
-                disabled={submitting || saving}
+                disabled={!requiredInputsDone || submitting || saving}
                 className="min-w-[140px]"
               >
-                {isLastPage
-                  ? submitting
-                    ? 'Finishing…'
-                    : 'Finish'
-                  : 'Next'}
+                {isLastPage ? (submitting ? 'Finishing…' : 'Finish') : 'Next'}
               </Button>
             )}
-          </>
-        ) : (
-          /*
-            No choice question on this page — nothing to check, so straight to
-            Next/Finish, unlocked once the page's required inputs (the signature)
-            are filled. This is what lets a signature-only or short-answer page
-            be handed in at all.
-          */
-          <Button
-            onClick={handleNext}
-            disabled={!requiredInputsDone || submitting || saving}
-            className="min-w-[140px]"
-          >
-            {isLastPage ? (submitting ? 'Finishing…' : 'Finish') : 'Next'}
-          </Button>
-        )}
       </div>
+
+      {/*
+        South32-style result modal — a green tick for Correct, a red cross for
+        Incorrect, then the single way forward: Next/Finish, or (immediate mode,
+        wrong answer only) Try again. Keeping the forward action inside the modal
+        preserves the "no way past a wrong answer while a retry is on the table"
+        rule — there is no Next/Finish rendered until the retry is spent.
+      */}
+      {currentFeedback && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={currentFeedback.correct ? 'Correct' : 'Incorrect'}
+          className="fai-fade fixed inset-0 z-50 flex items-center justify-center bg-[var(--surface-overlay)] p-4"
+        >
+          <div className="fai-pop w-full max-w-[380px] rounded-2xl bg-surface-card p-7 text-center shadow-xl">
+            <div
+              className={`mx-auto flex h-16 w-16 items-center justify-center rounded-full text-white ${
+                currentFeedback.correct ? 'bg-[var(--success)]' : 'bg-[var(--danger)]'
+              }`}
+            >
+              <Icon
+                name={currentFeedback.correct ? 'check' : 'x'}
+                size={32}
+                className="stroke-[3]"
+              />
+            </div>
+            <p className="mt-4 text-[20px] font-bold text-text-primary">
+              {currentFeedback.correct ? 'Correct' : 'Incorrect'}
+            </p>
+            {!currentFeedback.correct && currentFeedback.hint && (
+              <p className="mt-1.5 text-[13px] text-text-secondary">
+                {currentFeedback.hint}
+              </p>
+            )}
+            <div className="mt-6 flex justify-center">
+              {canRetry ? (
+                <Button
+                  variant="outline"
+                  leadingIcon="rotate-ccw"
+                  onClick={handleRetry}
+                  className="min-w-[160px]"
+                >
+                  Try again
+                </Button>
+              ) : (
+                <Button
+                  onClick={handleNext}
+                  disabled={submitting || saving}
+                  className="min-w-[160px]"
+                >
+                  {isLastPage ? (submitting ? 'Finishing…' : 'Finish') : 'Next'}
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
