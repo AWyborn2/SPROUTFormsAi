@@ -89,9 +89,9 @@
     setMsg(msg);
   }
   function menuBar() {
-    crumb.textContent = 'Section Menu';
-    if (allDone()) { nextBtn.style.display = ''; tick(true); setMsg('All sections complete'); setNext('Finish →', true); }
-    else { nextBtn.style.display = 'none'; tick(false); setMsg('Choose an unlocked section to begin'); }
+    crumb.textContent = 'Module Menu';
+    if (allDone()) { nextBtn.style.display = ''; tick(true); setMsg('All modules complete'); setNext('Finish →', true); }
+    else { nextBtn.style.display = 'none'; tick(false); setMsg('Choose an unlocked module to begin'); }
   }
   function renderMenu() {
     var sl = slides[menuIdx()], done = 0;
@@ -141,7 +141,7 @@
     // to go. Going back never re-gates — an already-completed slide is ready at
     // once (see the completed.has(i) paths below).
     if (backBtn) backBtn.hidden = (i <= 0);
-    crumb.textContent = p === 'intro' ? 'Introduction' : p === 'menu' ? 'Section Menu' : p === 'done' ? 'Complete'
+    crumb.textContent = p === 'intro' ? 'Introduction' : p === 'menu' ? 'Module Menu' : p === 'done' ? 'Complete'
       : ('Module ' + p + ' · slide ' + (i - PARTS[p][0] + 1) + ' of ' + (PARTS[p][1] - PARTS[p][0] + 1));
     tick(false); stopFill(); nextBtn.style.display = '';
     if (p === 'menu') { renderMenu(); markComplete(i); menuBar(); return; }
@@ -203,8 +203,8 @@
         // their progress invisible and has to click back through the intro — the
         // "it makes me start again" report. The seed says which slides are done;
         // drop them at the natural continuation point: the completion slide if
-        // everything is read (Start Assessment ready), otherwise the Section Menu
-        // hub, where finished parts show ticked and the next part is one click on.
+        // everything is read (Start Assessment ready), otherwise the Module Menu
+        // hub, where finished modules show ticked and the next module is one click on.
         if (completed.size > had) { var mi = menuIdx(); go(allDone() ? doneIdx() : (mi >= 0 ? mi : current)); }
         else { enterSlide(current); }
       }

@@ -11,7 +11,7 @@ all 52 slide *sections* verbatim but drives them with a tiny vanilla engine
 
 The engine gives the reader:
   - a real one-slide-at-a-time slideshow, scaled to fit, animated transitions;
-  - a hub-and-spoke Section Menu: parts unlock in order; finish a part's slides
+  - a hub-and-spoke Module Menu: modules unlock in order; finish a module's slides
     and you return to the menu to start the next;
   - a live Next button that unlocks after a reading beat (timed to the slide's
     length) OR once every interactive card on the slide has been opened, with an
@@ -122,7 +122,7 @@ def menu_slide() -> str:
     grid = '\n'.join(cards)
     return f'''<section data-label="Section menu" style="background:var(--grey); color:var(--ink); display:flex; flex-direction:column; padding:64px var(--pad-x) 52px; gap:26px;">
   <div style="display:flex; justify-content:space-between; align-items:flex-end;">
-    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Section Menu</h1>
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Module Menu</h1>
     <div style="display:flex; align-items:center; gap:16px;">
       <span class="menu-count" style="font-size:var(--type-small); color:#666;">0 of 6 modules complete</span>
       <div style="width:220px; height:12px; background:#ddd; border-radius:6px; overflow:hidden;"><div class="menu-fill" style="height:100%; background:#1a7a2e; width:0%; transition:width .4s;"></div></div>
@@ -254,7 +254,7 @@ def completion_slide() -> str:
   <p style="font-size:var(--type-body); color:#ccc; max-width:1200px; line-height:1.45;">You have read every module of the Mine Site SME Operating Manual. Your reading is recorded against the assessment — you can now begin.</p>
   <div style="display:flex; gap:20px;">
     <button class="cta" data-action="start" style="background:#EADA23; color:#3C4043; border:0; padding:22px 52px; font-size:28px; font-weight:800; cursor:pointer; border-radius:6px; font-family:'Archivo',sans-serif;">Start Assessment →</button>
-    <button class="cta" data-action="menu" style="background:transparent; color:#fff; border:2px solid #555; padding:22px 40px; font-size:24px; font-weight:700; cursor:pointer; border-radius:6px; font-family:'Archivo',sans-serif;">Back to Section Menu</button>
+    <button class="cta" data-action="menu" style="background:transparent; color:#fff; border:2px solid #555; padding:22px 40px; font-size:24px; font-weight:700; cursor:pointer; border-radius:6px; font-family:'Archivo',sans-serif;">Back to Module Menu</button>
   </div>
 </section>'''
 
@@ -385,9 +385,9 @@ function reflectCards(sl){ var c=cardsOf(sl), d=0; for(var i=0;i<c.length;i++) i
  else m='Open all '+c.length+' cards to continue — '+d+' of '+c.length+' viewed';
  setMsg(m); }
 
-function menuBar(){ crumb.textContent='Section Menu';
- if(allDone()){ nextBtn.style.display=''; tick(true); setMsg('All sections complete'); setNext('Finish →', true); }
- else { nextBtn.style.display='none'; tick(false); setMsg('Choose an unlocked section to begin'); } }
+function menuBar(){ crumb.textContent='Module Menu';
+ if(allDone()){ nextBtn.style.display=''; tick(true); setMsg('All modules complete'); setNext('Finish →', true); }
+ else { nextBtn.style.display='none'; tick(false); setMsg('Choose an unlocked module to begin'); } }
 
 function renderMenu(){ var sl=slides[2], done=0;
  Array.prototype.forEach.call(sl.querySelectorAll('.part-card'), function(card){
@@ -421,7 +421,7 @@ function handleCard(card){ var sl=slides[current];
  card.classList.add('viewed'); touched.add(card.getAttribute('data-touch')); reflectCards(sl); save(); }
 
 function enterSlide(i){ var sl=slides[i], p=partOf(i);
- crumb.textContent = p==='intro'?'Introduction' : p==='menu'?'Section Menu' : p==='done'?'Complete'
+ crumb.textContent = p==='intro'?'Introduction' : p==='menu'?'Module Menu' : p==='done'?'Complete'
    : ('Module '+p+' · slide '+(i-PARTS[p][0]+1)+' of '+(PARTS[p][1]-PARTS[p][0]+1));
  tick(false); stopFill(); nextBtn.style.display='';
  if(p==='menu'){ renderMenu(); markComplete(i); menuBar(); return; }

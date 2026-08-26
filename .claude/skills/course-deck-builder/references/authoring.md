@@ -32,7 +32,7 @@ huge images down (a course zip should be tens of MB, not hundreds).
 
 ## 2. Plan the modules (hub-and-spoke)
 
-The deck is a hub-and-spoke: an intro, a **Section Menu**, then several
+The deck is a hub-and-spoke: an intro, a **Module Menu**, then several
 **modules** the reader unlocks in order and returns to the menu between. Map the
 manual's chapters to 4–8 modules, each with ~4–8 slides. (In `deck.json` the
 modules live in the `parts` array — the key name is historical; what the reader
@@ -192,7 +192,7 @@ clearly. Give every interactive element on a slide a unique `data-touch`.
 Notes:
 - `intro[0]` (usually the title slide) gets a short reading beat; write it as a
   full-bleed hero.
-- The **Section Menu**, part **dividers**, and the **completion** slide (with a
+- The **Module Menu**, part **dividers**, and the **completion** slide (with a
   Start Assessment CTA) are generated from this JSON — don't author them.
 - Match the brand to the manual's owner; pull an accent from its logo. Keep a
   real font fallback stack.

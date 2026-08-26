@@ -126,7 +126,7 @@ def menu_section(parts: list) -> str:
         '<section style="background:var(--grey); color:var(--ink); display:flex; flex-direction:column; '
         'padding:64px var(--pad-x) 52px; gap:26px;">\n'
         '  <div style="display:flex; justify-content:space-between; align-items:flex-end;">\n'
-        '    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Section Menu</h1>\n'
+        '    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Module Menu</h1>\n'
         '    <div style="display:flex; align-items:center; gap:16px;">\n'
         '      <span class="menu-count" style="font-size:var(--type-small); color:#666;"></span>\n'
         '      <div style="width:220px; height:12px; background:#ddd; border-radius:6px; overflow:hidden;">'
@@ -156,7 +156,7 @@ def completion_section(comp: dict) -> str:
         '    <button class="cta" data-action="start" style="background:var(--accent); color:var(--accent-ink); border:0; '
         'padding:22px 52px; font-size:28px; font-weight:800; cursor:pointer; border-radius:6px; font-family:inherit;">Start Assessment →</button>\n'
         '    <button class="cta" data-action="menu" style="background:transparent; color:#fff; border:2px solid #555; '
-        'padding:22px 40px; font-size:24px; font-weight:700; cursor:pointer; border-radius:6px; font-family:inherit;">Back to Section Menu</button>\n'
+        'padding:22px 40px; font-size:24px; font-weight:700; cursor:pointer; border-radius:6px; font-family:inherit;">Back to Module Menu</button>\n'
         '  </div>\n'
         '</section>'
     )
