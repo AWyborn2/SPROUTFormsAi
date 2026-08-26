@@ -162,6 +162,58 @@ def completion_section(comp: dict) -> str:
     )
 
 
+_THUMB = ('<svg viewBox="0 0 24 24"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57'
+          '.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.96 7 8.46 7 9v10c0 1.1.9 2 2 2h9'
+          'c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-1z"/></svg>')
+
+
+def graded_section(q: dict) -> str:
+    """A GRADED assessment question slide — keyless (no data-answer). The deck
+    posts the selection to the host, which grades + records it server-side."""
+    if 'fieldId' not in q or 'question' not in q:
+        raise SystemExit(f'graded question needs fieldId and question: {q!r}')
+    qtype = q.get('type', 'mc')
+    if qtype not in ('tf', 'mc'):
+        raise SystemExit(f'graded question type must be "tf" or "mc": {q!r}')
+    fid = html.escape(str(q['fieldId']))
+    title = html.escape(q.get('title', 'Assessment'))
+    qno = html.escape(str(q.get('number', '')))
+    qtext = html.escape(str(q['question']))
+    if qtype == 'tf':
+        sub = 'Choose True or False — this is a graded assessment question.'
+        opts = (
+            '    <div class="qopts">\n'
+            f'      <div class="qopt tf" data-val="true">{_THUMB}<span class="lab">TRUE</span></div>\n'
+            f'      <div class="qopt tf" data-val="false"><svg viewBox="0 0 24 24" style="transform:rotate(180deg);">'
+            f'{_THUMB[_THUMB.index(">") + 1:]}<span class="lab">FALSE</span></div>\n'
+            '    </div>'
+        )
+    else:
+        sub = 'Select the correct answer — this is a graded assessment question.'
+        letters = 'ABCDEFGH'
+        opts_list = q.get('options', [])
+        if not opts_list:
+            raise SystemExit(f'multiple-choice graded question needs options: {q!r}')
+        rows = [
+            f'      <div class="qopt mc" data-val="{html.escape(str(o["val"]))}">'
+            f'<span class="letter">{letters[i] if i < len(letters) else i + 1}</span>'
+            f'<span class="otext">{html.escape(str(o["text"]))}</span></div>'
+            for i, o in enumerate(opts_list)
+        ]
+        opts = '    <div class="qopts mc">\n' + '\n'.join(rows) + '\n    </div>'
+    return (
+        f'<section data-title="{title}" data-graded="{qtype}" data-field-id="{fid}"\n'
+        '  style="background:#fff; color:var(--ink); display:flex; flex-direction:column; '
+        'padding:52px var(--pad-x) 40px; gap:24px;">\n'
+        '  <div class="quiz">\n'
+        f'    <div class="qhead"><span class="qno">{qno}</span><span class="qtext">{qtext}</span></div>\n'
+        f'    <div class="qsub">{sub}</div>\n'
+        f'{opts}\n'
+        '  </div>\n'
+        '</section>'
+    )
+
+
 def wrap(section: str, idx: int, part: str, quick: bool) -> str:
     q = ' data-quick="1"' if quick else ''
     return f'<div class="slide" data-idx="{idx}" data-part="{part}"{q}>\n{section}\n</div>'
@@ -187,6 +239,10 @@ def build(deck_dir: Path, out_dir: Path) -> None:
             slides.append(wrap(divider_section(p), idx, p['key'], quick=True)); idx += 1
         for name in p.get('slides', []):
             slides.append(wrap(read_section(deck_dir, name), idx, p['key'], quick=False)); idx += 1
+        # graded assessment questions — generated, keyless, interleaved AFTER the
+        # module's reading slides so the module gates on them being answered.
+        for q in p.get('questions', []):
+            slides.append(wrap(graded_section(q), idx, p['key'], quick=False)); idx += 1
     # completion (generated)
     slides.append(wrap(completion_section(spec.get('completion', {})), idx, 'done', quick=False)); idx += 1
 

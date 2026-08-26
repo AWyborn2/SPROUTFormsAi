@@ -257,7 +257,14 @@ attempt at course start; see `host-contract.md`.
   "intro": ["title.html", "how-to.html"],
   "parts": [
     { "key": "A", "label": "MODULE A", "title": "Working Safely", "blurb": "PPE · hazards",
-      "divider": true, "slides": ["a-ppe.html", "a-hazards.html"] }
+      "divider": true, "slides": ["a-ppe.html", "a-hazards.html"],
+      "questions": [
+        { "fieldId": "q-123", "type": "mc", "number": "Q1",
+          "question": "Which PPE is mandatory in the pit?",
+          "options": [ { "val": "a", "text": "Hi-vis only" }, { "val": "b", "text": "Full PPE" } ] },
+        { "fieldId": "q-124", "type": "tf", "number": "Q2",
+          "question": "You may enter the pit without a permit." }
+      ] }
   ],
   "completion": { "heading": "Induction Complete",
                   "body": "You have read every module. You can now begin.",
@@ -270,6 +277,14 @@ Notes:
   full-bleed hero.
 - The **Module Menu**, part **dividers**, and the **completion** slide (with a
   Start Assessment CTA) are generated from this JSON — don't author them.
+- **`questions`** (optional, per part) generates the module's **graded** slides —
+  the interleaved in-deck assessment — after its reading slides, so the module
+  gates on them being answered. Each is `{ fieldId, type: "tf"|"mc", question,
+  number?, title? }`; `mc` adds `options: [{ val, text }]` where `val` is the
+  server option value the tool's `answerKey` matches. **No answer** is authored —
+  grading is server-side (see the "Graded questions" section above and
+  `host-contract.md`). Set `course.assessmentInDeck: true` on the assessment
+  tool's manifest so the attempt opens at course start.
 - Match the brand to the manual's owner; pull an accent from its logo. Keep a
   real font fallback stack.
 - Don't reproduce document-control watermark text (manual numbers, version
