@@ -168,6 +168,43 @@ All three interactive types (flip, expander, checkbox, hotspot) share one gate
 a slide can mix them, but keeping one interaction style per slide reads more
 clearly. Give every interactive element on a slide a unique `data-touch`.
 
+## Quiz slides (in-deck knowledge check)
+
+A slide can be a **knowledge check** — a single question the reader answers,
+with an instant green-tick **Correct** / red-cross **Incorrect** modal. It is
+ungraded practice (the FormAI assessment stays the graded record), so the
+answer lives in the DOM. The slide's Next becomes **Submit** (disabled until an
+option is picked) and only advances once the answer is **correct**; an incorrect
+answer shows the modal and lets them try again.
+
+Put `data-quiz` and `data-answer` on the `<section>`, give each option a `.qopt`
+with a `data-val`, and set `data-title` for the header. Two layouts:
+
+**True / False** (`data-quiz="tf"`, thumbs cards; `data-val` is `true`/`false`):
+```html
+<section data-title="Quiz: Operational Requirements" data-quiz="tf" data-answer="false"
+  style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:52px var(--pad-x) 40px; gap:26px;">
+  <div class="quiz">
+    <div class="qhead"><span class="qno">Q1</span><span class="qtext">Statement to judge…</span></div>
+    <div class="qsub">Choose whether the statement is true or false.</div>
+    <div class="qopts">
+      <div class="qopt tf" data-val="true"><svg viewBox="0 0 24 24"><path d="…thumb…"/></svg><span class="lab">TRUE</span></div>
+      <div class="qopt tf" data-val="false"><svg viewBox="0 0 24 24" style="transform:rotate(180deg);"><path d="…thumb…"/></svg><span class="lab">FALSE</span></div>
+    </div>
+  </div>
+</section>
+```
+
+**Multiple choice** (`data-quiz="mc"`, A/B/C rows; `data-answer` is the letter):
+```html
+<div class="qopts mc">
+  <div class="qopt mc" data-val="A"><span class="letter">A</span><span class="otext">First option</span></div>
+  <div class="qopt mc" data-val="B"><span class="letter">B</span><span class="otext">Second option</span></div>
+</div>
+```
+The engine handles selection highlight, Submit, the feedback modal, and gating —
+don't wire any of it. Keep one question per slide.
+
 ## 5. deck.json
 
 ```json
