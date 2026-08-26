@@ -31,6 +31,9 @@
   var KEY = (window.__courseKey || 'course-deck') + '-progress';
 
   var viewport, canvas, slides, crumb, statusEl, msgEl, nextBtn, nextFill, nextLbl, backBtn;
+  var titleEl, helpBtn, quizFb, helpOv;
+  var TICK_SVG = '<svg viewBox="0 0 24 24"><path d="M4 12l6 6L20 6"/></svg>';
+  var CROSS_SVG = '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>';
   var TOTAL = 0, PARTS = {}, ORDER = [];
   var completed = new Set(), touched = new Set(), current = 0, readTimer = null;
 
@@ -74,7 +77,7 @@
     var r = PARTS[p];
     return (i < r[1]) ? 'Next →' : ('Finish Module ' + p + ' →');
   }
-  function becomeReady(i) { stopFill(); tick(true); setMsg('Slide complete'); setNext(nextLabel(i), true); }
+  function becomeReady(i) { stopFill(); tick(true); nextBtn.classList.remove('submit'); setMsg('Slide complete'); setNext(nextLabel(i), true); }
 
   function reflectCards(sl) {
     var c = cardsOf(sl), d = 0; for (var i = 0; i < c.length; i++) if (c[i].classList.contains('viewed')) d++;
@@ -143,7 +146,8 @@
     if (backBtn) backBtn.hidden = (i <= 0);
     crumb.textContent = p === 'intro' ? 'Introduction' : p === 'menu' ? 'Module Menu' : p === 'done' ? 'Complete'
       : ('Module ' + p + ' · slide ' + (i - PARTS[p][0] + 1) + ' of ' + (PARTS[p][1] - PARTS[p][0] + 1));
-    tick(false); stopFill(); nextBtn.style.display = '';
+    if (titleEl) titleEl.textContent = titleOf(i);
+    tick(false); stopFill(); nextBtn.style.display = ''; nextBtn.classList.remove('submit');
     if (p === 'menu') { renderMenu(); markComplete(i); menuBar(); return; }
     // The final slide counts as read on ARRIVAL, not after a reading beat:
     // reaching it already required finishing every part, and its CTA is live
@@ -151,6 +155,8 @@
     // before this last slide is reported, which would leave the host one slide
     // short of complete and keep the assessment gate shut.
     if (p === 'done') { markComplete(i); becomeReady(i); return; }
+    var sec = sl.querySelector('section');
+    if (sec && sec.getAttribute('data-quiz')) { enterQuiz(i, sec); return; }
     var c = cardsOf(sl);
     if (c.length) {
       if (completed.has(i) || cardsDone(sl)) { Array.prototype.forEach.call(c, function (x) { x.classList.add('viewed'); if (x.classList.contains('expander')) setExp(x, false); if (x.classList.contains('checkitem')) x.classList.add('checked'); }); markComplete(i); becomeReady(i); }
@@ -166,7 +172,10 @@
     enterSlide(i);
   }
   function advance() {
-    if (nextBtn.disabled) return; var p = partOf(current);
+    if (nextBtn.disabled) return;
+    var qsec = slides[current].querySelector('section');
+    if (qsec && qsec.getAttribute('data-quiz') && !completed.has(current)) { submitQuiz(current, qsec); return; }
+    var p = partOf(current);
     if (p === 'intro') { go(current + 1); return; }
     if (p === 'menu') { if (allDone()) go(doneIdx()); return; }
     if (p === 'done') { startAssessment(); return; }
@@ -174,17 +183,74 @@
   }
   function back() { if (current > 0) go(current - 1); }
 
+  // Header title: the slide's own topic (data-title), falling back to its <h1>,
+  // then to the footer progress crumb.
+  function titleOf(i) {
+    var sec = slides[i].querySelector('section');
+    var t = sec && sec.getAttribute('data-title'); if (t) return t;
+    var h = sec && sec.querySelector('h1'); if (h) return (h.textContent || '').trim();
+    return crumb.textContent;
+  }
+
+  // ── In-deck quiz (knowledge check): select an option → Submit → a green-tick
+  // Correct / red-cross Incorrect modal. The slide completes on a CORRECT answer;
+  // an incorrect one leaves it in the Submit state so the reader can try again.
+  // Answers live in the DOM (data-answer) — this is ungraded practice, not the
+  // graded record, so exposing them here is fine.
+  function selectOpt(sec, opt) {
+    Array.prototype.forEach.call(sec.querySelectorAll('.qopt'), function (o) { o.classList.remove('sel'); });
+    opt.classList.add('sel');
+    nextLbl.textContent = 'Submit'; nextBtn.classList.add('submit'); nextBtn.classList.remove('ready'); nextBtn.disabled = false;
+    setMsg('Submit your answer');
+  }
+  function enterQuiz(i, sec) {
+    var opts = sec.querySelectorAll('.qopt');
+    if (completed.has(i)) {
+      Array.prototype.forEach.call(opts, function (o) { o.classList.toggle('sel', o.getAttribute('data-val') === sec.getAttribute('data-answer')); });
+      becomeReady(i); return;
+    }
+    Array.prototype.forEach.call(opts, function (o) { o.classList.remove('sel'); });
+    tick(false); setMsg(sec.getAttribute('data-quiz') === 'tf' ? 'Choose True or False, then Submit' : 'Select an answer, then Submit');
+    nextLbl.textContent = 'Submit'; nextBtn.classList.add('submit'); nextBtn.classList.remove('ready'); nextBtn.disabled = true;
+  }
+  function submitQuiz(i, sec) {
+    var sel = sec.querySelector('.qopt.sel'); if (!sel) return;
+    var ok = sel.getAttribute('data-val') === sec.getAttribute('data-answer');
+    quizFb.className = 'open ' + (ok ? 'correct' : 'incorrect');
+    quizFb.setAttribute('data-correct', ok ? '1' : '0');
+    quizFb.setAttribute('data-slide', String(i));
+    quizFb.querySelector('.fb-badge').innerHTML = ok ? TICK_SVG : CROSS_SVG;
+    quizFb.querySelector('.fb-h').textContent = ok ? 'Correct' : 'Incorrect';
+    quizFb.querySelector('.fb-p').textContent = ok
+      ? "That's right — you selected the correct response."
+      : 'Not quite. Review the options and try again.';
+    quizFb.querySelector('.fbbtn').textContent = ok ? 'Continue' : 'Try again';
+  }
+  function closeFb() {
+    var ok = quizFb.getAttribute('data-correct') === '1';
+    var i = parseInt(quizFb.getAttribute('data-slide'), 10);
+    quizFb.className = '';
+    if (ok && !isNaN(i)) { markComplete(i); becomeReady(i); }
+  }
+
   function bind() {
     nextBtn.addEventListener('click', advance);
     if (backBtn) backBtn.addEventListener('click', back);
+    if (helpBtn) helpBtn.addEventListener('click', function () { if (helpOv) helpOv.classList.add('open'); });
+    if (helpOv) helpOv.addEventListener('click', function (e) { if (e.target === helpOv || e.target.closest('.fbbtn')) helpOv.classList.remove('open'); });
+    if (quizFb) quizFb.addEventListener('click', function (e) { if (e.target.closest('.fbbtn')) closeFb(); });
     canvas.addEventListener('click', function (e) {
       // close a hotspot popover (X button or a click on the detail's own
       // backdrop) without counting as a new interaction
       var closer = e.target.closest('.hotspot-close');
       if (closer) { Array.prototype.forEach.call(slides[current].querySelectorAll('.hotspot-detail.open'), function (x) { x.classList.remove('open'); }); return; }
+      var qo = e.target.closest('.qopt'); if (qo && slides[current].contains(qo) && !completed.has(current)) { selectOpt(slides[current].querySelector('section'), qo); return; }
       var card = e.target.closest('[data-touch]'); if (card && slides[current].contains(card)) { handleCard(card); return; }
       var pc = e.target.closest('.part-card'); if (pc && partOf(current) === 'menu') { var p = pc.getAttribute('data-part'); if (unlocked(p)) go(PARTS[p][0]); return; }
       var cta = e.target.closest('[data-action]'); if (cta) { var a = cta.getAttribute('data-action'); if (a === 'start') startAssessment(); else if (a === 'menu') go(menuIdx()); return; }
+      // A quiz slide advances only via the Submit button, never a click on the slide.
+      var qsec2 = slides[current].querySelector('section');
+      if (qsec2 && qsec2.getAttribute('data-quiz')) return;
       if (!cardsOf(slides[current]).length && partOf(current) !== 'menu' && !nextBtn.disabled) advance();
     });
     document.addEventListener('keydown', function (e) {
@@ -217,6 +283,10 @@
     msgEl = statusEl.querySelector('.msg'); nextBtn = document.getElementById('next');
     nextFill = nextBtn.querySelector('.fill'); nextLbl = nextBtn.querySelector('.lbl');
     backBtn = document.getElementById('back');
+    titleEl = document.querySelector('#topbar .title');
+    helpBtn = document.getElementById('help');
+    quizFb = document.getElementById('quizfb');
+    helpOv = document.getElementById('helpov');
     derive(); load(); fit(); bind(); if (current < 0 || current >= TOTAL) current = 0; go(current);
   }
   if (document.readyState !== 'loading') init(); else document.addEventListener('DOMContentLoaded', init);
