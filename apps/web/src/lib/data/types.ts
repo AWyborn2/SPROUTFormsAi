@@ -912,6 +912,18 @@ export interface ProfileAccess {
  * competency's own dates. A reader who cannot tell them apart reads an expired
  * OPTIONAL competency as a compliance failure, which it is not (R102).
  */
+export interface GamificationStats {
+  xp: number;
+  level: number;
+  levelMin: number;
+  levelMax: number;
+  currentCount: number;
+  expiredCount: number;
+  streakDays: number;
+  leaderboardRank: number;
+  totalMembers: number;
+}
+
 export interface HeldCompetencyRow {
   /**
    * The GRANT ROW's own id (not the competency's). Renewing a lapsed ticket

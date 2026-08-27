@@ -208,6 +208,7 @@ export const keys = {
   profileSeed: (submissionId: string) => ['profiles', 'seed', submissionId] as const,
   /** One person's held competencies, keyed on the USER the grants belong to. */
   heldCompetencies: (userId: string) => ['competencies', 'held', userId] as const,
+  gamificationStats: (userId: string) => ['gamification', 'stats', userId] as const,
   /**
    * The caller's OWN recommended competencies (U7, R12). Nested under the
    * `competencies` prefix on purpose: granting or creating a competency can
@@ -2074,6 +2075,14 @@ export function useHeldCompetencies(userId: string | undefined) {
   return useQuery({
     queryKey: keys.heldCompetencies(userId ?? ''),
     queryFn: () => store.getHeldCompetencies(userId!),
+    enabled: !!userId,
+  });
+}
+
+export function useGamificationStats(userId: string | undefined) {
+  return useQuery({
+    queryKey: keys.gamificationStats(userId ?? ''),
+    queryFn: () => store.getGamificationStats(userId!),
     enabled: !!userId,
   });
 }

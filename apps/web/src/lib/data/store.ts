@@ -97,6 +97,7 @@ import type {
   RequirementTiers,
   ScopeRequirementsState,
   BadgeIcon,
+  GamificationStats,
 } from './types.js';
 import type {
   AssessmentToolManifest,
@@ -1340,6 +1341,9 @@ export const store = {
   },
   deleteProfilePhoto(membershipId: string): Promise<{ photoUrl: null }> {
     return apiClient.delete<{ photoUrl: null }>(`/profiles/${membershipId}/photo`);
+  },
+  getGamificationStats(userId: string): Promise<GamificationStats> {
+    return apiClient.get<GamificationStats>(`/gamification/stats/${userId}`);
   },
   getMemberPlacement(membershipId: string): Promise<MemberPlacement> {
     return apiClient.get<MemberPlacement>(`/team/members/${membershipId}/placement`);

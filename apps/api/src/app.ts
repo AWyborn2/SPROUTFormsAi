@@ -41,6 +41,7 @@ import { coursesRouter } from './routes/courses.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { voiceRouter } from './routes/voice.js';
 import { badgeIconsRouter } from './routes/badge-icons.js';
+import { gamificationRouter } from './routes/gamification.js';
 
 /**
  * Builds the Express app. Route groups (auth, forms, import, submissions,
@@ -206,6 +207,7 @@ export function createApp(): Express {
   // POST /fill/:token/smart-fill, mounted with the rest of publicFillRouter.
   app.use('/voice', voiceRouter);
   app.use('/badge-icons', badgeIconsRouter);
+  app.use('/gamification', gamificationRouter);
 
   // Fallthrough 404.
   app.use((_req, res) => {
