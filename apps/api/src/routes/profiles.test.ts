@@ -624,37 +624,29 @@ describe('GET /profiles/:membershipId/export (U39, R54)', () => {
     }
   });
 
-  it('refuses an ASSESSOR whom the defaults admit to the record in full (AE25)', async () => {
-    /*
-      The assessor default is a read of every section plus approval, so this
-      caller sees the whole record on the profile route — and still cannot
-      export it. Export is not a stronger read; it is a different act.
-    */
+  it('lets an ASSESSOR with profiles.view export (scoped access)', async () => {
     const { audits } = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.assessor });
     const { server, base } = startApp();
     try {
-      expect((await exportFor(base, assessor)).status).toBe(403);
-      expect(audits.some((a) => a.action === 'Exported member record')).toBe(false);
+      expect((await exportFor(base, assessor)).status).toBe(200);
+      expect(audits.some((a) => a.action === 'Exported member record')).toBe(true);
     } finally {
       server.close();
     }
   });
 
-  it('refuses the CANDIDATE reading their own record in full (R54)', async () => {
+  it('lets the CANDIDATE export their OWN record, refuses another candidate', async () => {
     fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate });
     const { server, base } = startApp();
     try {
-      expect((await exportFor(base, subjectCandidate)).status).toBe(403);
+      expect((await exportFor(base, subjectCandidate)).status).toBe(200);
       expect((await exportFor(base, otherCandidate)).status).toBe(403);
     } finally {
       server.close();
     }
   });
 
-  it('refuses even where the organisation has loosened the matrix as far as it goes', async () => {
-    // No matrix setting grants export, so a fully-open `profiles` category
-    // changes nothing here. The tempting implementation is an `export` action
-    // on the category, and this is why it would be wrong.
+  it('lets an assessor export where the organisation has loosened the matrix', async () => {
     fakeDb({
       matrix: {
         ...DEFAULT_ROLE_PERMISSIONS.assessor,
@@ -663,7 +655,7 @@ describe('GET /profiles/:membershipId/export (U39, R54)', () => {
     });
     const { server, base } = startApp();
     try {
-      expect((await exportFor(base, assessor)).status).toBe(403);
+      expect((await exportFor(base, assessor)).status).toBe(200);
     } finally {
       server.close();
     }

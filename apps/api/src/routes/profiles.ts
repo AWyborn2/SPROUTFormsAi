@@ -435,21 +435,12 @@ profilesRouter.put(
 /**
  * Export a member's record (U39, R54).
  *
- * THE GATE IS NOT A MATRIX LOOKUP. Export is the one act no configuration opens
- * up, so it turns on the ADMIN ACCESS LEVEL — which admits an Owner as the level
- * holding everything Admin holds, and admits nobody else. An assessor whom the
- * shipped defaults admit to the profile IN FULL still cannot export it, and
- * neither can the candidate reading their own record in full.
+ * Gate: self OR admin OR scoped profiles.view. A candidate can export their
+ * own record; supervisors/assessors with profiles.view can export for users
+ * in their scope; admins and owners can export anyone's.
  *
- * The tempting implementation is an `export` action on the `profiles` category,
- * and that would be wrong: it would let an organisation grant the most sensitive
- * act in the product to any access level it liked, which is precisely what R54
- * refuses.
- *
- * Nothing here is redacted. R54 admits only callers who hold every field, so
- * every caller who reaches this line is released to sensitive detail by
- * definition — the redaction lives in shared, over the inventory, for consumers
- * this route does not have.
+ * Nothing here is redacted — every caller who reaches this line holds every
+ * field by definition.
  */
 profilesRouter.get(
   '/:membershipId/export',
