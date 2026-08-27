@@ -15,23 +15,75 @@
   "parts": [
     { "key": "A", "label": "MODULE A", "title": "Authority & Accountability",
       "blurb": "Who can operate · operator & supervisor duties · signage & access", "divider": true,
-      "slides": ["a1-intro.html", "a2-authorised.html", "a3-operator.html", "a4-supervisor.html"] },
+      "slides": ["a1-intro.html", "a2-authorised.html", "a3-operator.html", "a4-supervisor.html"],
+      "questions": [
+        { "fieldId": "bbm-a-q1", "type": "tf", "number": "Q1", "title": "Assessment · Authority & Accountability",
+          "question": "You may operate the scraper if you feel confident, even without a current Authority to Operate." },
+        { "fieldId": "bbm-a-q2", "type": "mc", "number": "Q2", "title": "Assessment · Authority & Accountability",
+          "question": "What must you do before starting a scraper task?",
+          "options": [ { "val": "a", "text": "Start work and assess hazards as you go" },
+                       { "val": "b", "text": "Locate the work area and complete a basic risk assessment" },
+                       { "val": "c", "text": "Wait for the Supervisor to complete the risk assessment for you" } ] },
+        { "fieldId": "bbm-a-q3", "type": "mc", "number": "Q3", "title": "Assessment · Authority & Accountability",
+          "question": "Access to a scraper work area by anyone other than the area WAPL or Contractor Supervisor is granted…",
+          "options": [ { "val": "a", "text": "at any time, provided they wear hi-vis" },
+                       { "val": "b", "text": "only once all scrapers in the area have stopped" },
+                       { "val": "c", "text": "only during the pre-start meeting" } ] }
+      ] },
     { "key": "B", "label": "MODULE B", "title": "Hazards, Tracks & Separation",
       "blurb": "Scraper tracks · travel separation · haul-route preparation", "divider": true,
-      "slides": ["b1-hazards.html", "b2-separation.html", "b3-haul-route.html"] },
+      "slides": ["b1-hazards.html", "b2-separation.html", "b3-haul-route.html"],
+      "questions": [
+        { "fieldId": "bbm-b-q1", "type": "mc", "number": "Q1", "title": "Assessment · Hazards, Tracks & Separation",
+          "question": "What is the minimum standing travel separation between scrapers on the circuit?",
+          "options": [ { "val": "a", "text": "10 metres" }, { "val": "b", "text": "20 metres" }, { "val": "c", "text": "40 metres" } ] },
+        { "fieldId": "bbm-b-q2", "type": "mc", "number": "Q2", "title": "Assessment · Hazards, Tracks & Separation",
+          "question": "In a loading, stripping or stockpile-reclaim zone, the minimum separation reduces to…",
+          "options": [ { "val": "a", "text": "20 metres" }, { "val": "b", "text": "5 metres" }, { "val": "c", "text": "no minimum applies in a loading zone" } ] },
+        { "fieldId": "bbm-b-q3", "type": "tf", "number": "Q3", "title": "Assessment · Hazards, Tracks & Separation",
+          "question": "It is acceptable to cut a cross-slope track with a scraper if no other machine is available." }
+      ] },
     { "key": "C", "label": "MODULE C", "title": "Loading Methods",
       "blurb": "Overburden & dieback · push-pull · dozer-assist · self-loading", "divider": true,
-      "slides": ["c1-overburden.html", "c2-pushpull.html", "c3-pushpull-steps.html", "c4-dozer-self.html"] },
+      "slides": ["c1-overburden.html", "c2-pushpull.html", "c3-pushpull-steps.html", "c4-dozer-self.html"],
+      "questions": [
+        { "fieldId": "bbm-c-q1", "type": "mc", "number": "Q1", "title": "Assessment · Loading Methods",
+          "question": "In push-pull operations, how many scrapers may couple together at one time?",
+          "options": [ { "val": "a", "text": "Only two (2)" }, { "val": "b", "text": "Up to three (3)" }, { "val": "c", "text": "As many as the cut will hold" } ] },
+        { "fieldId": "bbm-c-q2", "type": "tf", "number": "Q2", "title": "Assessment · Loading Methods",
+          "question": "You may load the bowl before the cushion hitch is locked down, as long as you do it gently." }
+      ] },
     { "key": "D", "label": "MODULE D", "title": "Scraper Stockpiles",
       "blurb": "Design · building · pit limits · reclaiming · the edge", "divider": true,
-      "slides": ["d1-overview.html", "d2-design.html", "d3-building.html", "d4-pit-limits.html", "d5-reclaiming.html", "d6-edge-hazards.html"] },
+      "slides": ["d1-overview.html", "d2-design.html", "d3-building.html", "d4-pit-limits.html", "d5-reclaiming.html", "d6-edge-hazards.html"],
+      "questions": [
+        { "fieldId": "bbm-d-q1", "type": "mc", "number": "Q1", "title": "Assessment · Scraper Stockpiles",
+          "question": "What is the minimum clearance from a vertical mining face when designing a stockpile?",
+          "options": [ { "val": "a", "text": "2 metres" }, { "val": "b", "text": "5 metres" }, { "val": "c", "text": "10 metres" } ] },
+        { "fieldId": "bbm-d-q2", "type": "mc", "number": "Q2", "title": "Assessment · Scraper Stockpiles",
+          "question": "When reclaiming a stockpile, what is the minimum distance you must stay from any stockpile edge?",
+          "options": [ { "val": "a", "text": "1 metre" }, { "val": "b", "text": "3 metres" }, { "val": "c", "text": "5 metres" } ] },
+        { "fieldId": "bbm-d-q3", "type": "tf", "number": "Q3", "title": "Assessment · Scraper Stockpiles",
+          "question": "Rock and tree roots may be dumped on the stockpile edge to build it out." }
+      ] },
     { "key": "E", "label": "MODULE E", "title": "Special Situations",
       "blurb": "Stripping gravel · large rock · rehabilitation · incidents", "divider": true,
-      "slides": ["e1-gravel.html", "e2-large-rock.html", "e3-rehab.html", "e4-incident.html"] }
+      "slides": ["e1-gravel.html", "e2-large-rock.html", "e3-rehab.html", "e4-incident.html"],
+      "questions": [
+        { "fieldId": "bbm-e-q1", "type": "tf", "number": "Q1", "title": "Assessment · Special Situations",
+          "question": "If your scraper becomes bogged or bellied out, you should attempt to retrieve it yourself if the situation looks minor." },
+        { "fieldId": "bbm-e-q2", "type": "mc", "number": "Q2", "title": "Assessment · Special Situations",
+          "question": "After an incident in the work area, what must you do?",
+          "options": [ { "val": "a", "text": "Keep working and report it at the end of shift" },
+                       { "val": "b", "text": "Stop work immediately, call the area Supervisor, and ensure evidence is gathered" },
+                       { "val": "c", "text": "Move the machine clear before anyone arrives" } ] },
+        { "fieldId": "bbm-e-q3", "type": "tf", "number": "Q3", "title": "Assessment · Special Situations",
+          "question": "On steep slopes you should always travel straight up or straight down, never across." }
+      ] }
   ],
   "completion": {
-    "heading": "Manual Complete",
-    "body": "You have read every module of the BBM Scraper Operating Manual. You are now ready to begin the Authorised to Operate — Scraper assessment.",
+    "heading": "Manual & Theory Complete",
+    "body": "You have read every module of the BBM Scraper Operating Manual and answered the theory questions along the way. Press Start Assessment to review your result and complete your declaration and sign-off.",
     "logo": "img/logo.png"
   }
 }
