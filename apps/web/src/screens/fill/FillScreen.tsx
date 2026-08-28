@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Icon, Input, useToast } from '@formai/ui';
 import type { SmartFillResult, SubmissionValue } from '@formai/shared';
-import { resolveTheme } from '@formai/shared';
+import { operatorNameFieldId, resolveTheme } from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
 import {
   discardImpactOf,
@@ -104,7 +104,18 @@ export function FillScreen() {
     if (!session) return;
     setSubmitterName((prev) => prev || session.userName);
     setSubmitterEmail((prev) => prev || session.userEmail);
-  }, [session]);
+    /*
+      Mirror the signed-in name into the form's OWN operator/name field (a
+      pre-start's "Operator" box), so a member doesn't type the same name twice.
+      Standalone forms have no manifest/profilePrefill, so the field is found by
+      label (operatorNameFieldId). Seed only a still-empty field, and leave it
+      editable — whoever is filling in may not be the operator.
+    */
+    const opId = operatorNameFieldId(fill?.fields ?? []);
+    if (opId && session.userName) {
+      setValues((v) => (v[opId] ? v : { ...v, [opId]: session.userName }));
+    }
+  }, [session, fill]);
   /** Per-field incomplete row indexes from the last failed submit (R10). */
   const [incompleteRows, setIncompleteRows] = useState<Record<string, number[]>>({});
   const [emailError, setEmailError] = useState('');
