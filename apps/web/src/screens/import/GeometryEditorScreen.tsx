@@ -2103,8 +2103,9 @@ function PlacementPanel({
                 : 'Sweep an area — place every option'}
             </Button>
             <p className="mt-1.5 text-[11px] leading-snug text-text-tertiary">
-              Drag one box around all {field.options!.length} printed options; each gets its own cell,
-              top to bottom. Fine-tune any of them below.
+              Drag one box around all {field.options!.length} printed options; each gets its own cell —
+              top-to-bottom for a stacked list, left-to-right for a row (like Shift D / N). Fine-tune
+              any of them below.
             </p>
           </div>
           {field.options!.map((option) => {

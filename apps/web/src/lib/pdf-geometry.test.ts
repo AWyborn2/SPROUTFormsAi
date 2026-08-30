@@ -1922,4 +1922,26 @@ describe('distributeOptionCells — sweep an area into a cell per option', () =>
   it('returns nothing for a field with no options', () => {
     expect(distributeOptionCells(area, [])).toEqual([]);
   });
+
+  it('splits a short wide strip into left-to-right columns (a Shift D / N row)', () => {
+    // The box swept around "D ☐  N ☐" is wide and short, so the options are
+    // side by side — one column each, not stacked.
+    const strip: PageBox = { page: 1, x: 40, y: 500, width: 160, height: 20, pageWidth: 595, pageHeight: 842 };
+    const cells = distributeOptionCells(strip, ['D', 'N']);
+    expect(cells.map((c) => c.optionKey)).toEqual(['D', 'N']);
+    // Even columns, full height, tiling left-to-right with no gap.
+    expect(cells.map((c) => c.width)).toEqual([80, 80]);
+    expect(cells.every((c) => c.height === 20 && c.y === 500)).toBe(true);
+    expect(cells[0]!.x).toBe(40);
+    expect(cells[1]!.x).toBe(120);
+    expect(cells[0]!.x).toBeLessThan(cells[1]!.x);
+  });
+
+  it('keeps a tall stacked pair top-to-bottom', () => {
+    const stack: PageBox = { page: 1, x: 40, y: 500, width: 60, height: 120, pageWidth: 595, pageHeight: 842 };
+    const cells = distributeOptionCells(stack, ['D', 'N']);
+    expect(cells.every((c) => c.width === 60 && c.height === 60)).toBe(true);
+    // Top option highest in PDF space (y grows upward).
+    expect(cells[0]!.y).toBeGreaterThan(cells[1]!.y);
+  });
 });

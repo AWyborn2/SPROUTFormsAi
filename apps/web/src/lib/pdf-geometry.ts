@@ -1581,8 +1581,16 @@ export function setGlyphOnAll(
  * extraction missed.
  *
  * The author drags one box around the printed option list; each option gets an
- * even horizontal band tagged with its own `optionKey` — exactly the per-option
- * boxes the exporter marks, so it draws the chosen option's mark in its band.
+ * even band tagged with its own `optionKey` — exactly the per-option boxes the
+ * exporter marks, so it draws the chosen option's mark in its band.
+ *
+ * The band runs along the box's LONGER axis, matching how the options are
+ * printed: a stacked list is swept as a TALL box and split top-to-bottom; a row
+ * of side-by-side boxes (a "Shift  D ☐  N ☐") is swept as a WIDE box and split
+ * left-to-right. Before this it always split top-to-bottom, so a horizontal
+ * option row could not be placed with the sweep at all — the only recourse was
+ * drawing each option box one at a time.
+ *
  * Even division rather than text detection, deliberately: it is predictable and
  * the bands are then nudged into place, where a confident-looking guess in the
  * wrong spot is the failure this whole screen exists to prevent. A field mark
@@ -1592,19 +1600,38 @@ export function setGlyphOnAll(
 export function distributeOptionCells(box: PageBox, options: readonly string[]): PageBox[] {
   const n = options.length;
   if (n === 0) return [];
+  const common = {
+    page: box.page,
+    pageWidth: box.pageWidth,
+    pageHeight: box.pageHeight,
+    ...(box.markStyle ? { markStyle: box.markStyle } : {}),
+  };
+  // Options laid out left-to-right only when the swept box is wide enough to
+  // hold them side by side — at least n times wider than tall, so each column is
+  // no taller than it is wide. A wide box with wide ROWS (a checklist) stays a
+  // top-to-bottom split; a short wide strip ("D ☐  N ☐") becomes columns.
+  if (box.width >= box.height * n) {
+    const colWidth = box.width / n;
+    return options.map((option, index) => ({
+      ...common,
+      // Left-to-right: option 0 is the leftmost cell.
+      x: box.x + colWidth * index,
+      y: box.y,
+      width: colWidth,
+      height: box.height,
+      optionKey: option,
+    }));
+  }
   const rowHeight = box.height / n;
   return options.map((option, index) => ({
-    page: box.page,
+    ...common,
     x: box.x,
     // Top-down: option 0 is the top band. PDF y grows upward, matching
     // `proposeManualGrid`'s row bands.
     y: box.y + box.height - rowHeight * (index + 1),
     width: box.width,
     height: rowHeight,
-    pageWidth: box.pageWidth,
-    pageHeight: box.pageHeight,
     optionKey: option,
-    ...(box.markStyle ? { markStyle: box.markStyle } : {}),
   }));
 }
 
