@@ -72,12 +72,15 @@ export function inferKind(sectionFields: readonly FormField[], sectionLabel = ''
     auto-completing one on the candidate's submit would sign the assessor's
     block for them. Content alone cannot tell the two apart (both are a
     signature and a date), which is why the word is required rather than
-    inferred. Overridable in Units & gating like every proposal.
+    inferred. A stray KEYED box that lands in the slice — a prerequisite check
+    printed between this part and the next, an option box the extraction keyed —
+    must not flip it back to theory: the label plus a signature is the signal,
+    not the absence of keys (and `isSelfMarking` refuses to auto-mark a
+    declaration regardless). Overridable in Units & gating like every proposal.
   */
   if (
     /candidate['’]?s?\s+declaration/i.test(sectionLabel) &&
-    sectionFields.some((f) => f.type === 'signature') &&
-    !sectionFields.some((f) => (f.answerKey?.length ?? 0) > 0)
+    sectionFields.some((f) => f.type === 'signature')
   ) {
     return 'declaration';
   }

@@ -75,6 +75,17 @@ export function isSelfMarking(
   const partFields = fieldsInPart(fields, manifest, partKey);
   const part = manifest.parts.find((p) => p.key === partKey);
 
+  /*
+    A DECLARATION IS NEVER AUTO-MARKED. It is an attestation someone SIGNS, not
+    an assessment computed from a key — the part-kind's whole meaning. A stray
+    keyed box that lands in its slice (a prerequisite check printed between the
+    declaration and the next part, an option box the extraction keyed) must not
+    flip it into a self-marking quiz that then "fails" a signature. Signing it is
+    the act (see the submit route's declaration branch); it reaches its sign-off,
+    never the arithmetic.
+  */
+  if (part?.kind === 'declaration') return false;
+
   // Furniture the candidate does not answer: the part's own printed
   // assessor-name and date boxes, and every field a question WRITES ITS MARK
   // INTO (a check_cross box, or the repeating group a margin table addresses).

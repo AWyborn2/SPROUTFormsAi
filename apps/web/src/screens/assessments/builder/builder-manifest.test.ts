@@ -120,12 +120,23 @@ describe('inferKind', () => {
     ).toBe('theory');
   });
 
-  it('keeps keyed content theory whatever the heading says', () => {
+  it('stays a declaration even when a stray box in the slice is keyed', () => {
+    // A prerequisite check printed between this part and the next, or an option
+    // box the extraction keyed, can land in the declaration's slice. The label
+    // + a signature is the signal, not the absence of keys — and isSelfMarking
+    // refuses to auto-mark a declaration regardless, so a signature never gets
+    // "failed" against a key it should never have carried.
     expect(
       inferKind(
         [field({ id: 'sig', type: 'signature' }), { ...question('q1'), answerKey: ['a'] }],
         'Candidate Declaration',
       ),
+    ).toBe('declaration');
+  });
+
+  it('still needs a signature — a keyed section named “declaration” stays theory', () => {
+    expect(
+      inferKind([{ ...question('q1'), answerKey: ['a'] }], 'Candidate Declaration'),
     ).toBe('theory');
   });
 });
