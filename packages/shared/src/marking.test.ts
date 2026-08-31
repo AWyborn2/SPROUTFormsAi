@@ -121,6 +121,27 @@ describe('isSelfMarking (U15)', () => {
     expect(selfMarks([header('prac'), unkeyed('c1'), unkeyed('c2'), unkeyed('c3')])).toBe(false);
   });
 
+  it('is never self-marking for a declaration, even with a stray keyed box', () => {
+    // Signing a declaration IS the act; a prerequisite check or extraction-keyed
+    // option box that lands in its slice must not turn it into a quiz that
+    // "fails" the signature against a key it should never have carried. It
+    // reaches its sign-off regardless of what the slice happens to hold.
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        {
+          key: 'p1',
+          ordinal: 1,
+          label: 'Candidate declaration',
+          kind: 'declaration',
+          pathways: ['new'],
+          startFieldId: 'h',
+        },
+      ],
+    };
+    const fields = [header('h'), q('stray', ['a']), outcome('stray-out'), signature('sig')];
+    expect(isSelfMarking(fields, manifest, 'p1')).toBe(false);
+  });
+
   /*
     DECLARING A PART'S VERDICT PAIR USED TO SWITCH OFF ITS AUTO-MARKING.
 
