@@ -1,0 +1,106 @@
+{
+  "title": "BBM Small Loader Manual",
+  "courseKey": "bbm-small-loader",
+  "brand": {
+    "ink": "#2B3A42",
+    "grey": "#F4F3F1",
+    "accent": "#F5B301",
+    "accentInk": "#2B3A42",
+    "good": "#1FA463",
+    "logo": "img/logo-header.png",
+    "fontBody": "'Archivo','Arial Narrow','Helvetica Neue',system-ui,sans-serif",
+    "fontsHref": "https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Archivo+Narrow:wght@400;500;600;700&display=swap"
+  },
+  "intro": ["title.html", "how-to.html"],
+  "parts": [
+    { "key": "A", "label": "MODULE A", "title": "Authority, Access & Isolation",
+      "blurb": "Authority to Operate · isolation & try test · out-of-service tags · three points of contact", "divider": true,
+      "slides": ["a1-authority.html", "a2-isolation.html", "a3-access.html"],
+      "questions": [
+        { "fieldId": "sl-q1", "type": "tf", "number": "Q1", "title": "Assessment · Authority, Access & Isolation",
+          "question": "The loader must be isolated with a hasp and personnel lock attached prior to entering the footprint of the machine." },
+        { "fieldId": "sl-q2", "type": "tf", "number": "Q2", "title": "Assessment · Authority, Access & Isolation",
+          "question": "3 points of contact is the safest way to access and egress the loader." },
+        { "fieldId": "sl-q4", "type": "mc", "number": "Q4", "title": "Assessment · Authority, Access & Isolation",
+          "question": "What action would you take if there was an “Out of Service Tag” on the loader’s isolation switch?",
+          "options": [ { "val": "a", "text": "Ignore the tag and operate the loader" },
+                       { "val": "b", "text": "Remove the tag so you can operate the loader" },
+                       { "val": "c", "text": "Do not operate the loader and report the tag to pit control" } ] }
+      ] },
+    { "key": "B", "label": "MODULE B", "title": "Pre-start & Machine Condition",
+      "blurb": "The walk-around · fluids by sight glass · warning lights · lost or damaged G.E.T", "divider": true,
+      "slides": ["b1-walkaround.html", "b2-condition.html", "b3-fluids-warnings.html", "b4-get.html"],
+      "questions": [
+        { "fieldId": "sl-q3", "type": "mc", "number": "Q3", "title": "Assessment · Pre-start & Machine Condition",
+          "question": "What is the purpose of performing a walk-around pre-start inspection of the loader prior to operating?",
+          "options": [ { "val": "a", "text": "Inspect for damage" },
+                       { "val": "b", "text": "Identify any faults with the loader" },
+                       { "val": "c", "text": "Ensure that the loader is safe to operate" },
+                       { "val": "d", "text": "All the above" } ] },
+        { "fieldId": "sl-q6", "type": "tf", "number": "Q6", "title": "Assessment · Pre-start & Machine Condition",
+          "question": "The hydraulic oil, transmission fluid and coolant level on the loader can be checked by sight glass." },
+        { "fieldId": "sl-q13", "type": "mc", "number": "Q13", "title": "Assessment · Pre-start & Machine Condition",
+          "question": "What action would you take if the engine oil warning light stayed illuminated once the engine has started?",
+          "options": [ { "val": "a", "text": "Shut the engine off" },
+                       { "val": "b", "text": "Report the fault to pit control" },
+                       { "val": "c", "text": "Tag the loader “out of service”" },
+                       { "val": "d", "text": "All of the above" } ] }
+      ] },
+    { "key": "C", "label": "MODULE C", "title": "Start-up, Interlocks & Checks",
+      "blurb": "Start-up sequence · machine interlocks · steering, brake & kick-out checks · vision", "divider": true,
+      "slides": ["c1-startup.html", "c2-interlocks.html", "c3-safety-checks.html"],
+      "questions": [
+        { "fieldId": "sl-q10", "type": "tf", "number": "Q10", "title": "Assessment · Start-up, Interlocks & Checks",
+          "question": "Testing the park brake and service brake on the loader is completed in 3rd gear forward at 1700 rpm." },
+        { "fieldId": "sl-q12", "type": "tf", "number": "Q12", "title": "Assessment · Start-up, Interlocks & Checks",
+          "question": "Brake checks should be performed at the start of every shift, prior to leaving the park-up." },
+        { "fieldId": "sl-q15", "type": "tf", "number": "Q15", "title": "Assessment · Start-up, Interlocks & Checks",
+          "question": "The secondary steering system on the loader is battery operated." }
+      ] },
+    { "key": "D", "label": "MODULE D", "title": "Moving Off, Travel & Braking",
+      "blurb": "The 40 m zone · moving-off sequence · haul-road travel · loading gear · engine braking", "divider": true,
+      "slides": ["d1-moving-off.html", "d2-travel.html", "d3-engine-braking.html"],
+      "questions": [
+        { "fieldId": "sl-q5", "type": "tf", "number": "Q5", "title": "Assessment · Moving Off, Travel & Braking",
+          "question": "All working equipment at BBM is subject to a 40-metre exclusion zone." },
+        { "fieldId": "sl-q7", "type": "tf", "number": "Q7", "title": "Assessment · Moving Off, Travel & Braking",
+          "question": "When travelling the loader, you should only use the service brake to control the loader’s speed." },
+        { "fieldId": "sl-q11", "type": "tf", "number": "Q11", "title": "Assessment · Moving Off, Travel & Braking",
+          "question": "When loading the bucket with material, you should only operate the loader in 1st gear." }
+      ] },
+    { "key": "E", "label": "MODULE E", "title": "Hazards, Attachments & Special Tasks",
+      "blurb": "Work-area hazards · misfires · quick hitch & forest salvage · permits · roads & windrows", "divider": true,
+      "slides": ["e1-hazards.html", "e2-misfires.html", "e3-attachments-salvage.html", "e4-permits.html", "e5-roads-windrows.html"],
+      "questions": [
+        { "fieldId": "sl-q14", "type": "tf", "number": "Q14", "title": "Assessment · Hazards, Attachments & Special Tasks",
+          "question": "Failure to check that the quick hitch locking pins are fully inserted could result in the bucket attachment coming off." }
+      ] },
+    { "key": "F", "label": "MODULE F", "title": "Hopper Clean-up, Incidents & Emergencies",
+      "blurb": "The hopper clean-up sequence · incidents & getting bogged · fire response · emergency exit", "divider": true,
+      "slides": ["f1-hopper.html", "f2-incident.html", "f3-emergency.html"],
+      "questions": [
+        { "fieldId": "sl-q8", "type": "tf", "number": "Q8", "title": "Assessment · Hopper Clean-up, Incidents & Emergencies",
+          "question": "The window on the right-hand side of the cab can be used as an emergency exit point if required." },
+        { "fieldId": "sl-q9", "type": "mc", "number": "Q9", "title": "Assessment · Hopper Clean-up, Incidents & Emergencies",
+          "question": "Prior to performing a hopper clean-up, what process would you follow?",
+          "options": [ { "val": "a", "text": "Complete a Risk assessment (RAP)" },
+                       { "val": "b", "text": "Authorisation gained from the duty production supervisor" },
+                       { "val": "c", "text": "Communication with crusher control to have the orange light activated" },
+                       { "val": "d", "text": "Notify pit control and a general broadcast put out to all haul truck operators, notifying them of the clean-up" },
+                       { "val": "e", "text": "All of the above" } ] },
+        { "fieldId": "sl-q16", "type": "mc", "number": "Q16", "title": "Assessment · Hopper Clean-up, Incidents & Emergencies",
+          "question": "If a fire was detected on the loader that you were operating, what action would you take?",
+          "options": [ { "val": "a", "text": "Stop the loader and ground the bucket" },
+                       { "val": "b", "text": "Select neutral and engage the park brake" },
+                       { "val": "c", "text": "Activate the fire suppression system" },
+                       { "val": "d", "text": "Call the emergency" },
+                       { "val": "e", "text": "Evacuate the area" },
+                       { "val": "f", "text": "All of the above" } ] }
+      ] }
+  ],
+  "completion": {
+    "heading": "Manual & Theory Complete",
+    "body": "You have read every module of the BBM Small Loader Manual and answered all sixteen theory questions along the way. Press Start Assessment to review your result — your practical demonstration with the assessor comes next.",
+    "logo": "img/logo.png"
+  }
+}

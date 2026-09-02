@@ -281,7 +281,11 @@ Notes:
   the interleaved in-deck assessment — after its reading slides, so the module
   gates on them being answered. Each is `{ fieldId, type: "tf"|"mc", question,
   number?, title? }`; `mc` adds `options: [{ val, text }]` where `val` is the
-  server option value the tool's `answerKey` matches. **No answer** is authored —
+  server option value the tool's `answerKey` matches. A `tf` question posts
+  `true`/`false` by default (a boolean field); when the printed True/False
+  imported as a **radio**, give it exactly two `options` (true first) carrying
+  the radio's real option strings — the thumbs card is kept and posts those.
+  **No answer** is authored —
   grading is server-side (see the "Graded questions" section above and
   `host-contract.md`). Set `course.assessmentInDeck: true` on the assessment
   tool's manifest so the attempt opens at course start.
