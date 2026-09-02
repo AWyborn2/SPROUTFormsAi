@@ -1090,6 +1090,13 @@ async function main() {
     for (const p of problems) console.log(`  ✗ ${p}`);
     process.exit(2);
   }
+  // --emit <path>: the exact fields + manifest a --write would persist, for a
+  // test harness to load into an in-memory database and drive the routes.
+  const EMIT = flag('--emit');
+  if (EMIT) {
+    writeFileSync(EMIT, JSON.stringify({ name: template.name, fields, manifest, candidatePrereqs, assessorComps, assessorStreams, awardedComps }, null, 1));
+    console.log(`Seed emitted → ${EMIT}`);
+  }
   if (OFFLINE) {
     console.log('\nOffline validation complete: the seeded template, its answer keys, manifest and workflow all pass the API\'s validators.');
     return;

@@ -4066,6 +4066,28 @@ async function setSubmitted(
   */
   const tool = await loadTool(db, row.toolId, tenant.orgId);
   const part = tool ? orderedParts(tool.manifest).find((p) => p.key === attempt.partKey) : undefined;
+  /*
+    A CANDIDATE HANDS IN ONLY WHAT THE WORKFLOW HANDS THEM — the twin of the
+    open-attempt rule. An attempt on an assessor-filled part (a practical
+    checklist) is opened by the assessor; a candidate posting a hand-in on its
+    id would run the checklist derivation over boxes nobody has ticked and
+    record Not Satisfactory on their own competency record. Same test as
+    opening: the section must give the candidate something to fill, at the
+    section level or on any field. A tool with no authored workflow derives
+    one that lets both roles fill every part, so nothing older changes.
+  */
+  if (submitting && scope === 'own' && tool && part) {
+    const fields = await fieldsForVersion(db, attempt.templateVersionId);
+    const section = sectionForPart(workflowOf(tool.manifest, fields), part.key);
+    const candidateMayFill = section
+      ? section.access.candidate === 'fill' ||
+        Object.values(section.fieldAccess ?? {}).some((per) => per.candidate === 'fill')
+      : true;
+    if (!candidateMayFill) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+  }
   if (submitting && tool && part?.kind === 'declaration') {
     const fields = await fieldsForVersion(db, attempt.templateVersionId);
     const missing = missingDeclarationFields(fields, tool.manifest, part.key, attempt.values);

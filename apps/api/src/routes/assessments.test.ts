@@ -16,6 +16,11 @@
  */
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
 import { resetConfirmThrottle } from '../auth/confirm-throttle.js';
 import { schema, type Db } from '@formai/db';
@@ -7327,6 +7332,132 @@ describe('course material', () => {
       // Null clears.
       expect((await patch({ course: null })).status).toBe(200);
       expect(storedManifest().course).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  THE SEEDED SMALL LOADER, END TO END. Every other suite here drives a small
+  hand-made fixture. This one drives the REAL thing — the 403-field template
+  and the manifest the author script writes (generated from the repo's own
+  docs by the script's --offline --emit) — through the routes a case actually
+  hits, so a shape the fixtures never exercised (bands on a fixed-row table, a
+  stored workflow with a front section, a declaration anchored on the cover)
+  cannot reach production as a 500 nobody saw coming.
+*/
+describe('Small Loader — the seeded template and manifest drive every route', () => {
+  const ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
+  const SIGNATURE = 'data:image/png;base64,iVBORw0KGgo=';
+
+  function loadSeed() {
+    const out = path.join(mkdtempSync(path.join(tmpdir(), 'sl-seed-')), 'seed.json');
+    execFileSync(
+      process.execPath,
+      [
+        'scripts/author-small-loader-tool.mjs',
+        '--seed',
+        '--offline',
+        '--emit',
+        out,
+        '--key',
+        path.join(ROOT, 'docs/assessment-tools/small-loader.answer-key.json'),
+      ],
+      { cwd: path.join(ROOT, 'packages/db'), stdio: 'pipe' },
+    );
+    return JSON.parse(readFileSync(out, 'utf-8')) as { fields: FormField[]; manifest: AssessmentToolManifest };
+  }
+
+  const open = (base: string, caseId: string, partKey: string, who: Session) =>
+    fetch(`${base}/assessment-cases/${caseId}/parts/${partKey}/attempts`, { method: 'POST', headers: auth(who), body: '{}' });
+  const save = (base: string, caseId: string, attemptId: string, who: Session, values: Record<string, unknown>) =>
+    fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, { method: 'PATCH', headers: auth(who), body: JSON.stringify({ values }) });
+  const handIn = (base: string, caseId: string, attemptId: string, who: Session) =>
+    fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/submit`, { method: 'POST', headers: auth(who), body: '{}' });
+  const expectStatus = async (res: Response, status: number) => {
+    const body = await res.text();
+    expect(res.status, body).toBe(status);
+    return body ? (JSON.parse(body) as Record<string, unknown>) : {};
+  };
+
+  it('serves the tool, runs the declaration, the theory and an assessor practical, and guards the candidate', async () => {
+    const seed = loadSeed();
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    rows(store, 'formTemplates')[0]!.name = 'Authorised to Operate Small Loader';
+    rows(store, 'formTemplateVersions')[0]!.fields = seed.fields;
+    // The live seed resolves the licence prerequisite to a real competency;
+    // offline it cannot, so the fixture's competency stands in.
+    const manifest: AssessmentToolManifest = {
+      ...seed.manifest,
+      prerequisiteChecks: [{ fieldId: 'sl-licence-box', competencyIds: [COMPETENCY] }],
+    };
+    const { server, base } = startApp();
+    try {
+      const created = await expectStatus(
+        await fetch(`${base}/assessment-tools`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ templateId: TEMPLATE, name: 'Authorised to Operate Small Loader', manifest, awardedCompetencyIds: [COMPETENCY] }),
+        }),
+        201,
+      );
+      const toolId = created.id as string;
+      await expectStatus(await fetch(`${base}/assessment-tools/${toolId}`, { headers: auth() }), 200);
+      await expectStatus(await fetch(`${base}/assessment-tools`, { headers: auth() }), 200);
+
+      const kase = await expectStatus(
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId, candidateUserId: CANDIDATE, pathway: 'new' }),
+        }),
+        201,
+      );
+      const caseId = kase.id as string;
+      for (const who of [admin, candidate]) {
+        await expectStatus(await fetch(`${base}/assessment-cases/${caseId}`, { headers: auth(who) }), 200);
+      }
+      await expectStatus(await fetch(`${base}/assessment-cases`, { headers: auth() }), 200);
+
+      // The candidate signs the declaration and hands it in — it completes itself.
+      const decl = await expectStatus(await open(base, caseId, 'declaration', candidate), 201);
+      await expectStatus(await fetch(`${base}/assessment-cases/${caseId}/attempts/${decl.id}`, { headers: auth(candidate) }), 200);
+      await expectStatus(await save(base, caseId, decl.id as string, candidate, { 'sl-candidate-signature': SIGNATURE }), 200);
+      expect((await expectStatus(await handIn(base, caseId, decl.id as string, candidate), 200)).outcome).toBe('satisfactory');
+
+      // Theory: every keyed answer, marked at hand-in.
+      const theory = await expectStatus(await open(base, caseId, 'p1-theory', candidate), 201);
+      const answers: Record<string, unknown> = {};
+      for (const f of seed.fields) if (f.answerKey?.length) answers[f.id] = f.answerKey[0];
+      expect(Object.keys(answers)).toHaveLength(16);
+      await expectStatus(await save(base, caseId, theory.id as string, candidate, answers), 200);
+      expect((await expectStatus(await handIn(base, caseId, theory.id as string, candidate), 200)).outcome).toBe('satisfactory');
+
+      // The practical is the assessor's: the candidate can neither open it nor
+      // hand in the assessor's attempt, and every tick derives the verdict.
+      await expectStatus(await open(base, caseId, 'p2-practical', candidate), 403);
+      const practical = await expectStatus(await open(base, caseId, 'p2-practical', admin), 201);
+      await expectStatus(await handIn(base, caseId, practical.id as string, candidate), 403);
+      const ticks: Record<string, unknown> = {};
+      for (const f of seed.fields) if (f.type === 'check_cross' && /^sl-p2-s\d+-r\d+$/.test(f.id)) ticks[f.id] = true;
+      expect(Object.keys(ticks)).toHaveLength(51);
+      await expectStatus(await save(base, caseId, practical.id as string, admin, ticks), 200);
+      expect((await expectStatus(await handIn(base, caseId, practical.id as string, admin), 200)).outcome).toBe('satisfactory');
+
+      // The logbook opens for the candidate, and the case still reads.
+      await expectStatus(await open(base, caseId, 'p3-logbook', candidate), 201);
+      const detail = await expectStatus(await fetch(`${base}/assessment-cases/${caseId}`, { headers: auth() }), 200);
+      const states = Object.fromEntries((detail.parts as Array<{ key: string; state: string }>).map((p) => [p.key, p.state]));
+      expect(states['declaration']).toBe('satisfactory');
+      expect(states['p1-theory']).toBe('satisfactory');
+      expect(states['p2-practical']).toBe('satisfactory');
+
+      // The evidence export must not blow up on the seeded shapes — it may
+      // refuse for want of a stored PDF or a storage client, never 500.
+      const exported = await fetch(`${base}/assessment-cases/${caseId}/export`, { method: 'POST', headers: auth(), body: '{}' });
+      expect(exported.status, await exported.text()).not.toBe(500);
     } finally {
       server.close();
     }
