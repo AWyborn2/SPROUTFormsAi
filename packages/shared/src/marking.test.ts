@@ -1177,6 +1177,26 @@ describe('markingCompositionWarnings', () => {
     },
   });
 
+  it('(a) stays quiet when the workflow makes the untargeted boxes the assessor’s', () => {
+    // A practical checklist: the candidate can only view the criteria, the
+    // assessor ticks them and hands in. The boxes are the checklist the
+    // derivation is meant to read, so there is nothing to warn about.
+    const fields = [boolBox('c1', 'Wear the correct PPE'), boolBox('c2', 'Complete a risk assessment'), verdict];
+    const manifest = manifestFor(fields, true);
+    manifest.workflow!.sections[0]!.access = { candidate: 'view', assessor: 'fill' };
+    expect(markingCompositionWarnings(manifest, fields)).toEqual([]);
+    // The same boxes handed to the candidate bring the warning straight back.
+    manifest.workflow!.sections[0]!.access = { candidate: 'fill', assessor: 'fill' };
+    expect(markingCompositionWarnings(manifest, fields)).toHaveLength(1);
+    // A per-field override giving the candidate one of them is enough to name it.
+    manifest.workflow!.sections[0]!.access = { candidate: 'view', assessor: 'fill' };
+    manifest.workflow!.sections[0]!.fieldAccess = { c2: { candidate: 'fill' } };
+    const named = markingCompositionWarnings(manifest, fields);
+    expect(named).toHaveLength(1);
+    expect(named[0]).toContain('"Complete a risk assessment"');
+    expect(named[0]).not.toContain('"Wear the correct PPE"');
+  });
+
   it('(a) WARNS on an auto-locked verdict beside an untargeted Yes/No box, naming the box', () => {
     // The #269 opt-in plus a stray self-answering box: hand-in reads the box
     // as a checklist criterion, finds it untouched, and records Not

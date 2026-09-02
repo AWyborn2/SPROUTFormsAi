@@ -34,7 +34,7 @@ import type {
 import { SELF_ANSWERING_TYPES, isChoiceField } from './form-field.js';
 import type { FormField, FormFieldType, OutcomeTarget } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
-import { sectionForPart, workflowOf, type ValueSource } from './workflow.js';
+import { canWrite, sectionForPart, workflowOf, type ValueSource } from './workflow.js';
 import { visibleFields, type VisibilityAnswers } from './visibility.js';
 
 /**
@@ -795,12 +795,24 @@ export function markingCompositionWarnings(
       // declared cells) and minus keyed questions, which the arithmetic owns.
       const written = new Set<string>(partMarkFieldIds(part));
       for (const f of partFields) if (f.outcomeTarget) written.add(f.outcomeTarget.fieldId);
+      /*
+        WHOSE BOX IT IS, when the workflow already says. The trap this warns
+        about is a box the CANDIDATE fills being read as a verdict on them, or
+        a candidate's hand-in deriving Not Satisfactory before any assessor
+        ticks. A section that gives the candidate no pen on a box has settled
+        that question: the box is the assessor's checklist, and the derivation
+        reading it at their hand-in is exactly the composition the opt-in
+        exists for. So only candidate-writable boxes are worth the warning; a
+        part no section covers keeps the old, cautious reading.
+      */
+      const section = sectionForPart(workflow, part.key);
       const untargeted = partFields.filter(
         (f) =>
           SELF_ANSWERING_TYPES.includes(f.type) &&
           !written.has(f.id) &&
           (f.answerKey?.length ?? 0) === 0 &&
-          f.id !== verdictField.id,
+          f.id !== verdictField.id &&
+          (section === null || canWrite(section, f.id, 'candidate')),
       );
       if (untargeted.length > 0) {
         warnings.push(
