@@ -716,7 +716,34 @@ export function deriveChecklistOutcome(
   );
   if (criteria.length === 0) return null;
 
-  const allPass = criteria.every((c) => isYesValue(answers[c.id]));
+  /*
+    N/A IS AN ANSWER. The practical papers print "√ / ×" and "N/A" beside every
+    criterion, and an assessor who ticks N/A has judged the item: it did not
+    arise on the day (no hopper clean-up, no forest salvage), which is not a
+    failure. Without this, every row that could not be demonstrated would fail
+    the candidate on a part they otherwise passed, and the assessor's only
+    way out would be a tick on a criterion nobody saw. The companion is found
+    structurally — the checkbox printed immediately AFTER the criterion,
+    labelled N/A — so nothing is inferred from a box's position on the page.
+
+    It excuses only an UNTOUCHED criterion. A criterion crossed × and also
+    marked N/A says two things at once, and the explicit failure is the one
+    that stands on a competency record.
+  */
+  const naFor = new Map<string, FormField>();
+  partFields.forEach((f, i) => {
+    const next = partFields[i + 1];
+    if (next && next.type === 'checkbox' && /^n\/?a\.?$/i.test(next.label.trim())) naFor.set(f.id, next);
+  });
+  const passes = (c: FormField): boolean => {
+    const own = answers[c.id];
+    if (isYesValue(own)) return true;
+    const na = naFor.get(c.id);
+    const untouched = own === undefined || own === null || own === '';
+    return na !== undefined && untouched && answers[na.id] === true;
+  };
+
+  const allPass = criteria.every(passes);
   const derivedValues: Record<string, SubmissionValue> = { ...answers };
   writeDeclared(derivedValues, { fieldId: verdictField.id, value: allPass ? pair.yes : pair.no });
   return { outcome: allPass ? 'satisfactory' : 'not_satisfactory', derivedValues };

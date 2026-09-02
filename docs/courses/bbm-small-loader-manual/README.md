@@ -34,13 +34,17 @@ the join key the author script uses (below). Answers are **never** in this
 directory; the key lives in `docs/assessment-tools/small-loader.answer-key.json`
 (sensitive) and is written to the tool by the author script.
 
-## The ids are placeholders until the tool exists
+## The ids are the tool's real ids
 
-Each graded card carries `fieldId: "sl-q<n>"` and letter `val`s (`a`, `b`, …)
-because the deck is authored before the blank PDF is imported. The host grades a
-`course-answer` by the **real** field id and the **real** option value, so
-before the zip is uploaded the cards must be rewritten from the published
-template. The author script does that:
+Each graded card carries the field id of its question on the **seeded**
+template (`sl-q1` … `sl-q16`, from `docs/assessment-tools/small-loader.template.json`)
+and posts the question's real option strings (`a) True`, `d) All of the above`,
+…), which is what the tool's `answerKey` matches. The host grades a
+`course-answer` by exactly those, so the zip built from this directory is the
+one to upload — no reconciliation step.
+
+If the tool is ever re-authored against a template imported by hand (different
+ids), the author script's `--deck` step rewrites the cards from the pairing:
 
 ```bash
 cd packages/db
@@ -49,10 +53,8 @@ DATABASE_URL=… node scripts/author-small-loader-tool.mjs \
   --deck ../../docs/courses/bbm-small-loader-manual          # dry run: rewrites deck.json only
 ```
 
-It replaces every card's `fieldId` with the paired question's id and its `val`s
-with the option strings the tool's `answerKey` matches (a printed True/False
-that imported as a radio keeps the thumbs card, posting the radio's real
-values). Then rebuild.
+Against the seeded template it reports "Deck already matches" and touches
+nothing. After a rewrite, rebuild.
 
 ## Build
 

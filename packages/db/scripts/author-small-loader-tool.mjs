@@ -1,69 +1,101 @@
 /**
- * Author the Small Loader assessment tool against an IMPORTED template.
+ * Author the Small Loader assessment tool — from a FULLY MAPPED template this
+ * script seeds itself (--seed), or against a template someone imported by hand.
  *
- * Run from packages/db in the environment that can reach the database
- * (Replit), after the blank "Authorised to Operate Small Loader" PDF has been
- * imported, its boxes placed, and the version published:
+ * THE ONE-COMMAND PATH. Nobody maps this paper in the builder. The template —
+ * every field and every printed box on all 13 pages — was derived from the
+ * blank PDF's own vector grid and lives beside the answer key:
+ *
+ *   docs/assessment-tools/small-loader.template.json   the fields + geometry
+ *   docs/assessment-tools/small-loader.blank.pdf       the paper it prints on
+ *
+ * Run from packages/db in the environment that can reach the database and the
+ * object store (Replit):
  *
  *   pnpm --filter @formai/shared build
  *   cd packages/db
- *   DATABASE_URL=... node scripts/author-small-loader-tool.mjs --key ../key.json          # dry run
- *   DATABASE_URL=... node scripts/author-small-loader-tool.mjs --key ../key.json --write  # persist
+ *   DATABASE_URL=... node scripts/author-small-loader-tool.mjs --seed --key ../key.json          # dry run
+ *   DATABASE_URL=... node scripts/author-small-loader-tool.mjs --seed --key ../key.json --write  # persist
  *
- * `--key` (or ANSWER_KEY_PATH) points at the answer key; the in-repo copy at
- * docs/assessment-tools/small-loader.answer-key.json is the fallback while it
- * exists. Optional: --template-id <uuid> when name matching finds the wrong
- * template; --course-id <uuid> to link the uploaded SCORM deck as REQUIRED
- * course material with the graded questions embedded in it (assessmentInDeck);
- * --licence-codes Q1,Q2 to list every licence class that satisfies "Driver's
+ * With --write, --seed uploads the blank PDF to the org's object store,
+ * creates the template and its published v1, then writes the tool exactly as
+ * the by-hand path does. Re-running --seed creates ANOTHER template; pass
+ * --template-id to re-author an existing one instead.
+ *
+ * Flags: --key <path> (or ANSWER_KEY_PATH; the in-repo copy is the fallback
+ * while it exists); --org <uuid> when the database holds more than one org;
+ * --published-by <userId> to record who published v1; --asset-id
+ * <orgId>/<uuid>.pdf to reuse an already-uploaded PDF instead of uploading;
+ * --pdf / --template-json to point at other copies; --offline to validate the
+ * whole seed with no database at all (competencies are then unresolved);
+ * --course-id <uuid> to link the uploaded SCORM deck as REQUIRED course
+ * material with the graded questions embedded in it (assessmentInDeck);
+ * --licence-codes Q1,Q2 for every licence class that satisfies "Driver's
  * Licence C or higher" (defaults to Q50001782 alone); --deck <deck-dir> to
- * rewrite the SCORM deck's graded cards (docs/courses/bbm-small-loader-manual)
- * from placeholder ids to the imported template's real field ids and option
- * values — rebuild the package after; and the same --candidate-name /
- * --candidate-signature / --assessor-signature / --assessor-name overrides as
- * the Track Dozer script for an ambiguous cover.
+ * reconcile the deck's graded cards with the template's ids and option values
+ * (the committed deck already matches the seeded template, so this is a
+ * no-op there); and, on the by-hand path, --template-id plus the same
+ * --candidate-name / --candidate-signature / --assessor-signature /
+ * --assessor-name overrides as the Track Dozer script for an ambiguous cover.
  *
- * DRY RUN BY DEFAULT. Everything here is heuristic — imported field ids and
- * labels come from AI extraction, so this script's job is to propose a
- * mapping, show its work, and refuse to write anything that does not survive
- * the same validators the API applies (validateManifest, validateAnswerKeys).
- * Read the dry-run report before --write.
+ * DRY RUN BY DEFAULT. Everything below is heuristic on the by-hand path —
+ * imported ids and labels come from AI extraction — and declared on the seed
+ * path, where the template's `hints` name every pointer outright. Either way
+ * the script's job is to propose a mapping, show its work, and refuse to
+ * write anything that does not survive the same validators the API applies
+ * (validateManifest, validateAnswerKeys, validateWorkflow). Read the dry-run
+ * report before --write.
  *
  * This is the Track Dozer author script (author-track-dozer-tool.mjs) adapted
  * to this paper, which has the same six-part shape and two pathways, plus what
  * that script never modelled and this tool's flow needs:
  *
- *  1. Locates the template and its current published version.
+ *  1. Locates (or seeds) the template and its current published version.
  *  2. Pairs the 16 theory questions with their ✓/✗ boxes and writes the key
  *     (exact-set-match, all mandatory) and a RING glyph on every option box, so
  *     the export rings the chosen answer rather than ticking it.
  *  3. Anchors parts 1–6 to their PART headings; a leading DECLARATION part on
- *     the cover so the candidate signs to start the flow.
+ *     the cover so the candidate signs to start.
  *  4. Builds the manifest: pathways (new = 1–6; experienced/reassessment = 1–2),
  *     logbook minima (10 h / 20 h) and duration columns, profile prefill for
  *     the three Candidate Details boxes, the cover sign-off block, per-part
  *     assessor boxes, the Assessment Methods checklist auto-ticks
- *     (partCompletionMarks), the printed pathway tick (pathwayMarks), and the
- *     Driver's Licence prerequisite box (prerequisiteChecks).
+ *     (partCompletionMarks), the printed pathway tick (pathwayMarks), the
+ *     Driver's Licence prerequisite box (prerequisiteChecks), Part 1's printed
+ *     verdict pair, and — on the seed path — the workflow: who fills what,
+ *     with each practical's verdict locked to derive from its checklist.
  *  5. Attaches prerequisite/assessor/awarded competencies found by code.
  *  6. Emits deck-questions.json — the theory questions with their REAL field
  *     ids and options and NO answers — for the SCORM deck's interleaved graded
- *     slides (course-deck-builder `questions`), so deck and tool share ids.
+ *     slides, so deck and tool share ids.
  *  7. Upserts the assessment_tools row.
  */
+import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
-import { pairQuestionsWithOutcomes, validateAnswerKeys, validateManifest } from '@formai/shared';
+import {
+  derivedWorkflow,
+  pairQuestionsWithOutcomes,
+  validateAnswerKeys,
+  validateManifest,
+  validateWorkflow,
+} from '@formai/shared';
 
 const WRITE = process.argv.includes('--write');
+const SEED = process.argv.includes('--seed');
+const OFFLINE = process.argv.includes('--offline');
 const flag = (name) => {
   const i = process.argv.indexOf(name);
   return i > -1 ? process.argv[i + 1] : null;
 };
 const TEMPLATE_ID = flag('--template-id');
 const COURSE_ID = flag('--course-id');
+
+const here = dirname(fileURLToPath(import.meta.url));
+const DOCS = join(here, '..', '..', '..', 'docs', 'assessment-tools');
 
 /*
   WHERE THE ANSWER KEY COMES FROM — same posture as the Track Dozer script: a
@@ -72,9 +104,7 @@ const COURSE_ID = flag('--course-id');
   stripMarkingSecrets on every fill surface); this flag is about not shipping
   a safety answer key in the source tree forever.
 */
-const here = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_KEY_PATH = join(here, '..', '..', '..', 'docs', 'assessment-tools', 'small-loader.answer-key.json');
-const KEY_PATH = flag('--key') ?? process.env.ANSWER_KEY_PATH ?? DEFAULT_KEY_PATH;
+const KEY_PATH = flag('--key') ?? process.env.ANSWER_KEY_PATH ?? join(DOCS, 'small-loader.answer-key.json');
 
 let KEY;
 try {
@@ -103,11 +133,11 @@ if (!Array.isArray(KEY?.sections?.general?.questions) || KEY.sections.general.qu
 }
 console.log(`Answer key: ${KEY_PATH}`);
 
-if (!process.env.DATABASE_URL) {
-  console.error('DATABASE_URL is required.');
+if (!OFFLINE && !process.env.DATABASE_URL) {
+  console.error('DATABASE_URL is required (or pass --offline to validate the seed without a database).');
   process.exit(1);
 }
-const sql = postgres(process.env.DATABASE_URL);
+const sql = OFFLINE ? null : postgres(process.env.DATABASE_URL);
 
 const problems = [];
 const warnings = [];
@@ -161,30 +191,118 @@ function ringOptionBoxes(field) {
   return n;
 }
 
-async function main() {
-  // ── locate template and version ─────────────────────────────────────────
-  const templates = TEMPLATE_ID
-    ? await sql`select * from form_templates where id = ${TEMPLATE_ID}`
-    : await sql`select * from form_templates where name ilike ${'%small loader%'} order by created_at desc`;
-  if (templates.length === 0) {
-    console.error('No Small Loader template found. Import the PDF first, or pass --template-id.');
-    process.exit(1);
-  }
-  if (templates.length > 1 && !TEMPLATE_ID) {
-    warnings.push(
-      `${templates.length} templates match "small loader". Using the newest (${templates[0].id}). ` +
-        `Others: ${templates.slice(1).map((t) => t.id).join(', ')}. Pass --template-id to pick a different one.`,
+/**
+ * The blank paper into the org's object store, exactly as the app's own
+ * upload route stores it (apps/api/src/storage/replit.ts): key
+ * `<orgId>/<uuid>.pdf`, bytes via the Replit SDK. The SDK is the API's
+ * dependency, so it is resolved from the API's own node_modules.
+ */
+async function uploadPdf(orgId, pdfPath) {
+  const bytes = readFileSync(pdfPath);
+  if ((process.env.STORAGE_PROVIDER ?? 'replit') !== 'replit') {
+    throw new Error(
+      `STORAGE_PROVIDER=${process.env.STORAGE_PROVIDER} — this script only uploads to Replit object storage. ` +
+        `Upload the PDF through the app once and pass --asset-id <orgId>/<uuid>.pdf.`,
     );
   }
-  const template = templates[0];
-  if (!template.current_version_id) {
-    console.error(`Template ${template.id} has no published version.`);
-    process.exit(1);
+  if (!process.env.REPLIT_CLUSTER) {
+    throw new Error(
+      'Not inside Replit (REPLIT_CLUSTER is unset), so the PDF cannot be uploaded from here. ' +
+        'Run this on Replit, or pass --asset-id <orgId>/<uuid>.pdf for a PDF already in the store.',
+    );
   }
-  const [version] = await sql`select * from form_template_versions where id = ${template.current_version_id}`;
-  const fields = structuredClone(version.fields ?? []);
-  console.log(`Template: ${template.name} (${template.id})`);
-  console.log(`Version:  ${version.id} — ${fields.length} fields\n`);
+  const req = createRequire(join(here, '..', '..', '..', 'apps', 'api', 'package.json'));
+  const { Client } = req('@replit/object-storage');
+  const client = new Client();
+  const assetId = `${orgId}/${randomUUID()}.pdf`;
+  const result = await client.uploadFromBytes(assetId, bytes);
+  if (!result.ok) throw new Error(`storage_upload_failed: ${JSON.stringify(result.error)}`);
+  return assetId;
+}
+
+/** Which template hint answers each cover-page search — the seed path's declarations. */
+const HINT_KEYS = {
+  'candidate name': 'candidateName',
+  'company name': 'companyName',
+  'swipe card': 'swipeCard',
+  'candidate signature': 'candidateSignature',
+  'assessor signature': 'assessorSignature',
+  'assessor name': 'assessorName',
+  'assessor sign-off date': 'signedDate',
+  'overall satisfactory': 'overallSatisfactory',
+  'overall not satisfactory': 'overallNotSatisfactory',
+  'more coaching — Yes': 'coachingYes',
+  'more coaching — No': 'coachingNo',
+  'licence prerequisite box': 'licenceBox',
+};
+
+async function main() {
+  // ── locate or seed the template and its version ────────────────────────
+  let template;
+  let version;
+  let fields;
+  let hints = {};
+  let pdfPath = null;
+  let templateJsonPath = null;
+  if (SEED) {
+    templateJsonPath = flag('--template-json') ?? join(DOCS, 'small-loader.template.json');
+    pdfPath = flag('--pdf') ?? join(DOCS, 'small-loader.blank.pdf');
+    const tpl = JSON.parse(readFileSync(templateJsonPath, 'utf-8'));
+    if (!Array.isArray(tpl.fields) || tpl.fields.length === 0) {
+      console.error(`Template at ${templateJsonPath} has no fields.`);
+      process.exit(1);
+    }
+    fields = structuredClone(tpl.fields);
+    hints = tpl.hints ?? {};
+    let orgId = flag('--org');
+    if (!OFFLINE) {
+      const orgs = await sql`select id, name from organizations order by created_at`;
+      if (orgId) {
+        if (!orgs.some((o) => o.id === orgId)) {
+          console.error(`--org ${orgId} is not an organisation in this database.`);
+          process.exit(1);
+        }
+      } else if (orgs.length === 1) {
+        orgId = orgs[0].id;
+      } else {
+        console.error(
+          `${orgs.length} organisations — pass --org <id>:\n` + orgs.map((o) => `  ${o.id}  ${o.name}`).join('\n'),
+        );
+        process.exit(1);
+      }
+    }
+    template = { id: null, org_id: orgId ?? '(offline)', name: tpl.name };
+    version = { id: null };
+    const pageCount = Array.isArray(tpl.pages) ? tpl.pages.length : '?';
+    console.log(`Seed:     ${tpl.name} — ${fields.length} fields over ${pageCount} pages (${templateJsonPath})`);
+    console.log(`PDF:      ${pdfPath} (${readFileSync(pdfPath).length.toLocaleString()} bytes)`);
+    console.log(`Org:      ${template.org_id}\n`);
+  } else {
+    const templates = TEMPLATE_ID
+      ? await sql`select * from form_templates where id = ${TEMPLATE_ID}`
+      : await sql`select * from form_templates where name ilike ${'%small loader%'} order by created_at desc`;
+    if (templates.length === 0) {
+      console.error('No Small Loader template found. Run with --seed to create the mapped one, or pass --template-id.');
+      process.exit(1);
+    }
+    if (templates.length > 1 && !TEMPLATE_ID) {
+      warnings.push(
+        `${templates.length} templates match "small loader". Using the newest (${templates[0].id}). ` +
+          `Others: ${templates.slice(1).map((t) => t.id).join(', ')}. Pass --template-id to pick a different one.`,
+      );
+    }
+    template = templates[0];
+    if (!template.current_version_id) {
+      console.error(`Template ${template.id} has no published version.`);
+      process.exit(1);
+    }
+    [version] = await sql`select * from form_template_versions where id = ${template.current_version_id}`;
+    fields = structuredClone(version.fields ?? []);
+    console.log(`Template: ${template.name} (${template.id})`);
+    console.log(`Version:  ${version.id} — ${fields.length} fields\n`);
+  }
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  const hinted = (key) => (hints[key] ? byId.get(hints[key]) : undefined);
 
   /* ── theory questions, in document order ─────────────────────────────────
      The published questionRef link wins; document order is the fallback — the
@@ -318,19 +436,23 @@ async function main() {
      Track Dozer script learned to. One match or none: absence and ambiguity
      get the same answer, because printing an assessor's name or a competent
      tick in the wrong box on a certificate is worse than a blank one.
+
+     On the seed path the template's `hints` name each pointer outright and
+     the search is never run: a declaration beats a regex on a certificate.
   */
   const coverFields = anchors[0] ? fields.slice(0, fields.indexOf(anchors[0])) : fields;
   console.log(`\nCover page: ${coverFields.length} field(s) before the PART 1 anchor`);
 
   const findOne = (what, re, types, override, pool = coverFields) => {
     const flagName = `--${what.replace(/ /g, '-')}`;
-    if (override) {
-      const named = fields.find((f) => f.id === override);
+    const declared = override ?? hints[HINT_KEYS[what]] ?? null;
+    if (declared) {
+      const named = fields.find((f) => f.id === declared);
       if (!named) {
-        problems.push(`${flagName} names field "${override}", which is not in this version; nothing is written.`);
+        problems.push(`${what} is declared as field "${declared}", which is not in this version; nothing is written.`);
         return undefined;
       }
-      console.log(`  ${what} → ${named.id} "${(named.label ?? '').slice(0, 48)}" (declared by ${flagName})`);
+      console.log(`  ${what} → ${named.id} "${(named.label ?? '').slice(0, 48)}" (declared${override ? ` by ${flagName}` : ' by the template'})`);
       return named;
     }
     const hits = pool.filter((f) => types.includes(f.type) && re.test(norm(f.label)));
@@ -349,7 +471,7 @@ async function main() {
   const MARKS = ['check_cross', 'checkbox', 'boolean_yes_no'];
 
   // Candidate Details — prefilled from the profile when the case opens.
-  const candidateNameField = findOne('candidate name', /candidate.*name|name.*candidate/, SCALARS, flag('--candidate-name'));
+  const candidateNameField = findOne('candidate name', /^candidate.*name$(?!.*company)/, SCALARS, flag('--candidate-name'));
   const companyField = findOne('company name', /company/, SCALARS);
   const swipeField = findOne('swipe card', /swipe|card number/, SCALARS);
 
@@ -375,7 +497,9 @@ async function main() {
     /(assessor|assessment)[^]*\bdate\b|\bdate\b[^]*(assessor|assessment|sign)/,
     ['date', 'text'],
   );
-  const overallField = findOne('overall satisfactory', /candidate competent|\bcompetent\b(?!.*not)/, MARKS);
+  // "Candidate Competent" — and never "Candidate not yet Competent", which also ends in the word.
+  const overallField = findOne('overall satisfactory', /^(?!.*\bnot\b).*competent/, MARKS);
+  const overallNoField = findOne('overall not satisfactory', /not yet competent|not competent/, MARKS);
   const coachYesField = findOne('more coaching — Yes', /coaching.*yes|further.*training.*yes|\byes\b/, MARKS);
   const coachNoField = findOne('more coaching — No', /coaching.*no\b|further.*training.*no\b|\bno\b/, MARKS);
 
@@ -385,13 +509,14 @@ async function main() {
   /* ── the Assessment Methods checklist + pathway boxes ───────────────────
      "Methods used to assess competence" prints as one list: two pathway lines
      ("PART 1 and 2: Experienced…", "PART 1, 2, 3, 4, 5 and 6: New…") and the
-     six method rows. Extraction usually captures that as ONE fixed-row table
-     with a tick column; sometimes as individual check boxes. Both are handled:
-     a fixed-row table yields row-indexed marks, individual boxes yield
-     field-id marks. The method rows auto-tick from part completion
-     (partCompletionMarks); the pathway line is a CASE fact seeded at export
-     (pathwayMarks) so the printed box can never disagree with the parts the
-     document shows filled.
+     six method rows. The seeded template models the six rows as ONE fixed-row
+     table with a tick column (completion ticks address printed rows by index)
+     and the two pathway lines as standalone boxes (a pathway is one scalar
+     mark). An imported template may fold all eight into one table, or leave
+     every box loose; both are handled. The method rows auto-tick from part
+     completion (partCompletionMarks); the pathway line is a CASE fact seeded
+     at export (pathwayMarks) so the printed box can never disagree with the
+     parts the document shows filled.
   */
   const METHOD_ROWS = [
     { partKey: 'p1-theory', re: /^1\b.*theory|\btheory\b/ },
@@ -402,23 +527,27 @@ async function main() {
     { partKey: 'p6-practical', re: /^6\b.*final|final practical/ },
   ];
   const PATHWAY_ROWS = [
-    { pathways: ['experienced', 'rpl'], re: /part 1 and 2|experienced|re assessment|reassessment/ },
+    // `\bexperienced` — "inexperienced" on the other line must not match this one.
+    { pathways: ['experienced', 'rpl'], re: /part 1 and 2\b|\bexperienced|re assessment|reassessment/ },
     { pathways: ['new'], re: /part 1 2 3 4 5 and 6|new and inexperienced|inexperienced/ },
   ];
   const partCompletionMarks = [];
   const pathwayMarks = {};
+  const pathwayBoxIds = [];
 
-  const methodsTable = coverFields.find(
-    (f) => f.type === 'repeating_group' && (f.fixedRows?.length ?? 0) >= 6 &&
-      f.fixedRows.some((r) => /theory/.test(norm(r))) && f.fixedRows.some((r) => /practical/.test(norm(r))),
-  );
+  const methodsTable =
+    hinted('methodsTable') ??
+    coverFields.find(
+      (f) => f.type === 'repeating_group' && (f.fixedRows?.length ?? 0) >= 6 &&
+        f.fixedRows.some((r) => /theory/.test(norm(r))) && f.fixedRows.some((r) => /practical/.test(norm(r))),
+    );
   if (methodsTable) {
     const tickCol = (methodsTable.columns ?? []).find((c) => ['check_cross', 'checkbox', 'boolean_yes_no'].includes(c.type))
       ?? (methodsTable.columns ?? [])[0];
     if (!tickCol) {
       warnings.push(`Methods checklist ${methodsTable.id} has no tick column, so nothing auto-ticks.`);
     } else {
-      methodsTable.fixedRows.forEach((row, rowIndex) => {
+      (methodsTable.fixedRows ?? []).forEach((row, rowIndex) => {
         const label = norm(row);
         const m = METHOD_ROWS.find((r) => r.re.test(label));
         if (m) partCompletionMarks.push({ partKey: m.partKey, fieldId: methodsTable.id, rowIndex, columnKey: tickCol.key });
@@ -426,29 +555,38 @@ async function main() {
         if (p) for (const pw of p.pathways) pathwayMarks[pw] = { fieldId: methodsTable.id, rowKey: row, columnKey: tickCol.key, value: true };
       });
       console.log(`  methods checklist → ${methodsTable.id} ("${methodsTable.label}"), tick column "${tickCol.key}": ` +
-        `${partCompletionMarks.length}/6 method rows, ${Object.keys(pathwayMarks).length} pathway keys`);
+        `${partCompletionMarks.length}/6 method rows, ${Object.keys(pathwayMarks).length} pathway keys in the table`);
     }
   } else {
-    // Individual boxes: match each method / pathway label to its own field.
+    // Individual boxes: match each method label to its own field.
+    const found = [];
     for (const m of METHOD_ROWS) {
       const hits = coverFields.filter((f) => MARKS.includes(f.type) && m.re.test(norm(f.label)));
-      if (hits.length === 1) partCompletionMarks.push({ partKey: m.partKey, fieldId: hits[0].id, rowIndex: 0, columnKey: '' });
+      if (hits.length === 1) found.push(m.partKey);
     }
-    for (const p of PATHWAY_ROWS) {
-      const hits = coverFields.filter((f) => MARKS.includes(f.type) && p.re.test(norm(f.label)));
-      if (hits.length === 1) for (const pw of p.pathways) pathwayMarks[pw] = { fieldId: hits[0].id, value: true };
-    }
-    if (partCompletionMarks.length) {
+    if (found.length) {
       warnings.push(
         'The Assessment Methods list imported as individual boxes rather than one fixed-row table; ' +
-          `${partCompletionMarks.length}/6 method boxes matched. partCompletionMarks addresses a fixed-row TABLE, ` +
+          `${found.length}/6 method boxes matched. partCompletionMarks addresses a fixed-row TABLE, ` +
           'so these are reported but NOT declared — retype the list as a fixed-row repeating table in the builder ' +
           '(one row per method, a tick column) and re-run for the rows to auto-tick.',
       );
-      partCompletionMarks.length = 0;
     } else {
       warnings.push('No Assessment Methods checklist found on the cover — nothing will auto-tick as parts complete.');
     }
+  }
+  // The pathway lines as standalone boxes — the seeded shape, and the fallback
+  // when an imported table does not carry them.
+  if (Object.keys(pathwayMarks).length === 0) {
+    for (const p of PATHWAY_ROWS) {
+      const hits = coverFields.filter((f) => MARKS.includes(f.type) && p.re.test(norm(f.label)));
+      if (hits.length === 1) {
+        for (const pw of p.pathways) pathwayMarks[pw] = { fieldId: hits[0].id, value: true };
+        pathwayBoxIds.push(hits[0].id);
+      }
+    }
+    if (pathwayBoxIds.length) console.log(`  pathway boxes → ${pathwayBoxIds.join(', ')} (${Object.keys(pathwayMarks).length} pathway keys)`);
+    else warnings.push('No pathway boxes found on the cover — the printed pathway line will not tick.');
   }
 
   // ── manifest: parts ─────────────────────────────────────────────────────
@@ -478,6 +616,7 @@ async function main() {
      candidate can fill. Cleared below, after the pointers are resolved.
   */
   const declarationAnchor =
+    hinted('declarationAnchor') ??
     coverFields.find((f) => f.type === 'section_header' && /candidate.*declaration/.test(norm(f.label))) ??
     candidateSigField;
   if (declarationAnchor) {
@@ -506,12 +645,32 @@ async function main() {
   // Ordinals must be contiguous from 1 whatever was skipped above.
   parts.forEach((p, i) => { p.ordinal = i + 1; });
 
+  /*
+     PART 1'S PRINTED VERDICT — "The Candidate's responses were: ☐ Satisfactory
+     ☐ Not Satisfactory" — is written by the theory marking from the same
+     arithmetic that produced the ✓/✗ column (exactly one of the pair), and the
+     cover's "Detail further action" takes the questions to go back over when
+     the part is not satisfactory. Declared by the template on the seed path.
+  */
+  const partHints = hints.parts ?? {};
+  for (const part of parts) {
+    const h = partHints[part.key];
+    if (!h) continue;
+    if (h.outcomeSatisfactory && byId.has(h.outcomeSatisfactory)) part.outcomeSatisfactory = { fieldId: h.outcomeSatisfactory, value: true };
+    if (h.outcomeNotSatisfactory && byId.has(h.outcomeNotSatisfactory)) part.outcomeNotSatisfactory = { fieldId: h.outcomeNotSatisfactory, value: true };
+  }
+  if (hints.furtherAction && byId.has(hints.furtherAction)) {
+    const theory = parts.find((p) => p.key === 'p1-theory');
+    if (theory) theory.furtherActionFieldId = hints.furtherAction;
+  }
+
   // ── the cover's sign-off block ──────────────────────────────────────────
   const signOff = {};
   if (sigField) signOff.assessorSignatureFieldId = sigField.id;
   if (assessorNameField) signOff.assessorNameFieldId = assessorNameField.id;
   if (signedDateField) signOff.signedDateFieldId = signedDateField.id;
   if (overallField) signOff.overallSatisfactory = { fieldId: overallField.id, value: true };
+  if (overallNoField) signOff.overallNotSatisfactory = { fieldId: overallNoField.id, value: true };
   if (coachYesField && coachNoField) {
     signOff.moreCoachingRequiredYes = { fieldId: coachYesField.id, value: true };
     signOff.moreCoachingRequiredNo = { fieldId: coachNoField.id, value: true };
@@ -528,6 +687,7 @@ async function main() {
     ['assessor name', assessorNameField],
     ['signed date', signedDateField],
     ['overall satisfactory', overallField],
+    ['overall not satisfactory', overallNoField],
     ['more coaching — Yes', coachYesField],
     ['more coaching — No', coachNoField],
     ['licence prerequisite box', licenceBoxField],
@@ -564,13 +724,14 @@ async function main() {
      the cover; everything there that the system writes must not be required
      of the candidate, and the one box that IS theirs — the signature — must be.
   */
+  let declSlice = [];
   if (declarationAnchor) {
     const systemWritten = new Set(
-      [sigField, assessorNameField, signedDateField, overallField, coachYesField, coachNoField, licenceBoxField, methodsTable]
+      [sigField, assessorNameField, signedDateField, overallField, overallNoField, coachYesField, coachNoField, licenceBoxField, methodsTable]
         .filter(Boolean)
         .map((f) => f.id),
     );
-    const declSlice = fields.slice(fields.indexOf(declarationAnchor), anchors[0] ? fields.indexOf(anchors[0]) : fields.length);
+    declSlice = fields.slice(fields.indexOf(declarationAnchor), anchors[0] ? fields.indexOf(anchors[0]) : fields.length);
     let cleared = 0;
     for (const f of declSlice) {
       if (f.id === candidateSigField?.id) continue;
@@ -591,19 +752,25 @@ async function main() {
   const partBoxReport = [];
   parts.forEach((part, i) => {
     if (part.kind === 'declaration') return;
+    const h = partHints[part.key] ?? {};
     const from = indexOfId.get(part.startFieldId);
     if (from === undefined) return;
     const nextAnchor = parts[i + 1]?.startFieldId;
     const to = nextAnchor !== undefined ? (indexOfId.get(nextAnchor) ?? fields.length) : fields.length;
     const within = fields.slice(from, to).filter((f) => !claimed.has(f.id));
-    const oneWithin = (what, re, types) => {
+    const oneWithin = (what, re, types, declaredId) => {
+      if (declaredId) {
+        const named = byId.get(declaredId);
+        if (named) return named;
+        warnings.push(`${part.key} ${what}: the template declares "${declaredId}", which is not in this version.`);
+      }
       const hits = within.filter((f) => types.includes(f.type) && re.test(norm(f.label)));
       if (hits.length === 1) return hits[0];
       if (hits.length > 1) warnings.push(`${part.key} ${what}: ${hits.length} fields match (${hits.map((f) => f.id).join(', ')}) — none declared.`);
       return undefined;
     };
-    const nameField = oneWithin('assessor name', /assessor.*name|name.*assessor|assessor.*print/, SCALARS);
-    const dateField = oneWithin('date', /\bdate\b/, ['date', 'text']);
+    const nameField = oneWithin('assessor name', /assessor.*name|name.*assessor|assessor.*print/, SCALARS, h.assessorName);
+    const dateField = oneWithin('date', /\bdate\b/, ['date', 'text'], h.signedDate);
     if (nameField) { part.assessorNameFieldId = nameField.id; claimed.add(nameField.id); }
     if (dateField) { part.signedDateFieldId = dateField.id; claimed.add(dateField.id); }
     partBoxReport.push(`  ${part.key.padEnd(14)} name → ${nameField ? nameField.id : '—'}   date → ${dateField ? dateField.id : '—'}`);
@@ -628,7 +795,8 @@ async function main() {
   const codes = { candidate: licenceCodes, assessor: [AWARDED], awarded: [AWARDED] };
   const STREAM_CODES = { Mining: 'Q50071833', 'Raw Materials': 'Q50073293' };
 
-  const rows = await sql`select id, code, valid_for_months from competencies where org_id = ${template.org_id}`;
+  const rows = OFFLINE ? [] : await sql`select id, code, valid_for_months from competencies where org_id = ${template.org_id}`;
+  if (OFFLINE) warnings.push('OFFLINE: competencies were not looked up — every competency pointer below is unresolved in this run.');
   const byCode = new Map(rows.map((r) => [r.code, r.id]));
   const pick = (list, who) =>
     list.flatMap((c) => {
@@ -690,19 +858,93 @@ async function main() {
   console.log(`\nMandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryFieldIds.length ? 'all of Part 1' : 'none'}`);
   console.log(`Ring glyph set on ${ringed} option box(es) across the theory questions`);
 
+  /* ── the workflow: who fills what ────────────────────────────────────────
+     Only on the seed path, where the template's shape is known. This is the
+     flow as the training authority described it, stored so it survives every
+     read rather than re-derived:
+
+       Candidate Details        prefilled, read-only for everyone
+       Candidate Declaration    the candidate signs; the rest of the cover —
+                                summary, methods, feedback, result, sign-off —
+                                is the assessor's, hidden from the candidate,
+                                and the export writes the boxes it owns
+       Part 1 (theory)          the candidate answers (in the deck), the
+                                assessor watches; marking writes the ✓/✗
+                                column and the verdict pair
+       Parts 2 / 4 / 6          the assessor ticks the checklist; the printed
+                                verdict is LOCKED `auto` so hand-in derives it
+                                from the ticks (N/A counts as judged)
+       Parts 3 / 5 (logbooks)   the candidate logs hours, the assessor can
+                                read them at any time
+
+     `derivedWorkflow` supplies the locks the manifest already implies (every
+     keyed question's ✓/✗ cell, the verdict pair, the completion checklist,
+     the sign-off marks); this adds the access model and the practical
+     verdicts' `auto`, then validates the result as the API would.
+  */
+  if (SEED && parts.length) {
+    const wf = derivedWorkflow(manifest, fields);
+    const partByKey = new Map(parts.map((p) => [p.key, p]));
+    for (const s of wf.sections) {
+      const part = partByKey.get(s.partKey);
+      if (!part) continue;
+      const src = { ...(s.fieldSource ?? {}) };
+      const acc = { ...(s.fieldAccess ?? {}) };
+      if (part.kind === 'declaration') {
+        s.access = { candidate: 'fill', assessor: 'view' };
+        for (const f of declSlice) {
+          if (f.type === 'section_header' || f.id === candidateSigField?.id) continue;
+          acc[f.id] = { candidate: 'hidden', assessor: 'fill' };
+        }
+        for (const id of pathwayBoxIds) src[id] = 'auto';
+      } else if (part.kind === 'theory' || part.kind === 'logbook') {
+        s.access = { candidate: 'fill', assessor: 'view' };
+      } else if (part.kind === 'practical') {
+        s.access = { candidate: 'view', assessor: 'fill' };
+        const v = partHints[part.key]?.verdict;
+        if (v && byId.has(v)) src[v] = 'auto';
+        else warnings.push(`${part.key}: no verdict radio declared — the assessor picks the verdict by hand.`);
+      }
+      if (Object.keys(src).length) s.fieldSource = src;
+      if (Object.keys(acc).length) s.fieldAccess = acc;
+    }
+    // Everything before the first anchor — the Candidate Details — plus the
+    // prerequisite box, which `fieldsInPart` deliberately keeps out of every
+    // part: prefilled or export-written, read-only for everyone.
+    const firstAnchor = Math.min(...parts.map((p) => indexOfId.get(p.startFieldId) ?? Infinity));
+    const frontIds = fields.slice(0, Number.isFinite(firstAnchor) ? firstAnchor : 0).filter((f) => f.type !== 'section_header').map((f) => f.id);
+    for (const c of prerequisiteChecks) if (!frontIds.includes(c.fieldId)) frontIds.push(c.fieldId);
+    if (frontIds.length) {
+      for (const s of wf.sections) s.ordinal += 1;
+      const src = {};
+      for (const id of frontIds) src[id] = profilePrefill[id] ? 'prefill' : 'auto';
+      wf.sections.unshift({ key: 'front', ordinal: 1, label: 'Candidate Details', fieldIds: frontIds, access: { candidate: 'view', assessor: 'view' }, fieldSource: src });
+    }
+    manifest.workflow = wf;
+    const wv = validateWorkflow(wf, manifest, fields);
+    problems.push(...wv.problems.map((p) => `workflow: ${p}`));
+    warnings.push(...wv.warnings.map((w) => `workflow: ${w}`));
+    console.log(`\nWorkflow: ${wf.sections.length} section(s) — ` + wf.sections.map((s) => `${s.label} [c:${s.access.candidate ?? 'hidden'} a:${s.access.assessor ?? 'hidden'}]`).join(' · '));
+  }
+
   // ── validate exactly as the API would ───────────────────────────────────
   problems.push(...validateManifest(manifest, fields));
   problems.push(...validateAnswerKeys(fields));
 
   const claimedOutcomes = new Set(paired.map((p) => p.outcome.id));
   const orphanOutcomes = fields.filter((f) => f.type === 'check_cross' && !claimedOutcomes.has(f.id) && !claimed.has(f.id) &&
-    ![overallField, coachYesField, coachNoField, licenceBoxField].some((x) => x && x.id === f.id));
+    ![overallField, overallNoField, coachYesField, coachNoField, licenceBoxField].some((x) => x && x.id === f.id));
   if (orphanOutcomes.length) {
-    warnings.push(
-      `${orphanOutcomes.length} printed ✓/✗ box(es) belong to no keyed question: ` +
-        orphanOutcomes.map((f) => `${f.id} "${(f.label ?? '').slice(0, 40)}"`).join(', ') +
-        '. On this paper those are usually the practical checklist cells — fine — but a theory box here means a question failed to pair.',
-    );
+    const practical = orphanOutcomes.filter((f) => parts.some((p) => p.kind === 'practical' && indexOfId.get(f.id) > indexOfId.get(p.startFieldId)));
+    const rest = orphanOutcomes.filter((f) => !practical.includes(f));
+    if (rest.length) {
+      warnings.push(
+        `${rest.length} printed ✓/✗ box(es) belong to no keyed question: ` +
+          rest.map((f) => `${f.id} "${(f.label ?? '').slice(0, 40)}"`).join(', ') +
+          '. A theory box here means a question failed to pair.',
+      );
+    }
+    if (practical.length) console.log(`Practical checklist criteria (✓/✗ boxes the assessor ticks): ${practical.length}`);
   }
 
   // ── deck questions ─────────────────────────────────────────────────────
@@ -715,19 +957,21 @@ async function main() {
   }
 
   /*
-     RECONCILE THE DECK. docs/courses/bbm-small-loader-manual/deck.json is
-     authored BEFORE the PDF is imported, so its graded cards carry placeholder
-     ids (sl-q1…) and letter values (a, b…). --deck <deck-dir> rewrites every
-     card from the pairing above — the REAL field id, and option `val`s that are
-     the real option strings the answerKey matches — joined on the question
-     NUMBER printed on the paper. Rebuild the package afterwards (build_deck.py)
-     and upload THAT zip: a deck with placeholder ids grades nothing. Written on
-     a dry run too — it is a source file, not the database.
+     RECONCILE THE DECK. docs/courses/bbm-small-loader-manual/deck.json carries
+     each graded card's field id and option values. The committed deck already
+     matches the seeded template (same ids, same option strings), so --deck is
+     a no-op there; against an imported template it rewrites every card from
+     the pairing above — the REAL field id, and option `val`s that are the real
+     option strings the answerKey matches — joined on the question NUMBER
+     printed on the paper. Rebuild the package afterwards (build_deck.py) and
+     upload THAT zip. Written on a dry run too — it is a source file, not the
+     database.
   */
   const DECK_DIR = flag('--deck');
   if (DECK_DIR && deckQuestions.length) {
     const deckPath = join(DECK_DIR, 'deck.json');
     const deck = JSON.parse(readFileSync(deckPath, 'utf-8'));
+    const before = JSON.stringify(deck);
     const byNumber = new Map(deckQuestions.map((q) => [q.number, q]));
     const seen = new Set();
     const unmatched = [];
@@ -760,8 +1004,12 @@ async function main() {
     if (missing.length) {
       warnings.push(`Keyed questions with no deck card: ${missing.join(', ')} — the deck never asks them; the candidate answers them on the case instead.`);
     }
-    writeFileSync(deckPath, JSON.stringify(deck, null, 2) + '\n');
-    console.log(`Deck reconciled → ${deckPath}  [${rewritten} card(s) now carry real field ids and values — rebuild the package]`);
+    if (JSON.stringify(deck) === before) {
+      console.log(`Deck already matches the template → ${deckPath}  [${rewritten} card(s) checked, nothing to rewrite]`);
+    } else {
+      writeFileSync(deckPath, JSON.stringify(deck, null, 2) + '\n');
+      console.log(`Deck reconciled → ${deckPath}  [${rewritten} card(s) now carry real field ids and values — rebuild the package]`);
+    }
   }
 
   // ── report ──────────────────────────────────────────────────────────────
@@ -780,12 +1028,43 @@ async function main() {
     for (const p of problems) console.log(`  ✗ ${p}`);
     process.exit(2);
   }
+  if (OFFLINE) {
+    console.log('\nOffline validation complete: the seeded template, its answer keys, manifest and workflow all pass the API\'s validators.');
+    return;
+  }
   if (!WRITE) {
-    console.log('\nDry run complete. Re-run with --write to persist.');
+    console.log(
+      SEED
+        ? `\nDry run complete. Re-run with --write to upload the PDF, create "${template.name}" (published v1) and persist the tool.`
+        : '\nDry run complete. Re-run with --write to persist.',
+    );
     return;
   }
 
   // ── persist ─────────────────────────────────────────────────────────────
+  if (SEED) {
+    let assetId = flag('--asset-id');
+    if (assetId) {
+      console.log(`\nUsing the PDF already stored as ${assetId}`);
+    } else {
+      assetId = await uploadPdf(template.org_id, pdfPath);
+      console.log(`\nUploaded the blank PDF as ${assetId}`);
+    }
+    const [t] = await sql`
+      insert into form_templates (org_id, name, source_type, status)
+      values (${template.org_id}, ${template.name}, 'pdf_import', 'published')
+      returning id
+    `;
+    const [v] = await sql`
+      insert into form_template_versions (template_id, version_label, state, fields, source_pdf_asset_id, published_at, published_by)
+      values (${t.id}, 'v1', 'published', ${sql.json(fields)}, ${assetId}, now(), ${flag('--published-by') ?? null})
+      returning id
+    `;
+    await sql`update form_templates set current_version_id = ${v.id}, updated_at = now() where id = ${t.id}`;
+    template.id = t.id;
+    version.id = v.id;
+    console.log(`Created template ${t.id} with published version ${v.id}`);
+  }
   await sql`update form_template_versions set fields = ${sql.json(fields)} where id = ${version.id}`;
   await sql`
     insert into assessment_tools (org_id, template_id, name, manifest, candidate_prerequisite_ids, assessor_competency_ids, assessor_stream_competency_ids, awarded_competency_ids)
@@ -808,4 +1087,4 @@ main()
     console.error(err);
     process.exitCode = 1;
   })
-  .finally(() => sql.end());
+  .finally(() => sql?.end());

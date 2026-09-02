@@ -1,0 +1,8752 @@
+{
+ "name": "Authorised to Operate Small Loader",
+ "pdf": "small-loader.blank.pdf",
+ "pages": [
+  {
+   "index": 0,
+   "width": 595.0,
+   "height": 842.0
+  },
+  {
+   "index": 1,
+   "width": 595.0,
+   "height": 842.0
+  },
+  {
+   "index": 2,
+   "width": 595.0,
+   "height": 842.0
+  },
+  {
+   "index": 3,
+   "width": 595.0,
+   "height": 842.0
+  },
+  {
+   "index": 4,
+   "width": 595.0,
+   "height": 842.0
+  },
+  {
+   "index": 5,
+   "width": 595.0,
+   "height": 842.0
+  },
+  {
+   "index": 6,
+   "width": 842.0,
+   "height": 595.0
+  },
+  {
+   "index": 7,
+   "width": 595.0,
+   "height": 842.0
+  },
+  {
+   "index": 8,
+   "width": 595.0,
+   "height": 842.0
+  },
+  {
+   "index": 9,
+   "width": 842.0,
+   "height": 595.0
+  },
+  {
+   "index": 10,
+   "width": 595.0,
+   "height": 842.0
+  },
+  {
+   "index": 11,
+   "width": 595.0,
+   "height": 842.0
+  },
+  {
+   "index": 12,
+   "width": 595.0,
+   "height": 842.0
+  }
+ ],
+ "hints": {
+  "candidateName": "sl-candidate-name",
+  "companyName": "sl-company-name",
+  "swipeCard": "sl-swipe-card",
+  "candidateSignature": "sl-candidate-signature",
+  "declarationAnchor": "sl-candidate-declaration",
+  "assessorSignature": "sl-assessor-signature",
+  "assessorName": "sl-assessor-name",
+  "signedDate": "sl-assessor-date",
+  "overallSatisfactory": "sl-competent",
+  "overallNotSatisfactory": "sl-not-competent",
+  "coachingYes": "sl-coaching-yes",
+  "coachingNo": "sl-coaching-no",
+  "licenceBox": "sl-licence-box",
+  "categoryBox": "sl-category-box",
+  "methodsTable": "sl-methods",
+  "assessorComments": "sl-assessor-comments",
+  "furtherAction": "sl-further-action",
+  "parts": {
+   "p1-theory": {
+    "outcomeSatisfactory": "sl-part1-satisfactory",
+    "outcomeNotSatisfactory": "sl-part1-not-satisfactory"
+   },
+   "p2-practical": {
+    "verdict": "sl-p2-verdict",
+    "assessorName": "sl-p2-assessor-name",
+    "signedDate": "sl-p2-date",
+    "assessorSignature": "sl-p2-assessor-signature"
+   },
+   "p4-practical": {
+    "verdict": "sl-p4-verdict",
+    "assessorName": "sl-p4-assessor-name",
+    "signedDate": "sl-p4-date",
+    "assessorSignature": "sl-p4-assessor-signature"
+   },
+   "p6-practical": {
+    "verdict": "sl-p6-verdict",
+    "assessorName": "sl-p6-assessor-name",
+    "signedDate": "sl-p6-date",
+    "assessorSignature": "sl-p6-assessor-signature"
+   }
+  }
+ },
+ "fields": [
+  {
+   "id": "sl-candidate-details",
+   "type": "section_header",
+   "label": "Candidate Details",
+   "required": false,
+   "source": "imported"
+  },
+  {
+   "id": "sl-candidate-name",
+   "type": "text",
+   "label": "Candidate’s Name",
+   "required": true,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 41.5,
+      "y": 674.2,
+      "width": 191.7,
+      "height": 24.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-company-name",
+   "type": "text",
+   "label": "Candidate’s Company Name",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 233.2,
+      "y": 674.2,
+      "width": 162.9,
+      "height": 24.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-swipe-card",
+   "type": "text",
+   "label": "Employee Swipe card Number",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 396.1,
+      "y": 674.2,
+      "width": 179.4,
+      "height": 24.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-candidate-declaration",
+   "type": "section_header",
+   "label": "Candidate Declaration",
+   "required": false,
+   "source": "imported",
+   "description": "The assessment process undertaken with this exercise was explained to me in advance and I agree that I am ready to undertake this assessment."
+  },
+  {
+   "id": "sl-candidate-signature",
+   "type": "signature",
+   "label": "Candidate’s Signature",
+   "required": true,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 41.5,
+      "y": 620.2,
+      "width": 191.7,
+      "height": 24.6,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-assessment-summary",
+   "type": "section_header",
+   "label": "Assessment Summary",
+   "required": false,
+   "source": "imported"
+  },
+  {
+   "id": "sl-category-box",
+   "type": "checkbox",
+   "label": "Category of Assessment — Q50073331 ATO Small Loader",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 551.5,
+      "y": 544.2,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-licence-box",
+   "type": "check_cross",
+   "label": "Prerequisites — Q50001782 Driver’s Licence C or higher",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 551.5,
+      "y": 526.2,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-pathway-experienced",
+   "type": "checkbox",
+   "label": "PART 1 and 2: Experienced candidates or Re-assessments",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 551.5,
+      "y": 490.1,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-pathway-new",
+   "type": "checkbox",
+   "label": "PART 1, 2, 3, 4, 5 and 6: New and inexperienced candidates",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 551.5,
+      "y": 472.1,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-methods",
+   "type": "repeating_group",
+   "label": "Assessment Methods — methods used to assess competence",
+   "required": false,
+   "source": "imported",
+   "columns": [
+    {
+     "key": "method",
+     "label": "Method",
+     "type": "text"
+    },
+    {
+     "key": "tick",
+     "label": "✓",
+     "type": "checkbox"
+    }
+   ],
+   "fixedRows": [
+    "1. Theory",
+    "2. Practical Demonstration",
+    "3. Direct Observation Log",
+    "4. Minimal Supervision Practical Assessment",
+    "5. Minimal Supervision Log",
+    "6. Final Practical Assessment"
+   ],
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 176.35,
+      "y": 361.1,
+      "width": 389.15,
+      "height": 108.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "columnBands": [
+       {
+        "key": "method",
+        "start": 176.35,
+        "end": 548.5
+       },
+       {
+        "key": "tick",
+        "start": 548.5,
+        "end": 565.5
+       }
+      ],
+      "rowBands": [
+       {
+        "key": "row:0",
+        "start": 451.1,
+        "end": 469.1
+       },
+       {
+        "key": "row:1",
+        "start": 433.1,
+        "end": 451.1
+       },
+       {
+        "key": "row:2",
+        "start": 415.1,
+        "end": 433.1
+       },
+       {
+        "key": "row:3",
+        "start": 397.1,
+        "end": 415.1
+       },
+       {
+        "key": "row:4",
+        "start": 379.1,
+        "end": 397.1
+       },
+       {
+        "key": "row:5",
+        "start": 361.1,
+        "end": 379.1
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-assessor-comments",
+   "type": "textarea",
+   "label": "Assessor’s comments on performance and feedback to the Candidate",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 176.3,
+      "y": 315.5,
+      "width": 399.2,
+      "height": 30.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-coaching-no",
+   "type": "checkbox",
+   "label": "More coaching and/or training required? — No",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 398.7,
+      "y": 304.1,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-coaching-yes",
+   "type": "checkbox",
+   "label": "More coaching and/or training required? — Yes",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 442.9,
+      "y": 304.1,
+      "width": 11.1,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-further-action",
+   "type": "textarea",
+   "label": "Detail further action",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 176.3,
+      "y": 270.5,
+      "width": 399.2,
+      "height": 30.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-assessment-result",
+   "type": "section_header",
+   "label": "Assessment Result",
+   "required": false,
+   "source": "imported",
+   "description": "The Candidate’s overall performance meets the requirements of the assessment method listed above? Sufficient performance evidence was made available during the assessment to satisfy evidence requirement of the outcome?"
+  },
+  {
+   "id": "sl-not-competent",
+   "type": "checkbox",
+   "label": "Candidate not yet Competent",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 351.4,
+      "y": 215.1,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-competent",
+   "type": "checkbox",
+   "label": "Candidate Competent",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 555.0,
+      "y": 215.1,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-assessor-name",
+   "type": "text",
+   "label": "Name of Assessor [Print]",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 176.3,
+      "y": 166.8,
+      "width": 163.1,
+      "height": 23.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-assessor-signature",
+   "type": "signature",
+   "label": "Assessor Signature",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 339.4,
+      "y": 166.8,
+      "width": 148.8,
+      "height": 23.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-assessor-date",
+   "type": "date",
+   "label": "Date",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 0,
+      "x": 488.2,
+      "y": 166.8,
+      "width": 87.3,
+      "height": 23.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-part1",
+   "type": "section_header",
+   "label": "PART 1 - THEORY",
+   "required": false,
+   "source": "imported",
+   "description": "Written or Verbal Questions — the Candidate should answer the following questions to indicate underpinning knowledge."
+  },
+  {
+   "id": "sl-q1",
+   "type": "radio",
+   "label": "1. The loader must be isolated with a hasp and personnel lock attached prior to entering the footprint of the machine.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q1-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 601.3,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 584.8,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q1-outcome",
+   "type": "check_cross",
+   "label": "Q1 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 544.2,
+      "y": 622.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q2",
+   "type": "radio",
+   "label": "2. 3 points of contact is the safest way to access and egress the loader.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q2-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 548.8,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 532.3,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q2-outcome",
+   "type": "check_cross",
+   "label": "Q2 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 544.2,
+      "y": 566.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q3",
+   "type": "radio",
+   "label": "3. What is the purpose of performing a walk around pre-start inspection of the loader prior to operating.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) Inspect for damage",
+    "b) Identify any faults with the loader",
+    "c) Ensure that the loader is safe to operate",
+    "d) All the above"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q3-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 496.0,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) Inspect for damage",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 479.8,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) Identify any faults with the loader",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 463.5,
+      "width": 12.5,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "c) Ensure that the loader is safe to operate",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 447.0,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "d) All the above",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q3-outcome",
+   "type": "check_cross",
+   "label": "Q3 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 544.2,
+      "y": 514.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q4",
+   "type": "radio",
+   "label": "4. What action would you take if there was an “Out of Service Tag” on the loader’s isolation switch.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) Ignore the tag and operate the loader",
+    "b) Remove the tag so you can operate the loader",
+    "c) Do not operate the loader and report the tag to pit control"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q4-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 410.7,
+      "width": 13.0,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) Ignore the tag and operate the loader",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 394.5,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) Remove the tag so you can operate the loader",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 378.2,
+      "width": 12.5,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "c) Do not operate the loader and report the tag to pit control",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q4-outcome",
+   "type": "check_cross",
+   "label": "Q4 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 544.2,
+      "y": 429.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q5",
+   "type": "radio",
+   "label": "5. All working equipment at BBM is subject to a 40-metre exclusion zone.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q5-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 342.0,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 325.5,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q5-outcome",
+   "type": "check_cross",
+   "label": "Q5 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 544.2,
+      "y": 360.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q6",
+   "type": "radio",
+   "label": "6. The hydraulic oil, transmission fluid and coolant level on the loader can be checked by sight glass.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q6-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 289.5,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 272.9,
+      "width": 13.0,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q6-outcome",
+   "type": "check_cross",
+   "label": "Q6 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 544.2,
+      "y": 307.6,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q7",
+   "type": "radio",
+   "label": "7. When travelling the loader, you should only use the service brake to control the loaders speed.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q7-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 236.7,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 220.4,
+      "width": 13.0,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q7-outcome",
+   "type": "check_cross",
+   "label": "Q7 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 544.2,
+      "y": 255.1,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q8",
+   "type": "radio",
+   "label": "8. The window on the right-hand side of the cab can be used as an emergency exit point if required.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q8-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 184.2,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 167.9,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q8-outcome",
+   "type": "check_cross",
+   "label": "Q8 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 544.2,
+      "y": 202.6,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q9",
+   "type": "radio",
+   "label": "9. Prior to performing a hopper clean-up, what process would you follow.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) Complete a Risk assessment (RAP)",
+    "b) Authorisation gained from the duty production supervisor",
+    "c) Communication with crusher control to have the orange light activated",
+    "d) Notify pit control and a general broadcast put out to all haul truck operators, notifying them of the clean-up",
+    "e) All of the above"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q9-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 131.7,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) Complete a Risk assessment (RAP)",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 115.4,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) Authorisation gained from the duty production supervisor",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 98.9,
+      "width": 12.5,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "c) Communication with crusher control to have the orange light activated",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 82.6,
+      "width": 13.0,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "d) Notify pit control and a general broadcast put out to all haul truck operators, notifying them of the clean-up",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 2,
+      "x": 67.3,
+      "y": 66.1,
+      "width": 13.0,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "e) All of the above",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q9-outcome",
+   "type": "check_cross",
+   "label": "Q9 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 2,
+      "x": 544.2,
+      "y": 149.8,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q10",
+   "type": "radio",
+   "label": "10. Testing the park brake and service brake on the loader is completed in 3rd gear forward at 1700rpm.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q10-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 696.8,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 680.3,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q10-outcome",
+   "type": "check_cross",
+   "label": "Q10 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 544.2,
+      "y": 715.0,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q11",
+   "type": "radio",
+   "label": "11. When loading the bucket with material, you should only operate the loader in 1st gear.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q11-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 644.1,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 627.8,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q11-outcome",
+   "type": "check_cross",
+   "label": "Q11 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 544.2,
+      "y": 662.5,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q12",
+   "type": "radio",
+   "label": "12. Brake checks should be performed at the start of every shift, prior to leaving the park-up.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q12-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 591.5,
+      "width": 13.0,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 575.3,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q12-outcome",
+   "type": "check_cross",
+   "label": "Q12 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 544.2,
+      "y": 609.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q13",
+   "type": "radio",
+   "label": "13. What action would you take if the engine oil warning light stayed illuminated once the engine has started:",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) Shut the engine off",
+    "b) Report the fault to pit control",
+    "c) Tag the loader “out of service”",
+    "d) All of the above"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q13-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 539.0,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) Shut the engine off",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 522.8,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) Report the fault to pit control",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 506.3,
+      "width": 12.5,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "c) Tag the loader “out of service”",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 490.0,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "d) All of the above",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q13-outcome",
+   "type": "check_cross",
+   "label": "Q13 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 544.2,
+      "y": 557.2,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q14",
+   "type": "radio",
+   "label": "14. Failure to check that the quick hitch locking pins are fully inserted, could result in the bucket attachment coming off.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q14-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 453.7,
+      "width": 13.0,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 437.5,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q14-outcome",
+   "type": "check_cross",
+   "label": "Q14 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 544.2,
+      "y": 471.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q15",
+   "type": "radio",
+   "label": "15. The secondary steering system on the loader is battery operated",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) True",
+    "b) False"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q15-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 401.2,
+      "width": 13.0,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) True",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 384.7,
+      "width": 13.0,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) False",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q15-outcome",
+   "type": "check_cross",
+   "label": "Q15 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 544.2,
+      "y": 422.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q16",
+   "type": "radio",
+   "label": "16. If a fire was detected on the loader that you were operating, what action would you take.",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "a) Stop the loader and ground the bucket",
+    "b) Select neutral and engage the park brake",
+    "c) Activate the fire suppression system",
+    "d) Call the emergency",
+    "e) Evacuate the area",
+    "f) All of the above"
+   ],
+   "outcomeTarget": {
+    "fieldId": "sl-q16-outcome"
+   },
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 348.7,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "a) Stop the loader and ground the bucket",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 332.2,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "b) Select neutral and engage the park brake",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 316.0,
+      "width": 12.5,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "c) Activate the fire suppression system",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 299.5,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "d) Call the emergency",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 283.2,
+      "width": 13.0,
+      "height": 13.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "e) Evacuate the area",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     },
+     {
+      "page": 3,
+      "x": 67.3,
+      "y": 266.9,
+      "width": 10.5,
+      "height": 13.1,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "f) All of the above",
+      "markStyle": {
+       "glyph": "ring"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-q16-outcome",
+   "type": "check_cross",
+   "label": "Q16 ✓/✗",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 544.2,
+      "y": 366.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-part1-satisfactory",
+   "type": "checkbox",
+   "label": "PART 1 - The Candidate’s responses were: Satisfactory",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 331.4,
+      "y": 246.6,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-part1-not-satisfactory",
+   "type": "checkbox",
+   "label": "PART 1 - The Candidate’s responses were: Not Satisfactory",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 3,
+      "x": 452.0,
+      "y": 246.6,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-part2",
+   "type": "section_header",
+   "label": "PART 2 – PRACTICAL DEMONSTRATION",
+   "required": false,
+   "source": "imported",
+   "description": "Materials Required: Small Loader"
+  },
+  {
+   "id": "sl-p2-s1",
+   "type": "section_header",
+   "label": "1. Plan and prepare",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p2-s1-r0",
+   "type": "check_cross",
+   "label": "Clarifies work instructions with the duty supervisor",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 637.2,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s1-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 637.2,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s1-r1",
+   "type": "check_cross",
+   "label": "Complete a risk assessment (RAP)",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 620.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s1-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 620.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s1-r2",
+   "type": "check_cross",
+   "label": "Identify and report any potential hazards",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 603.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s1-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 603.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s1-r3",
+   "type": "check_cross",
+   "label": "Wear the correct PPE",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 586.7,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s1-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 586.7,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2",
+   "type": "section_header",
+   "label": "2. Equipment Pre-Operational Checks",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p2-s2-r0",
+   "type": "check_cross",
+   "label": "Isolate the loader correctly using hasp and personnel lock",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 534.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 534.9,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r1",
+   "type": "check_cross",
+   "label": "Conduct a try test prior to entering the footprint of the loader",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 518.2,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 518.2,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r2",
+   "type": "check_cross",
+   "label": "Maintain three (3) point contact when accessing/egressing the loader",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 501.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 501.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r3",
+   "type": "check_cross",
+   "label": "Identify & visually check external components at ground level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 484.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 484.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r4",
+   "type": "check_cross",
+   "label": "Identify & visually check in cab components and gauges",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 467.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 467.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r5",
+   "type": "check_cross",
+   "label": "Check fire suppression system and fire extinguisher for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 450.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r5-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 450.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r6",
+   "type": "check_cross",
+   "label": "Check steps and handrails for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 433.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r6-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 433.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r7",
+   "type": "check_cross",
+   "label": "Check steering components for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 416.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r7-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 416.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r8",
+   "type": "check_cross",
+   "label": "Check hydraulic and transmission oil sight glass for level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 400.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r8-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 400.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r9",
+   "type": "check_cross",
+   "label": "Check grease lines and that sufficient grease is getting to steering knuckles",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 383.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r9-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 383.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r10",
+   "type": "check_cross",
+   "label": "Check tyres, rims and wheel studs",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 366.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r10-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 366.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r11",
+   "type": "check_cross",
+   "label": "Check under the machine for fluid leaks",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 349.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r11-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 349.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r12",
+   "type": "check_cross",
+   "label": "Check engine oil level on dip stick",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 332.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r12-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 332.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r13",
+   "type": "check_cross",
+   "label": "Check coolant level sight glass",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 315.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r13-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 315.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r14",
+   "type": "check_cross",
+   "label": "Check windows and mirrors for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 298.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r14-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 298.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r15",
+   "type": "check_cross",
+   "label": "Check work lights",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 282.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r15-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 282.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r16",
+   "type": "check_cross",
+   "label": "Check seat and seatbelt condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 265.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r16-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 265.3,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r17",
+   "type": "check_cross",
+   "label": "Complete a pre-start checklist and defect report",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 248.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s2-r17-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 248.3,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s3",
+   "type": "section_header",
+   "label": "3. Start Up Procedure",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p2-s3-r0",
+   "type": "check_cross",
+   "label": "Check that the park brake is engaged",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 196.5,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s3-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 196.5,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s3-r1",
+   "type": "check_cross",
+   "label": "Check transmission is in neutral",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 179.8,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s3-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 179.8,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s3-r2",
+   "type": "check_cross",
+   "label": "Adjust seat correctly and apply seat belt",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 163.3,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s3-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 163.3,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s3-r3",
+   "type": "check_cross",
+   "label": "Turn ignition key to the on position and visually observe monitoring system perform a self-test",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 146.8,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s3-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 146.8,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s3-r4",
+   "type": "check_cross",
+   "label": "Sound the horn once and wait 3-5 seconds prior to starting the engine",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 508.2,
+      "y": 130.0,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s3-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 4,
+      "x": 544.0,
+      "y": 130.0,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4",
+   "type": "section_header",
+   "label": "4. Safe Operation of the Equipment (General)",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p2-s4-r0",
+   "type": "check_cross",
+   "label": "Sound the horn twice and wait 3-5 seconds prior to moving the loader",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 667.5,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 667.5,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r1",
+   "type": "check_cross",
+   "label": "Stop machine during transmission directional changes",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 650.7,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 650.7,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r2",
+   "type": "check_cross",
+   "label": "Use controlled and smooth braking applications",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 633.7,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 633.7,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r3",
+   "type": "check_cross",
+   "label": "Follow the 40m procedure while working around other equipment",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 616.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 616.9,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r4",
+   "type": "check_cross",
+   "label": "Manoeuvre the loader safely and demonstrate general awareness",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 599.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 599.9,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r5",
+   "type": "check_cross",
+   "label": "Demonstrate good knowledge of main road networks",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 583.2,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r5-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 583.2,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r6",
+   "type": "check_cross",
+   "label": "Obey all road signage",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 566.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r6-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 566.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r7",
+   "type": "check_cross",
+   "label": "Follow correct separation distances",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 549.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r7-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 549.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r8",
+   "type": "check_cross",
+   "label": "Use correct two-way protocols",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 532.7,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r8-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 532.7,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r9",
+   "type": "check_cross",
+   "label": "Demonstrate/explain correct overtaking procedures",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 515.7,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r9-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 515.7,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r10",
+   "type": "check_cross",
+   "label": "Shut the loader down prior to exiting cab to ground level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 498.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r10-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 498.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r11",
+   "type": "check_cross",
+   "label": "Demonstrate/explain emergency procedure",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 482.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s4-r11-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 482.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s5",
+   "type": "section_header",
+   "label": "5. Safe Operation of the Equipment (Mine only)",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p2-s5-r0",
+   "type": "check_cross",
+   "label": "Display effective clean-up of spillage",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 430.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s5-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 430.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s5-r1",
+   "type": "check_cross",
+   "label": "Demonstrate/explain requirements for hopper clean up",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 413.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s5-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 413.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s5-r2",
+   "type": "check_cross",
+   "label": "Demonstrate good knowledge of main road networks",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 396.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s5-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 396.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s5-r3",
+   "type": "check_cross",
+   "label": "Follow/explain the correct procedure for clean-up (40-metre exclusion and positive radio communication)",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 379.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s5-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 379.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6",
+   "type": "section_header",
+   "label": "6. Parking and Shutdown Procedures",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p2-s6-r0",
+   "type": "check_cross",
+   "label": "Identify relevant parking location",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 328.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 328.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r1",
+   "type": "check_cross",
+   "label": "Ground GET and apply park brake when parking in the field and at designated parking areas",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 311.1,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 311.1,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r2",
+   "type": "check_cross",
+   "label": "Allow the engine time to idle down",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 294.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 294.3,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r3",
+   "type": "check_cross",
+   "label": "Ensure that the cab, windows and mirrors are clean",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 277.6,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 277.6,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r4",
+   "type": "check_cross",
+   "label": "Complete the checklist and defect report",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 260.6,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 260.6,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r5",
+   "type": "check_cross",
+   "label": "Leave cab doors and windows closed",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 243.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r5-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 243.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r6",
+   "type": "check_cross",
+   "label": "Ensure that the engine is shut down completely before descending to ground level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 226.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r6-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 226.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r7",
+   "type": "check_cross",
+   "label": "Complete a post operational walk around inspection",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 508.2,
+      "y": 210.1,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-s6-r7-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 544.0,
+      "y": 210.1,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-assessment",
+   "type": "section_header",
+   "label": "Part 2 Assessment",
+   "required": false,
+   "source": "imported",
+   "description": "The candidate’s overall performance meets the requirements of the assessment method listed above. Sufficient performance evidence was made available during the assessment to satisfy evidence requirement of the outcome."
+  },
+  {
+   "id": "sl-p2-verdict",
+   "type": "radio",
+   "label": "Part 2 Assessment — the candidate’s overall performance",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "Candidate not yet Competent",
+    "Candidate Competent"
+   ],
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 330.1,
+      "y": 137.8,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "Candidate not yet Competent"
+     },
+     {
+      "page": 5,
+      "x": 546.2,
+      "y": 137.8,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "Candidate Competent"
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-assessor-name",
+   "type": "text",
+   "label": "Name of Assessor [Print]",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 169.1,
+      "y": 93.0,
+      "width": 155.5,
+      "height": 23.2,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-assessor-signature",
+   "type": "signature",
+   "label": "Assessor Signature",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 324.6,
+      "y": 93.0,
+      "width": 156.2,
+      "height": 23.2,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p2-date",
+   "type": "date",
+   "label": "Date",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 5,
+      "x": 480.8,
+      "y": 93.0,
+      "width": 86.2,
+      "height": 23.2,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-part3",
+   "type": "section_header",
+   "label": "PART 3 - DIRECT OBSERVATION LOG",
+   "required": false,
+   "source": "imported",
+   "description": "New or inexperienced candidates will be required to complete a minimum of 10hrs directly supervised before assessment for Minimal Supervision can take place."
+  },
+  {
+   "id": "sl-p3-log",
+   "type": "repeating_group",
+   "label": "PART 3 - DIRECT OBSERVATION LOG",
+   "required": false,
+   "source": "imported",
+   "columns": [
+    {
+     "key": "date",
+     "label": "Date",
+     "type": "date",
+     "autoStamp": true
+    },
+    {
+     "key": "task",
+     "label": "Task",
+     "type": "text"
+    },
+    {
+     "key": "duration",
+     "label": "Duration",
+     "type": "number"
+    },
+    {
+     "key": "operator_name",
+     "label": "Qualified Operators",
+     "type": "text"
+    },
+    {
+     "key": "operator_signature",
+     "label": "Qualified Operators Signature",
+     "type": "signature"
+    }
+   ],
+   "geometry": {
+    "segments": [
+     {
+      "page": 6,
+      "x": 34.8,
+      "y": 61.5,
+      "width": 772.7,
+      "height": 324.8,
+      "pageWidth": 842.0,
+      "pageHeight": 595.0,
+      "columnBands": [
+       {
+        "key": "date",
+        "start": 34.8,
+        "end": 119.8
+       },
+       {
+        "key": "task",
+        "start": 119.8,
+        "end": 488.4
+       },
+       {
+        "key": "duration",
+        "start": 488.4,
+        "end": 538.1
+       },
+       {
+        "key": "operator_name",
+        "start": 538.1,
+        "end": 644.5
+       },
+       {
+        "key": "operator_signature",
+        "start": 644.5,
+        "end": 807.5
+       }
+      ],
+      "rowBands": [
+       {
+        "key": "r1",
+        "start": 366.2,
+        "end": 386.3
+       },
+       {
+        "key": "r2",
+        "start": 345.8,
+        "end": 366.2
+       },
+       {
+        "key": "r3",
+        "start": 325.6,
+        "end": 345.8
+       },
+       {
+        "key": "r4",
+        "start": 305.1,
+        "end": 325.6
+       },
+       {
+        "key": "r5",
+        "start": 284.9,
+        "end": 305.1
+       },
+       {
+        "key": "r6",
+        "start": 264.6,
+        "end": 284.9
+       },
+       {
+        "key": "r7",
+        "start": 244.4,
+        "end": 264.6
+       },
+       {
+        "key": "r8",
+        "start": 224.1,
+        "end": 244.4
+       },
+       {
+        "key": "r9",
+        "start": 203.6,
+        "end": 224.1
+       },
+       {
+        "key": "r10",
+        "start": 183.4,
+        "end": 203.6
+       },
+       {
+        "key": "r11",
+        "start": 163.1,
+        "end": 183.4
+       },
+       {
+        "key": "r12",
+        "start": 142.8,
+        "end": 163.1
+       },
+       {
+        "key": "r13",
+        "start": 122.6,
+        "end": 142.8
+       },
+       {
+        "key": "r14",
+        "start": 102.1,
+        "end": 122.6
+       },
+       {
+        "key": "r15",
+        "start": 81.8,
+        "end": 102.1
+       },
+       {
+        "key": "r16",
+        "start": 61.5,
+        "end": 81.8
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-part4",
+   "type": "section_header",
+   "label": "PART 4 – MINIMAL SUPERVISION PRACTICAL DEMONSTRATION",
+   "required": false,
+   "source": "imported",
+   "description": "Materials Required: Small Loader"
+  },
+  {
+   "id": "sl-p4-s1",
+   "type": "section_header",
+   "label": "1. Plan and prepare",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p4-s1-r0",
+   "type": "check_cross",
+   "label": "Clarifies work instructions with the duty supervisor",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 630.2,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s1-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 630.2,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s1-r1",
+   "type": "check_cross",
+   "label": "Complete a risk assessment (RAP)",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 613.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s1-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 613.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s1-r2",
+   "type": "check_cross",
+   "label": "Identify and report any potential hazards",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 596.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s1-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 596.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s1-r3",
+   "type": "check_cross",
+   "label": "Wear the correct PPE",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 579.7,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s1-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 579.7,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2",
+   "type": "section_header",
+   "label": "2. Equipment Pre-Operational Checks",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p4-s2-r0",
+   "type": "check_cross",
+   "label": "Isolate the loader correctly using hasp and personnel lock",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 527.9,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 527.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r1",
+   "type": "check_cross",
+   "label": "Conduct a try test prior to entering the footprint of the loader",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 511.2,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 511.2,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r2",
+   "type": "check_cross",
+   "label": "Maintain three (3) point contact when accessing/egressing the loader",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 494.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 494.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r3",
+   "type": "check_cross",
+   "label": "Identify & visually check external components at ground level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 477.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 477.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r4",
+   "type": "check_cross",
+   "label": "Identify & visually check in cab components and gauges",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 460.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 460.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r5",
+   "type": "check_cross",
+   "label": "Check fire suppression system and fire extinguisher for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 443.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r5-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 443.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r6",
+   "type": "check_cross",
+   "label": "Check steps and handrails for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 426.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r6-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 426.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r7",
+   "type": "check_cross",
+   "label": "Check steering components for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 409.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r7-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 409.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r8",
+   "type": "check_cross",
+   "label": "Check hydraulic and transmission oil sight glass for level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 393.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r8-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 393.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r9",
+   "type": "check_cross",
+   "label": "Check grease lines and that sufficient grease is getting to steering knuckles",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 376.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r9-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 376.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r10",
+   "type": "check_cross",
+   "label": "Check tyres, rims and wheel studs",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 359.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r10-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 359.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r11",
+   "type": "check_cross",
+   "label": "Check under the machine for fluid leaks",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 342.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r11-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 342.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r12",
+   "type": "check_cross",
+   "label": "Check engine oil level on dip stick",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 325.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r12-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 325.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r13",
+   "type": "check_cross",
+   "label": "Check coolant level sight glass",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 308.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r13-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 308.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r14",
+   "type": "check_cross",
+   "label": "Check windows and mirrors for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 291.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r14-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 291.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r15",
+   "type": "check_cross",
+   "label": "Check work lights",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 275.1,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r15-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 275.1,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r16",
+   "type": "check_cross",
+   "label": "Check seat and seatbelt condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 258.3,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r16-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 258.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r17",
+   "type": "check_cross",
+   "label": "Complete a pre-start checklist and defect report",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 241.3,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s2-r17-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 241.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s3",
+   "type": "section_header",
+   "label": "3. Start Up Procedure",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p4-s3-r0",
+   "type": "check_cross",
+   "label": "Check that the park brake is engaged",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 189.8,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s3-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 189.8,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s3-r1",
+   "type": "check_cross",
+   "label": "Check transmission is in neutral",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 172.8,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s3-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 172.8,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s3-r2",
+   "type": "check_cross",
+   "label": "Adjust seat correctly and apply seat belt",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 156.3,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s3-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 156.3,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s3-r3",
+   "type": "check_cross",
+   "label": "Turn ignition key to the on position and visually observe monitoring system perform a self-test",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 140.0,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s3-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 140.0,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s3-r4",
+   "type": "check_cross",
+   "label": "Sound the horn once and wait 3-5 seconds prior to starting the engine",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 504.5,
+      "y": 123.0,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s3-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 7,
+      "x": 540.2,
+      "y": 123.0,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4",
+   "type": "section_header",
+   "label": "4. Safe Operation of the Equipment (General)",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p4-s4-r0",
+   "type": "check_cross",
+   "label": "Sound the horn twice and wait 3-5 seconds prior to moving the loader",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 673.2,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 673.2,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r1",
+   "type": "check_cross",
+   "label": "Stop machine during transmission directional changes",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 656.2,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 656.2,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r2",
+   "type": "check_cross",
+   "label": "Use controlled and smooth braking applications",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 639.5,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 639.5,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r3",
+   "type": "check_cross",
+   "label": "Follow the 40m procedure while working around other equipment",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 622.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 622.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r4",
+   "type": "check_cross",
+   "label": "Manoeuvre the loader safely and demonstrate general awareness",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 605.7,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 605.7,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r5",
+   "type": "check_cross",
+   "label": "Demonstrate good knowledge of main road networks",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 588.9,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r5-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 588.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r6",
+   "type": "check_cross",
+   "label": "Obey all haul road signage",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 571.9,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r6-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 571.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r7",
+   "type": "check_cross",
+   "label": "Follow correct separation distances",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 555.2,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r7-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 555.2,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r8",
+   "type": "check_cross",
+   "label": "Use correct two-way protocols",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 538.2,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r8-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 538.2,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r9",
+   "type": "check_cross",
+   "label": "Demonstrate/explain correct overtaking procedures",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 521.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r9-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 521.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r10",
+   "type": "check_cross",
+   "label": "Shut the loader down prior to exiting cab to ground level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 504.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r10-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 504.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r11",
+   "type": "check_cross",
+   "label": "Demonstrate/explain emergency procedure",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 487.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s4-r11-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 487.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s5",
+   "type": "section_header",
+   "label": "5. Safe Operation of the Equipment (Mine only)",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p4-s5-r0",
+   "type": "check_cross",
+   "label": "Display effective clean-up of spillage",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 435.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s5-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 435.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s5-r1",
+   "type": "check_cross",
+   "label": "Demonstrate/explain requirements for hopper clean up",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 419.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s5-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 419.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s5-r2",
+   "type": "check_cross",
+   "label": "Demonstrate good knowledge of main road networks",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 402.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s5-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 402.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s5-r3",
+   "type": "check_cross",
+   "label": "Follow/explain the correct procedure for clean-up (40-metre exclusion and positive radio communication)",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 385.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s5-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 385.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6",
+   "type": "section_header",
+   "label": "6. Parking and Shutdown Procedures",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p4-s6-r0",
+   "type": "check_cross",
+   "label": "Identify relevant parking location",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 333.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 333.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r1",
+   "type": "check_cross",
+   "label": "Ground GET and apply park brake when parking in the field and at designated parking areas",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 316.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 316.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r2",
+   "type": "check_cross",
+   "label": "Allow the engine time to idle down",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 300.1,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 300.1,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r3",
+   "type": "check_cross",
+   "label": "Ensure that the cab, windows and mirrors are clean",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 283.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 283.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r4",
+   "type": "check_cross",
+   "label": "Complete the checklist and defect report",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 266.3,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 266.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r5",
+   "type": "check_cross",
+   "label": "Leave cab doors and windows closed",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 249.3,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r5-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 249.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r6",
+   "type": "check_cross",
+   "label": "Ensure that the engine is shut down completely before descending to ground level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 232.6,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r6-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 232.6,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r7",
+   "type": "check_cross",
+   "label": "Complete a post operational walk around inspection",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 504.5,
+      "y": 215.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-s6-r7-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 540.2,
+      "y": 215.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-assessment",
+   "type": "section_header",
+   "label": "Part 4 Assessment",
+   "required": false,
+   "source": "imported",
+   "description": "The candidate’s overall performance meets the requirements of the assessment method listed above. Sufficient performance evidence was made available during the assessment to satisfy evidence requirement of the outcome."
+  },
+  {
+   "id": "sl-p4-verdict",
+   "type": "radio",
+   "label": "Part 4 Assessment — the candidate’s overall performance",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "Candidate not yet Competent",
+    "Candidate Competent"
+   ],
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 327.4,
+      "y": 143.5,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "Candidate not yet Competent"
+     },
+     {
+      "page": 8,
+      "x": 543.0,
+      "y": 143.5,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "Candidate Competent"
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-assessor-name",
+   "type": "text",
+   "label": "Name of Assessor [Print]",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 166.1,
+      "y": 98.8,
+      "width": 155.8,
+      "height": 23.2,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-assessor-signature",
+   "type": "signature",
+   "label": "Assessor Signature",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 321.9,
+      "y": 98.8,
+      "width": 156.0,
+      "height": 23.2,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p4-date",
+   "type": "date",
+   "label": "Date",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 8,
+      "x": 477.9,
+      "y": 98.8,
+      "width": 85.3,
+      "height": 23.2,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-part5",
+   "type": "section_header",
+   "label": "PART 5 – MINIMAL SUPERVISION LOG",
+   "required": false,
+   "source": "imported",
+   "description": "New or inexperienced candidates will be required to complete a minimum of 20hrs before final practical assessment can take place."
+  },
+  {
+   "id": "sl-p5-log",
+   "type": "repeating_group",
+   "label": "PART 5 – MINIMAL SUPERVISION LOG",
+   "required": false,
+   "source": "imported",
+   "columns": [
+    {
+     "key": "date",
+     "label": "Date",
+     "type": "date",
+     "autoStamp": true
+    },
+    {
+     "key": "location",
+     "label": "Location",
+     "type": "text"
+    },
+    {
+     "key": "task",
+     "label": "Task",
+     "type": "text"
+    },
+    {
+     "key": "duration",
+     "label": "Duration",
+     "type": "number"
+    },
+    {
+     "key": "comments",
+     "label": "Comments",
+     "type": "text"
+    },
+    {
+     "key": "candidate_signature",
+     "label": "Candidate’s Signature",
+     "type": "signature"
+    }
+   ],
+   "geometry": {
+    "segments": [
+     {
+      "page": 9,
+      "x": 34.8,
+      "y": 53.8,
+      "width": 772.7,
+      "height": 345.4,
+      "pageWidth": 842.0,
+      "pageHeight": 595.0,
+      "columnBands": [
+       {
+        "key": "date",
+        "start": 34.8,
+        "end": 96.0
+       },
+       {
+        "key": "location",
+        "start": 96.0,
+        "end": 212.1
+       },
+       {
+        "key": "task",
+        "start": 212.1,
+        "end": 410.6
+       },
+       {
+        "key": "duration",
+        "start": 410.6,
+        "end": 467.1
+       },
+       {
+        "key": "comments",
+        "start": 467.1,
+        "end": 694.2
+       },
+       {
+        "key": "candidate_signature",
+        "start": 694.2,
+        "end": 807.5
+       }
+      ],
+      "rowBands": [
+       {
+        "key": "r1",
+        "start": 378.8,
+        "end": 399.2
+       },
+       {
+        "key": "r2",
+        "start": 358.3,
+        "end": 378.8
+       },
+       {
+        "key": "r3",
+        "start": 338.1,
+        "end": 358.3
+       },
+       {
+        "key": "r4",
+        "start": 317.9,
+        "end": 338.1
+       },
+       {
+        "key": "r5",
+        "start": 297.6,
+        "end": 317.9
+       },
+       {
+        "key": "r6",
+        "start": 277.4,
+        "end": 297.6
+       },
+       {
+        "key": "r7",
+        "start": 256.9,
+        "end": 277.4
+       },
+       {
+        "key": "r8",
+        "start": 236.6,
+        "end": 256.9
+       },
+       {
+        "key": "r9",
+        "start": 216.4,
+        "end": 236.6
+       },
+       {
+        "key": "r10",
+        "start": 196.1,
+        "end": 216.4
+       },
+       {
+        "key": "r11",
+        "start": 175.9,
+        "end": 196.1
+       },
+       {
+        "key": "r12",
+        "start": 155.2,
+        "end": 175.9
+       },
+       {
+        "key": "r13",
+        "start": 135.1,
+        "end": 155.2
+       },
+       {
+        "key": "r14",
+        "start": 114.8,
+        "end": 135.1
+       },
+       {
+        "key": "r15",
+        "start": 94.6,
+        "end": 114.8
+       },
+       {
+        "key": "r16",
+        "start": 74.2,
+        "end": 94.6
+       },
+       {
+        "key": "r17",
+        "start": 53.8,
+        "end": 74.2
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-part6",
+   "type": "section_header",
+   "label": "PART 6 – FINAL PRACTICAL ASSESSMENT",
+   "required": false,
+   "source": "imported",
+   "description": "Materials Required: Small Loader"
+  },
+  {
+   "id": "sl-p6-s1",
+   "type": "section_header",
+   "label": "1. Plan and prepare",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p6-s1-r0",
+   "type": "check_cross",
+   "label": "Clarifies work instructions with the duty supervisor",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 637.2,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s1-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 637.2,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s1-r1",
+   "type": "check_cross",
+   "label": "Complete a risk assessment (RAP)",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 620.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s1-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 620.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s1-r2",
+   "type": "check_cross",
+   "label": "Identify and report any potential hazards",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 603.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s1-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 603.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s1-r3",
+   "type": "check_cross",
+   "label": "Wear the correct PPE",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 586.7,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s1-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 586.7,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2",
+   "type": "section_header",
+   "label": "2. Equipment Pre-Operational Checks",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p6-s2-r0",
+   "type": "check_cross",
+   "label": "Isolate the loader correctly using hasp and personnel lock",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 534.9,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 534.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r1",
+   "type": "check_cross",
+   "label": "Conduct a try test prior to entering the footprint of the loader",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 518.2,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 518.2,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r2",
+   "type": "check_cross",
+   "label": "Maintain three (3) point contact when accessing/egressing the loader",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 501.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 501.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r3",
+   "type": "check_cross",
+   "label": "Identify & visually check external components at ground level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 484.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 484.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r4",
+   "type": "check_cross",
+   "label": "Identify & visually check in cab components and gauges",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 467.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 467.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r5",
+   "type": "check_cross",
+   "label": "Check fire suppression system and fire extinguisher for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 450.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r5-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 450.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r6",
+   "type": "check_cross",
+   "label": "Check steps and handrails for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 433.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r6-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 433.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r7",
+   "type": "check_cross",
+   "label": "Check steering components for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 416.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r7-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 416.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r8",
+   "type": "check_cross",
+   "label": "Check hydraulic and transmission oil sight glass for level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 400.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r8-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 400.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r9",
+   "type": "check_cross",
+   "label": "Check grease lines and that sufficient grease is getting to steering knuckles",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 383.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r9-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 383.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r10",
+   "type": "check_cross",
+   "label": "Check tyres, rims and wheel studs",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 366.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r10-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 366.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r11",
+   "type": "check_cross",
+   "label": "Check under the machine for fluid leaks",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 349.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r11-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 349.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r12",
+   "type": "check_cross",
+   "label": "Check engine oil level on dip stick",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 332.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r12-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 332.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r13",
+   "type": "check_cross",
+   "label": "Check coolant level sight glass",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 315.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r13-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 315.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r14",
+   "type": "check_cross",
+   "label": "Check windows and mirrors for condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 298.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r14-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 298.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r15",
+   "type": "check_cross",
+   "label": "Check work lights",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 282.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r15-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 282.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r16",
+   "type": "check_cross",
+   "label": "Check seat and seatbelt condition",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 265.3,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r16-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 265.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r17",
+   "type": "check_cross",
+   "label": "Complete a pre-start checklist and defect report",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 248.3,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s2-r17-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 248.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s3",
+   "type": "section_header",
+   "label": "3. Start Up Procedure",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p6-s3-r0",
+   "type": "check_cross",
+   "label": "Check that the park brake is engaged",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 196.5,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s3-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 196.5,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s3-r1",
+   "type": "check_cross",
+   "label": "Check transmission is in neutral",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 179.8,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s3-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 179.8,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s3-r2",
+   "type": "check_cross",
+   "label": "Adjust seat correctly and apply seat belt",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 163.3,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s3-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 163.3,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s3-r3",
+   "type": "check_cross",
+   "label": "Turn ignition key to the on position and visually observe monitoring system perform a self-test",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 146.8,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s3-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 146.8,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s3-r4",
+   "type": "check_cross",
+   "label": "Sound the horn once and wait 3-5 seconds prior to starting the engine",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 504.5,
+      "y": 130.0,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s3-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 10,
+      "x": 540.2,
+      "y": 130.0,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4",
+   "type": "section_header",
+   "label": "4. Safe Operation of the Equipment (General)",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p6-s4-r0",
+   "type": "check_cross",
+   "label": "Sound the horn twice and wait 3-5 seconds prior to moving the loader",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 667.5,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 667.5,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r1",
+   "type": "check_cross",
+   "label": "Stop machine during transmission directional changes",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 650.7,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 650.7,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r2",
+   "type": "check_cross",
+   "label": "Use controlled and smooth braking applications",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 633.7,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 633.7,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r3",
+   "type": "check_cross",
+   "label": "Follow the 40m procedure while working around other equipment",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 616.9,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 616.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r4",
+   "type": "check_cross",
+   "label": "Manoeuvre the loader safely and demonstrate general awareness",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 599.9,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 599.9,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r5",
+   "type": "check_cross",
+   "label": "Demonstrate good knowledge of main road networks",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 583.2,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r5-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 583.2,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r6",
+   "type": "check_cross",
+   "label": "Obey all haul road signage",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 566.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r6-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 566.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r7",
+   "type": "check_cross",
+   "label": "Follow correct separation distances",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 549.4,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r7-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 549.4,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r8",
+   "type": "check_cross",
+   "label": "Use correct two-way protocols",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 532.7,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r8-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 532.7,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r9",
+   "type": "check_cross",
+   "label": "Demonstrate/explain correct overtaking procedures",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 515.7,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r9-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 515.7,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r10",
+   "type": "check_cross",
+   "label": "Shut the loader down prior to exiting cab to ground level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 498.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r10-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 498.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r11",
+   "type": "check_cross",
+   "label": "Demonstrate/explain emergency procedure",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 482.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s4-r11-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 482.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s5",
+   "type": "section_header",
+   "label": "5. Safe Operation of the Equipment (Mine only)",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p6-s5-r0",
+   "type": "check_cross",
+   "label": "Display effective clean-up of spillage",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 430.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s5-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 430.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s5-r1",
+   "type": "check_cross",
+   "label": "Demonstrate/explain requirements for hopper clean up",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 413.4,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s5-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 413.4,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s5-r2",
+   "type": "check_cross",
+   "label": "Demonstrate good knowledge of main road networks",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 396.6,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s5-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 396.6,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s5-r3",
+   "type": "check_cross",
+   "label": "Follow/explain the correct procedure for clean-up (40-metre exclusion and positive radio communication)",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 379.9,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s5-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 379.9,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6",
+   "type": "section_header",
+   "label": "6. Parking and Shutdown Procedures",
+   "required": false,
+   "source": "imported",
+   "description": "During the demonstration, did the Candidate:"
+  },
+  {
+   "id": "sl-p6-s6-r0",
+   "type": "check_cross",
+   "label": "Identify relevant parking location",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 328.1,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r0-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 328.1,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r1",
+   "type": "check_cross",
+   "label": "Ground GET and apply park brake when parking in the field and at designated parking areas",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 311.1,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r1-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 311.1,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r2",
+   "type": "check_cross",
+   "label": "Allow the engine time to idle down",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 294.3,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r2-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 294.3,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r3",
+   "type": "check_cross",
+   "label": "Ensure that the cab, windows and mirrors are clean",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 277.6,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r3-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 277.6,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r4",
+   "type": "check_cross",
+   "label": "Complete the checklist and defect report",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 260.6,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r4-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 260.6,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r5",
+   "type": "check_cross",
+   "label": "Leave cab doors and windows closed",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 243.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r5-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 243.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r6",
+   "type": "check_cross",
+   "label": "Ensure that the engine is shut down completely before descending to ground level",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 226.8,
+      "width": 9.7,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r6-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 226.8,
+      "width": 9.8,
+      "height": 9.8,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r7",
+   "type": "check_cross",
+   "label": "Complete a post operational walk around inspection",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 504.5,
+      "y": 210.1,
+      "width": 9.7,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-s6-r7-na",
+   "type": "checkbox",
+   "label": "N/A",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 540.2,
+      "y": 210.1,
+      "width": 9.8,
+      "height": 9.7,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-assessment",
+   "type": "section_header",
+   "label": "Part 6 Assessment",
+   "required": false,
+   "source": "imported",
+   "description": "The candidate’s overall performance meets the requirements of the assessment method listed above. Sufficient performance evidence was made available during the assessment to satisfy evidence requirement of the outcome."
+  },
+  {
+   "id": "sl-p6-verdict",
+   "type": "radio",
+   "label": "Part 6 Assessment — the candidate’s overall performance",
+   "required": false,
+   "source": "imported",
+   "options": [
+    "Candidate not yet Competent",
+    "Candidate Competent"
+   ],
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 327.4,
+      "y": 137.8,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "Candidate not yet Competent"
+     },
+     {
+      "page": 11,
+      "x": 543.0,
+      "y": 137.8,
+      "width": 11.0,
+      "height": 11.0,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0,
+      "optionKey": "Candidate Competent"
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-assessor-name",
+   "type": "text",
+   "label": "Name of Assessor [Print]",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 166.1,
+      "y": 93.0,
+      "width": 155.8,
+      "height": 23.2,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-assessor-signature",
+   "type": "signature",
+   "label": "Assessor Signature",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 321.9,
+      "y": 93.0,
+      "width": 156.0,
+      "height": 23.2,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  },
+  {
+   "id": "sl-p6-date",
+   "type": "date",
+   "label": "Date",
+   "required": false,
+   "source": "imported",
+   "geometry": {
+    "segments": [
+     {
+      "page": 11,
+      "x": 477.9,
+      "y": 93.0,
+      "width": 85.3,
+      "height": 23.2,
+      "pageWidth": 595.0,
+      "pageHeight": 842.0
+     }
+    ]
+   }
+  }
+ ]
+}
