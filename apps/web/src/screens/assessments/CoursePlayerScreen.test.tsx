@@ -11,6 +11,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { CaseCourseView } from '../../lib/data/assessments.js';
+import { ApiError } from '../../lib/data/api-client.js';
 
 const navigate = vi.fn();
 vi.mock('react-router-dom', () => ({
@@ -28,7 +29,9 @@ const saveMutate = vi.fn();
 const openMutate = vi.fn((_partKey: string, opts?: { onSuccess?: (r: { id: string }) => void }) =>
   opts?.onSuccess?.({ id: 'att-9' }),
 );
-const caseResult: { data: { parts: { key: string; state: string }[] } | undefined } = {
+const caseResult: {
+  data: { parts: { key: string; state: string; kind?: string; label?: string }[] } | undefined;
+} = {
   data: { parts: [{ key: 'theory', state: 'open' }] },
 };
 vi.mock('../../lib/data/hooks.js', () => ({
@@ -61,6 +64,7 @@ function deckCourse(over: Partial<CaseCourseView> = {}): CaseCourseView {
   return {
     courseId: 'course-1',
     required: true,
+    assessmentInDeck: false,
     missing: false,
     title: 'Mine Site SME Operating Manual',
     kind: 'deck',
@@ -209,6 +213,79 @@ describe('CoursePlayerScreen', () => {
     await waitFor(() => expect(answerQuestionApi).toHaveBeenCalledTimes(2));
     // Two answers, but exactly one attempt opened (held as a shared promise).
     expect(openAttemptApi).toHaveBeenCalledTimes(1);
+  });
+
+  it('relays to the THEORY part, not the first open part (an unsigned declaration)', async () => {
+    caseResult.data = {
+      parts: [
+        { key: 'declaration', state: 'satisfactory', kind: 'declaration', label: 'Candidate Declaration' },
+        { key: 'p1-theory', state: 'open', kind: 'theory', label: 'Part 1 — Theory' },
+      ],
+    };
+    courseResult.data = { course: deckCourse({ assessmentInDeck: true }) };
+    render(<CoursePlayerScreen />);
+    const frame = document.querySelector('iframe')!;
+    const event = new MessageEvent('message', { data: { type: 'course-answer', fieldId: 'sl-q1', value: 'a) True' } });
+    Object.defineProperty(event, 'source', { value: frame.contentWindow });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    await waitFor(() => expect(answerQuestionApi).toHaveBeenCalledWith('case-1', 'att-9', 'sl-q1', 'a) True'));
+    expect(openAttemptApi).toHaveBeenCalledWith('case-1', 'p1-theory');
+  });
+
+  it('a locked theory is reported to the deck at once, naming the part to complete first', async () => {
+    caseResult.data = {
+      parts: [
+        { key: 'declaration', state: 'open', kind: 'declaration', label: 'Candidate Declaration' },
+        { key: 'p1-theory', state: 'locked', kind: 'theory', label: 'Part 1 — Theory' },
+      ],
+    };
+    courseResult.data = { course: deckCourse({ assessmentInDeck: true }) };
+    render(<CoursePlayerScreen />);
+    // The banner says so before the reader even reaches a question.
+    expect(screen.getByRole('status').textContent).toContain('Candidate Declaration');
+    const frame = document.querySelector('iframe')!;
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    const event = new MessageEvent('message', { data: { type: 'course-answer', fieldId: 'sl-q1', value: 'a) True' } });
+    Object.defineProperty(event, 'source', { value: frame.contentWindow });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'course-answer-error',
+          fieldId: 'sl-q1',
+          error: 'part_locked',
+          message: expect.stringContaining('Candidate Declaration'),
+        }),
+        '*',
+      ),
+    );
+    // Nothing was opened or posted — the server never saw an answer it would refuse.
+    expect(openAttemptApi).not.toHaveBeenCalled();
+    expect(answerQuestionApi).not.toHaveBeenCalled();
+  });
+
+  it('a server refusal is posted back as an error result with the reason, not swallowed', async () => {
+    caseResult.data = { parts: [{ key: 'p1-theory', state: 'open', kind: 'theory', label: 'Part 1 — Theory' }] };
+    courseResult.data = { course: deckCourse({ assessmentInDeck: true }) };
+    answerQuestionApi.mockRejectedValueOnce(new ApiError(403, { error: 'field_not_in_part', fields: ['sl-q1'] }));
+    render(<CoursePlayerScreen />);
+    const frame = document.querySelector('iframe')!;
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    const event = new MessageEvent('message', { data: { type: 'course-answer', fieldId: 'sl-q1', value: 'a) True' } });
+    Object.defineProperty(event, 'source', { value: frame.contentWindow });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'course-answer-error', fieldId: 'sl-q1', error: 'field_not_in_part' }),
+        '*',
+      ),
+    );
   });
 
   it('a message from any other window is ignored', () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { SubmissionValue } from '@formai/shared';
 import { Button, Icon, useToast } from '@formai/ui';
@@ -9,6 +9,33 @@ import {
   useSaveCourseProgress,
 } from '../../lib/data/hooks.js';
 import { assessmentsApi } from '../../lib/data/assessments.js';
+import { ApiError } from '../../lib/data/api-client.js';
+
+/**
+ * What to tell the reader when a graded answer could not be recorded — the
+ * server's refusal named plainly, or the network. The deck shows this beside
+ * Submit immediately instead of waiting out its own timeout.
+ */
+function describeRelayFailure(err: unknown): [string, string] {
+  if (err instanceof ApiError) {
+    const code = (err.body as { error?: unknown } | null)?.error;
+    switch (code) {
+      case 'field_not_in_part':
+        return ['field_not_in_part', 'This question is not in the open theory part — go back to the assessment and check which part is open.'];
+      case 'part_locked':
+        return ['part_locked', 'Complete the earlier part of the assessment first — then your answers here are recorded.'];
+      case 'attempt_submitted':
+      case 'attempt_resolved':
+      case 'part_already_satisfied':
+        return ['attempt_closed', 'The theory has already been handed in — this answer is not recorded.'];
+      case 'course_not_complete':
+        return ['course_not_complete', 'Finish reading the course before the theory opens.'];
+      default:
+        return ['request_failed', `The server refused this answer (${err.status}) — press Submit to try again.`];
+    }
+  }
+  return ['network', 'Could not reach the server — press Submit to try again.'];
+}
 
 /**
  * The course player: the case's course package running in a sandboxed iframe,
@@ -121,36 +148,89 @@ export function CoursePlayerScreen() {
   // is relaxed for an in-deck assessment (course.assessmentInDeck) — and reused
   // after. Held as a promise so several quick answers await one open rather than
   // racing to open several attempts.
-  const attemptPromiseRef = useRef<Promise<string | null> | null>(null);
+  /*
+    THE THEORY PART, NOT "THE FIRST OPEN PART". The deck's graded questions
+    belong to the theory. On a tool that opens with a candidate declaration the
+    first open part is that declaration, and an answer posted against ITS
+    attempt is refused by the server — the field is outside that part. That
+    refusal used to be swallowed here, which left the reader on the deck's own
+    "Checking…" timeout with nothing to go on. So the theory is targeted by
+    kind; a theory that is locked (the declaration not yet signed), a refusal,
+    or a network failure is posted straight back as a `course-answer-error`,
+    which the deck shows at once and keeps Submit live for. Older case DTOs without a
+    part kind fall back to the first open part, as before.
+  */
+  const theoryPart = useMemo(() => {
+    const parts = caseDetail?.parts ?? [];
+    return (
+      parts.find((p) => p.kind === 'theory' && p.state === 'open') ??
+      parts.find((p) => p.kind === 'theory') ??
+      parts.find((p) => p.state === 'open') ??
+      null
+    );
+  }, [caseDetail]);
+  const blockingPart = useMemo(
+    () => (caseDetail?.parts ?? []).find((p) => p.state === 'open' && p.key !== theoryPart?.key) ?? null,
+    [caseDetail, theoryPart],
+  );
+  const attemptPromiseRef = useRef<Promise<string> | null>(null);
   const relayAnswer = useCallback(
     async (fieldId: string, value: SubmissionValue) => {
       const win = frameRef.current?.contentWindow;
       if (!id || !win) return;
+      // A distinct message type, not a `course-answer-result` with an error on it:
+      // a deck built before errors existed treats any result as a verdict and
+      // would show "Incorrect" and complete the slide for an answer that was
+      // never recorded. An unknown type it simply ignores and falls back to its
+      // own timeout — degraded, but honest.
+      const fail = (error: string, message: string) =>
+        win.postMessage({ type: 'course-answer-error', fieldId, error, message }, '*');
+      const target = theoryPart;
+      if (!target) {
+        fail('no_theory_part', 'This assessment has no theory part to record answers against — go back to the assessment.');
+        return;
+      }
+      if (target.state === 'locked') {
+        fail(
+          'part_locked',
+          blockingPart
+            ? `Complete "${blockingPart.label}" in the assessment first — after that your answers here are recorded.`
+            : 'The theory is not open yet — go back to the assessment and open it first.',
+        );
+        return;
+      }
+      if (target.state !== 'open') {
+        fail('part_closed', 'The theory has already been marked — this answer is not recorded.');
+        return;
+      }
       if (!attemptPromiseRef.current) {
         attemptPromiseRef.current = (async () => {
-          const target = (caseDetail?.parts ?? []).find((p) => p.state === 'open');
-          if (!target) return null;
           try {
             return (await assessmentsApi.openAttempt(id, target.key)).id;
-          } catch {
+          } catch (err) {
             attemptPromiseRef.current = null; // let a later answer retry the open
-            return null;
+            throw err;
           }
         })();
       }
-      const attemptId = await attemptPromiseRef.current;
-      if (!attemptId) return; // the deck surfaces the failure via its own timeout
+      let attemptId: string;
+      try {
+        attemptId = await attemptPromiseRef.current;
+      } catch (err) {
+        fail(...describeRelayFailure(err));
+        return;
+      }
       try {
         const res = await assessmentsApi.answerQuestion(id, attemptId, fieldId, value);
         win.postMessage(
           { type: 'course-answer-result', fieldId, correct: res.correct, hint: res.hint ?? undefined },
           '*',
         );
-      } catch {
-        // Leave the deck on its "Checking…" timeout; a retry re-posts the answer.
+      } catch (err) {
+        fail(...describeRelayFailure(err));
       }
     },
-    [id, caseDetail],
+    [id, theoryPart, blockingPart],
   );
   const relayRef = useRef(relayAnswer);
   useEffect(() => {
@@ -288,6 +368,27 @@ export function CoursePlayerScreen() {
         </div>
       </div>
 
+      {course.assessmentInDeck && theoryPart && theoryPart.state === 'locked' && (
+        <div
+          role="status"
+          className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border p-[10px_14px]"
+          style={{ background: 'var(--warning-soft)', borderColor: 'var(--border-warning)' }}
+        >
+          <p className="text-[13px]" style={{ color: 'var(--warning-text)' }}>
+            {blockingPart ? (
+              <>
+                Your theory answers can’t be recorded yet — complete <strong>{blockingPart.label}</strong> in the
+                assessment first.
+              </>
+            ) : (
+              'Your theory answers can’t be recorded yet — the theory part is not open.'
+            )}
+          </p>
+          <Button variant="outline" onClick={() => navigate(`/app/assessments/${id}`)}>
+            Open the assessment
+          </Button>
+        </div>
+      )}
       {course.missing || !course.launchUrl ? (
         <div
           className="rounded-md border p-[14px_16px]"

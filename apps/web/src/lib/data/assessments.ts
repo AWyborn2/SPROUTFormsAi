@@ -155,6 +155,8 @@ export interface CaseCourseState {
   courseId: string;
   /** Whether part attempts stay shut until the reading record completes. */
   required: boolean;
+  /** The theory's graded questions are IN the deck — answers relay to the theory attempt as the reader goes. */
+  assessmentInDeck: boolean;
   /** True when the linked course was archived or deleted — shown, not enforced. */
   missing: boolean;
   title: string | null;

@@ -27,6 +27,9 @@
  *   in  {type:'course-progress-seed', visited:[…]} — resume: mark these done.
  *   in  {type:'course-answer-result', fieldId, correct, hint} — the server's
  *       verdict for a course-answer; drives the Correct/Incorrect modal.
+ *   in  {type:'course-answer-error', fieldId, error, message} — the host could
+ *       NOT record it (theory not open yet, a refusal, the network): the
+ *       message shows beside Submit at once and the slide stays incomplete.
  */
 (function () {
   'use strict';
@@ -261,14 +264,26 @@
     setMsg('Checking…'); nextBtn.disabled = true;
     pendingGraded = { slide: i, fieldId: fieldId, timer: null };
     postAnswer(fieldId, sel.getAttribute('data-val'));
-    // Never strand the reader on "Checking…" if the host never answers.
+    // Never strand the reader on "Checking…" if the host never answers. Six
+    // seconds: a real round trip is well under one, and a host that has
+    // nothing to say by then is not going to — the reader gets Submit back.
     pendingGraded.timer = setTimeout(function () {
       if (pendingGraded && pendingGraded.fieldId === fieldId) {
         pendingGraded = null;
         setMsg('Could not reach the server — press Submit to try again');
         nextBtn.disabled = false;
       }
-    }, 12000);
+    }, 6000);
+  }
+  // The host could not record the answer and says why (the theory not open
+  // yet, a refusal, the network). Show the reason at once, keep Submit live,
+  // and leave the slide INCOMPLETE — nothing was recorded, so nothing is done.
+  function failGraded(fieldId, message) {
+    if (!pendingGraded || pendingGraded.fieldId !== fieldId) return;
+    if (pendingGraded.timer) clearTimeout(pendingGraded.timer);
+    pendingGraded = null;
+    setMsg(message || 'Could not record your answer — press Submit to try again');
+    nextBtn.disabled = false;
   }
   function resolveGraded(fieldId, correct, hint) {
     if (!pendingGraded || pendingGraded.fieldId !== fieldId) return;
@@ -322,6 +337,10 @@
     window.addEventListener('resize', fit);
     window.addEventListener('message', function (e) {
       var d = e.data;
+      if (d && d.type === 'course-answer-error' && typeof d.fieldId === 'string') {
+        failGraded(d.fieldId, typeof d.message === 'string' ? d.message : null);
+        return;
+      }
       if (d && d.type === 'course-answer-result' && typeof d.fieldId === 'string') {
         resolveGraded(d.fieldId, !!d.correct, typeof d.hint === 'string' ? d.hint : null);
         return;
