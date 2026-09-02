@@ -7463,3 +7463,112 @@ describe('Small Loader — the seeded template and manifest drive every route', 
     }
   });
 });
+
+/*
+  THE SAME SEED WITH ITS COURSE LINKED — the shape production actually runs:
+  a required deck with the theory embedded (assessmentInDeck), so the theory
+  opens before the reading is done and each in-deck answer is graded through
+  the relay route.
+*/
+describe('Small Loader — with the required in-deck course linked', () => {
+  const ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
+  const COURSE_ID = '00000000-0000-4000-8000-00000000c1c1';
+  const SIGNATURE = 'data:image/png;base64,iVBORw0KGgo=';
+
+  const expectStatus = async (res: Response, status: number) => {
+    const body = await res.text();
+    expect(res.status, body).toBe(status);
+    return body ? (JSON.parse(body) as Record<string, unknown>) : {};
+  };
+
+  it('reads the case, opens the theory through the deck, grades relayed answers, and never 500s', async () => {
+    const out = path.join(mkdtempSync(path.join(tmpdir(), 'sl-seed-')), 'seed.json');
+    execFileSync(
+      process.execPath,
+      ['scripts/author-small-loader-tool.mjs', '--seed', '--offline', '--emit', out, '--key', path.join(ROOT, 'docs/assessment-tools/small-loader.answer-key.json')],
+      { cwd: path.join(ROOT, 'packages/db'), stdio: 'pipe' },
+    );
+    const seed = JSON.parse(readFileSync(out, 'utf-8')) as { fields: FormField[]; manifest: AssessmentToolManifest };
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    rows(store, 'formTemplates')[0]!.name = 'Authorised to Operate Small Loader';
+    rows(store, 'formTemplateVersions')[0]!.fields = seed.fields;
+    rows(store, 'courses').push({
+      id: COURSE_ID,
+      orgId: ORG,
+      title: 'BBM Small Loader Presentation and Assessment',
+      kind: 'deck',
+      launchPath: 'index.html',
+      slideCount: 47,
+      files: [{ path: 'index.html', size: 10, contentType: 'text/html; charset=utf-8' }],
+      totalBytes: 10,
+      status: 'active',
+      createdByUserId: ADMIN,
+      createdAt: new Date(),
+    });
+    const manifest: AssessmentToolManifest = {
+      ...seed.manifest,
+      prerequisiteChecks: [{ fieldId: 'sl-licence-box', competencyIds: [COMPETENCY] }],
+      course: { courseId: COURSE_ID, required: true, assessmentInDeck: true },
+    };
+    const { server, base } = startApp();
+    try {
+      const created = await expectStatus(
+        await fetch(`${base}/assessment-tools`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ templateId: TEMPLATE, name: 'Authorised to Operate Small Loader', manifest, awardedCompetencyIds: [COMPETENCY] }),
+        }),
+        201,
+      );
+      const toolId = created.id as string;
+      await expectStatus(await fetch(`${base}/assessment-tools/${toolId}`, { headers: auth() }), 200);
+
+      const kase = await expectStatus(
+        await fetch(`${base}/assessment-cases`, { method: 'POST', headers: auth(), body: JSON.stringify({ toolId, candidateUserId: CANDIDATE, pathway: 'new' }) }),
+        201,
+      );
+      const caseId = kase.id as string;
+      for (const who of [admin, candidate]) {
+        await expectStatus(await fetch(`${base}/assessment-cases/${caseId}`, { headers: auth(who) }), 200);
+        const course = await fetch(`${base}/assessment-cases/${caseId}/course`, { headers: auth(who) });
+        expect(course.status, await course.text()).not.toBe(500);
+      }
+      await expectStatus(
+        await fetch(`${base}/assessment-cases/${caseId}/course-progress`, { method: 'PATCH', headers: auth(candidate), body: JSON.stringify({ visitedSlides: [0, 1, 2] }) }),
+        200,
+      );
+
+      // Declaration first, as the flow prints it.
+      const decl = await expectStatus(
+        await fetch(`${base}/assessment-cases/${caseId}/parts/declaration/attempts`, { method: 'POST', headers: auth(candidate), body: '{}' }),
+        201,
+      );
+      await expectStatus(
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${decl.id}`, { method: 'PATCH', headers: auth(candidate), body: JSON.stringify({ values: { 'sl-candidate-signature': SIGNATURE } }) }),
+        200,
+      );
+      await expectStatus(await fetch(`${base}/assessment-cases/${caseId}/attempts/${decl.id}/submit`, { method: 'POST', headers: auth(candidate), body: '{}' }), 200);
+
+      // The theory opens BEFORE the course is complete — the questions live in the deck.
+      const theory = await expectStatus(
+        await fetch(`${base}/assessment-cases/${caseId}/parts/p1-theory/attempts`, { method: 'POST', headers: auth(candidate), body: '{}' }),
+        201,
+      );
+      const right = await expectStatus(
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${theory.id}/answer`, { method: 'POST', headers: auth(candidate), body: JSON.stringify({ fieldId: 'sl-q1', value: 'a) True' }) }),
+        200,
+      );
+      expect(right.correct).toBe(true);
+      const wrong = await expectStatus(
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${theory.id}/answer`, { method: 'POST', headers: auth(candidate), body: JSON.stringify({ fieldId: 'sl-q7', value: 'b) False' }) }),
+        200,
+      );
+      expect(wrong.correct).toBe(false);
+      await expectStatus(await fetch(`${base}/assessment-cases/${caseId}/attempts/${theory.id}`, { headers: auth(candidate) }), 200);
+      await expectStatus(await fetch(`${base}/assessment-cases/${caseId}`, { headers: auth(candidate) }), 200);
+    } finally {
+      server.close();
+    }
+  });
+});
