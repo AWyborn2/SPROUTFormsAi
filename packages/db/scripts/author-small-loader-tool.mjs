@@ -19,8 +19,13 @@
  *
  * With --write, --seed uploads the blank PDF to the org's object store,
  * creates the template and its published v1, then writes the tool exactly as
- * the by-hand path does. Re-running --seed creates ANOTHER template; pass
- * --template-id to re-author an existing one instead.
+ * the by-hand path does. Re-running --seed alone creates ANOTHER template;
+ * to re-author the seeded one in place — link the course, re-key a question,
+ * pick up a template change — pass --seed --template-id <id>: the fields,
+ * keys, manifest and workflow are re-applied from the JSON onto its current
+ * version, nothing is uploaded, and the stored PDF is kept. (The by-hand path
+ * without --seed reads no hints and stores no workflow, so never use it to
+ * re-author a seeded template.)
  *
  * Flags: --key <path> (or ANSWER_KEY_PATH; the in-repo copy is the fallback
  * while it exists); --org <uuid> when the database holds more than one org;
@@ -73,6 +78,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
@@ -244,6 +250,7 @@ async function main() {
   let hints = {};
   let pdfPath = null;
   let templateJsonPath = null;
+  let linkedCourseId = null;
   if (SEED) {
     templateJsonPath = flag('--template-json') ?? join(DOCS, 'small-loader.template.json');
     pdfPath = flag('--pdf') ?? join(DOCS, 'small-loader.blank.pdf');
@@ -254,29 +261,54 @@ async function main() {
     }
     fields = structuredClone(tpl.fields);
     hints = tpl.hints ?? {};
-    let orgId = flag('--org');
-    if (!OFFLINE) {
-      const orgs = await sql`select id, name from organizations order by created_at`;
-      if (orgId) {
-        if (!orgs.some((o) => o.id === orgId)) {
-          console.error(`--org ${orgId} is not an organisation in this database.`);
-          process.exit(1);
-        }
-      } else if (orgs.length === 1) {
-        orgId = orgs[0].id;
-      } else {
-        console.error(
-          `${orgs.length} organisations — pass --org <id>:\n` + orgs.map((o) => `  ${o.id}  ${o.name}`).join('\n'),
-        );
-        process.exit(1);
-      }
-    }
-    template = { id: null, org_id: orgId ?? '(offline)', name: tpl.name };
-    version = { id: null };
     const pageCount = Array.isArray(tpl.pages) ? tpl.pages.length : '?';
     console.log(`Seed:     ${tpl.name} — ${fields.length} fields over ${pageCount} pages (${templateJsonPath})`);
-    console.log(`PDF:      ${pdfPath} (${readFileSync(pdfPath).length.toLocaleString()} bytes)`);
-    console.log(`Org:      ${template.org_id}\n`);
+    if (TEMPLATE_ID && !OFFLINE) {
+      // Re-author the seeded template IN PLACE: same ids, fresh geometry, keys,
+      // manifest and workflow onto its current version; the stored PDF stays.
+      const [existing] = await sql`select * from form_templates where id = ${TEMPLATE_ID}`;
+      if (!existing) {
+        console.error(`--template-id ${TEMPLATE_ID} is not a template in this database.`);
+        process.exit(1);
+      }
+      if (!existing.current_version_id) {
+        console.error(`Template ${TEMPLATE_ID} has no published version to re-author.`);
+        process.exit(1);
+      }
+      const [ver] = await sql`select id, source_pdf_asset_id from form_template_versions where id = ${existing.current_version_id}`;
+      template = { id: existing.id, org_id: existing.org_id, name: existing.name };
+      version = { id: ver.id };
+      // The course linked from the builder's Course-material card lives on the
+      // tool row already; carry it forward (and mark the assessment in-deck)
+      // rather than making the operator hunt for its id.
+      const [toolRow] = await sql`select manifest from assessment_tools where template_id = ${existing.id}`;
+      linkedCourseId = toolRow?.manifest?.course?.courseId ?? null;
+      console.log(`In place: ${existing.name} (${existing.id}) — version ${ver.id}, PDF ${ver.source_pdf_asset_id ?? '(none stored)'} kept`);
+      console.log(`Course:   ${COURSE_ID ?? linkedCourseId ?? '(none linked yet — upload it in the Course-material card, or pass --course-id)'}`);
+      console.log(`Org:      ${template.org_id}\n`);
+    } else {
+      let orgId = flag('--org');
+      if (!OFFLINE) {
+        const orgs = await sql`select id, name from organizations order by created_at`;
+        if (orgId) {
+          if (!orgs.some((o) => o.id === orgId)) {
+            console.error(`--org ${orgId} is not an organisation in this database.`);
+            process.exit(1);
+          }
+        } else if (orgs.length === 1) {
+          orgId = orgs[0].id;
+        } else {
+          console.error(
+            `${orgs.length} organisations — pass --org <id>:\n` + orgs.map((o) => `  ${o.id}  ${o.name}`).join('\n'),
+          );
+          process.exit(1);
+        }
+      }
+      template = { id: null, org_id: orgId ?? '(offline)', name: tpl.name };
+      version = { id: null };
+      console.log(`PDF:      ${pdfPath} (${readFileSync(pdfPath).length.toLocaleString()} bytes)`);
+      console.log(`Org:      ${template.org_id}\n`);
+    }
   } else {
     const templates = TEMPLATE_ID
       ? await sql`select * from form_templates where id = ${TEMPLATE_ID}`
@@ -850,10 +882,14 @@ async function main() {
        THE COURSE. The SCORM deck built from the BBM Small Loader Manual carries
        the theory questions as graded slides (assessmentInDeck), so the theory
        attempt opens at course start and each in-deck answer is recorded as the
-       candidate reads. Linked only when --course-id names the uploaded package;
-       otherwise link it from the Course-material card in the builder.
+       candidate reads. Linked when --course-id names the uploaded package, or
+       — re-authoring in place — when the Course-material card already linked
+       one; the card itself cannot set assessmentInDeck, so this is where it
+       is switched on.
     */
-    ...(COURSE_ID ? { course: { courseId: COURSE_ID, required: true, assessmentInDeck: true } } : {}),
+    ...(COURSE_ID || linkedCourseId
+      ? { course: { courseId: COURSE_ID ?? linkedCourseId, required: true, assessmentInDeck: true } }
+      : {}),
   };
   console.log(`\nMandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryFieldIds.length ? 'all of Part 1' : 'none'}`);
   console.log(`Ring glyph set on ${ringed} option box(es) across the theory questions`);
@@ -950,7 +986,8 @@ async function main() {
   // ── deck questions ─────────────────────────────────────────────────────
   // Written on every run (dry or not) so the deck can be authored from a dry
   // run's ids before anything is persisted. No answer key is in this file.
-  const deckOut = flag('--deck-questions') ?? join(here, '..', 'small-loader.deck-questions.json');
+  // Into the temp dir by default, so a run never litters the working tree.
+  const deckOut = flag('--deck-questions') ?? join(tmpdir(), 'small-loader.deck-questions.json');
   if (deckQuestions.length) {
     writeFileSync(deckOut, JSON.stringify({ _note: 'Graded in-deck questions for the SCORM deck (course-deck-builder `questions`) — field ids match the published tool; NO answers here.', questions: deckQuestions }, null, 2));
     console.log(`\nDeck questions (no answers) → ${deckOut}  [${deckQuestions.length} questions]`);
@@ -1034,15 +1071,17 @@ async function main() {
   }
   if (!WRITE) {
     console.log(
-      SEED
+      SEED && !template.id
         ? `\nDry run complete. Re-run with --write to upload the PDF, create "${template.name}" (published v1) and persist the tool.`
-        : '\nDry run complete. Re-run with --write to persist.',
+        : SEED
+          ? `\nDry run complete. Re-run with --write to re-apply the fields, keys, manifest and workflow onto ${template.id} in place.`
+          : '\nDry run complete. Re-run with --write to persist.',
     );
     return;
   }
 
   // ── persist ─────────────────────────────────────────────────────────────
-  if (SEED) {
+  if (SEED && !template.id) {
     let assetId = flag('--asset-id');
     if (assetId) {
       console.log(`\nUsing the PDF already stored as ${assetId}`);

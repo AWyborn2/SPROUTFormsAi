@@ -49,3 +49,6 @@ chc-*.csv
 
 # extraction-tuning corpus — real, safety-critical assessment PDFs, never commit
 corpus/
+
+# Emitted by author-small-loader-tool.mjs on older runs (now written to the temp dir)
+packages/db/small-loader.deck-questions.json
