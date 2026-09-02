@@ -808,11 +808,22 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
   const candidatePrereqs = pick(codes.candidate, 'Candidate');
   const assessorComps = pick(codes.assessor, 'Assessor');
 
+  /*
+     KEYED BY LOCATION ID, NOT NAME. The API resolves the location half of the
+     rule by the case's Location id and looks the keys up as uuids — a
+     name-keyed map ("Mining") is refused by Postgres and 500s every case. The
+     names below are resolved to the org's active Locations.
+  */
+  const locationRows = await sql`select id, name from locations where org_id = ${template.org_id} and status = 'active'`;
+  const locationByName = new Map(locationRows.map((l) => [norm(l.name), l.id]));
   const assessorStreams = {};
   for (const [stream, code] of Object.entries(STREAM_CODES)) {
     const id = byCode.get(code);
-    if (id) {
-      assessorStreams[stream] = [id];
+    const locationId = locationByName.get(norm(stream));
+    if (id && !locationId) {
+      warnings.push(`No active Location named "${stream}" in this org, so the ${code} rule for it is not written; add the Location and re-run.`);
+    } else if (id) {
+      assessorStreams[locationId] = [id];
     } else {
       /*
         The stream is deliberately OMITTED rather than recorded with an empty
@@ -834,7 +845,7 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
     console.log(
       `\nAssessor rule: ${codes.assessor.join(', ')} always, plus ` +
         Object.entries(STREAM_CODES)
-          .filter(([s]) => assessorStreams[s])
+          .filter(([s]) => locationByName.has(norm(s)) && assessorStreams[locationByName.get(norm(s))])
           .map(([s, c]) => `${c} in ${s}`)
           .join(' / '),
     );

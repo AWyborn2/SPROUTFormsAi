@@ -7572,3 +7572,44 @@ describe('Small Loader — with the required in-deck course linked', () => {
     }
   });
 });
+
+/*
+  A STREAM RULE KEYED BY NAME MUST NOT TAKE CASE CREATION DOWN. Older author
+  scripts wrote `assessor_stream_competency_ids` keyed by stream name
+  ("Mining") where the API now expects Location ids, and the create route
+  looked those keys up as uuids — Postgres refused the text and every case
+  for the tool 500'd. The lookup now skips non-id keys; the advisory warning
+  still names the unresolved rule so an admin can see it.
+*/
+describe('POST /assessment-cases — a name-keyed assessor stream rule', () => {
+  it('creates the case and names the unresolved rule in the warning instead of failing', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const tool = seedUnlinkedTool(store, {
+      awardedCompetencyIds: [COMPETENCY],
+      assessorCompetencyIds: [],
+      assessorStreamCompetencyIds: { Mining: [COMPETENCY] },
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+      });
+      const body = (await res.json()) as { prerequisiteWarnings: string[] };
+      expect(res.status, JSON.stringify(body)).toBe(201);
+      expect(body.prerequisiteWarnings.some((w) => w.includes('location-specific requirements (Mining)'))).toBe(true);
+
+      // With a Location on the case the rule simply does not match — still no failure.
+      const placed = await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new', locationId: MINING }),
+      });
+      expect(placed.status, await placed.text()).toBe(201);
+    } finally {
+      server.close();
+    }
+  });
+});

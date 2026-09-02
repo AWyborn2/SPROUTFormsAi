@@ -863,11 +863,31 @@ async function main() {
     });
   const candidatePrereqs = pick(codes.candidate, 'Candidate');
   const assessorComps = pick(codes.assessor, 'Assessor');
+  /*
+     KEYED BY LOCATION ID, NOT NAME. A case is placed at a managed Location and
+     the API resolves the location half of the assessor rule by that id — and
+     looks the keys up as uuids to name them in warnings, which is exactly what
+     a name-keyed map ("Mining") made Postgres refuse, as a 500 on every case.
+     So the stream names below are resolved to the org's Locations here, and a
+     stream with no matching Location is left out with a warning rather than
+     written under a key nothing can resolve.
+  */
+  const locationRows = OFFLINE ? [] : await sql`select id, name from locations where org_id = ${template.org_id} and status = 'active'`;
+  const locationByName = new Map(locationRows.map((l) => [norm(l.name), l.id]));
   const assessorStreams = {};
   for (const [stream, code] of Object.entries(STREAM_CODES)) {
     const id = byCode.get(code);
-    if (id) assessorStreams[stream] = [id];
-    else warnings.push(`Assessor authority ${code} (${stream}) is not recorded in this org; cases in that stream will warn that the location half of the assessor check could not be made.`);
+    if (!id) {
+      warnings.push(`Assessor authority ${code} (${stream}) is not recorded in this org; cases in that stream will warn that the location half of the assessor check could not be made.`);
+      continue;
+    }
+    const locationId = locationByName.get(norm(stream));
+    if (!locationId) {
+      warnings.push(`No active Location named "${stream}" in this org, so the ${code} rule for it is not written; add the Location (Enterprise → Locations) and re-run.`);
+      continue;
+    }
+    assessorStreams[locationId] = [id];
+    console.log(`  assessor rule: ${code} at Location "${stream}" (${locationId})`);
   }
   const awardedComps = pick(codes.awarded, 'Awarded');
   if (awardedComps.length === 0) {
