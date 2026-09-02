@@ -2106,13 +2106,11 @@ assessmentToolsRouter.patch(
         that sends it (the card's own checkbox) is honoured either way.
       */
       const { course: previousCourse, ...rest } = manifest;
+      const inDeck = parsed.data.course?.assessmentInDeck ?? previousCourse?.assessmentInDeck;
       manifest = parsed.data.course
         ? {
             ...rest,
-            course: {
-              ...parsed.data.course,
-              assessmentInDeck: parsed.data.course.assessmentInDeck ?? previousCourse?.assessmentInDeck ?? false,
-            },
+            course: inDeck === undefined ? parsed.data.course : { ...parsed.data.course, assessmentInDeck: inDeck },
           }
         : rest;
     }
