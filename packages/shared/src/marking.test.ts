@@ -988,6 +988,32 @@ describe('deriveChecklistOutcome (B — a practical part auto-marks from its Yes
     expect(deriveChecklistOutcome(noCriteria, manifest, part, {}, AUTO)).toBeNull();
   });
 
+  it('passes an untouched criterion whose N/A companion box is ticked', () => {
+    // The paper prints "√ / ×" and "N/A" beside every criterion; N/A ticked
+    // means the item did not arise, which is a judgement, not a failure.
+    const na = (id: string): FormField => ({ id, type: 'checkbox', label: 'N/A', required: false, source: 'imported' });
+    const withNa: FormField[] = [
+      header('prac'),
+      yesno('c1'),
+      na('c1-na'),
+      yesno('c2'),
+      na('c2-na'),
+      verdict('v', ['Candidate not yet Competent', 'Candidate Competent']),
+    ];
+    const out = deriveChecklistOutcome(withNa, manifest, part, { c1: 'Yes', 'c2-na': true }, AUTO);
+    expect(out?.outcome).toBe('satisfactory');
+    expect(out?.derivedValues.v).toBe('Candidate Competent');
+    // An untouched criterion with its N/A box also untouched still fails.
+    expect(deriveChecklistOutcome(withNa, manifest, part, { c1: 'Yes' }, AUTO)?.outcome).toBe('not_satisfactory');
+    // N/A does not excuse an explicit failure — the cross stands.
+    expect(
+      deriveChecklistOutcome(withNa, manifest, part, { c1: 'Yes', c2: 'No', 'c2-na': true }, AUTO)?.outcome,
+    ).toBe('not_satisfactory');
+    // Only the box printed right after the criterion is its companion.
+    const strayNa: FormField[] = [header('prac'), yesno('c1'), yesno('c2'), na('c2-na'), verdict('v', ['Candidate not yet Competent', 'Candidate Competent'])];
+    expect(deriveChecklistOutcome(strayNa, manifest, part, { c2: 'Yes', 'c2-na': true }, AUTO)?.outcome).toBe('not_satisfactory');
+  });
+
   it('does not count a keyed question’s ✓/✗ cell as a criterion', () => {
     // A check_cross that is a question's outcomeTarget is furniture, not a
     // pass/fail criterion — it must not gate the checklist verdict.
