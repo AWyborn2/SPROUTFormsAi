@@ -2344,12 +2344,22 @@ assessmentToolsRouter.patch(
  * display, and for the answer the assessment document reads for its own stream
  * question (R78). Read live so a rename reaches everywhere at once (R136).
  */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function locationNamesByIdFor(
   database: NonNullable<typeof db>,
   orgId: string,
   ids: readonly (string | null | undefined)[],
 ): Promise<Map<string, string>> {
-  const unique = [...new Set(ids.filter((x): x is string => Boolean(x)))];
+  /*
+    ONLY IDS REACH THE QUERY. The keys arrive from a tool row's stream map,
+    which older author scripts wrote keyed by stream NAME ("Mining") rather
+    than Location id. Postgres refuses "Mining" as a uuid, and that refusal
+    surfaced as a 500 on every case creation for the tool — the eligibility
+    warning this feeds is advisory, so a malformed key must degrade to an
+    unresolved name in the warning, never take the route down.
+  */
+  const unique = [...new Set(ids.filter((x): x is string => Boolean(x) && UUID_SHAPE.test(x!)))];
   if (unique.length === 0) return new Map();
   const rows = await database.query.locations.findMany({
     where: and(eq(schema.locations.orgId, orgId), inArray(schema.locations.id, unique)),
