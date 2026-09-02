@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "assessmentTool": "Authorised to Operate Small Loader",
+    "documentControl": "WAPL-Business-CD-200000372",
+    "documentVersion": "3.0",
+    "deployed": "2025-12-02",
+    "revalidate": "2028-12-02",
+    "category": "Q50073331 ATO Small Loader",
+    "prerequisite": "Q50001782 Driver's Licence C or higher",
+    "preparedFrom": [
+      "Completed assessment — Sharon Barker, New & Inexperienced pathway (parts 1–6), marked and signed by assessor Ash Wyborn 05/06/26",
+      "Completed assessment — Troy Teasdale, Experienced/refresher pathway (parts 1–2), 21/08/26 (cross-check)",
+      "BBM Small Loader Manual (01026626 v3.0) for content verification"
+    ],
+    "notes": [
+      "Answers are read from the ringed option on the Sharon Barker assessment, which was marked ✓ on every question by the training authority (Ash Wyborn) as assessor — so those marks are treated as the authority's own key. Where the Troy Teasdale form rings a DIFFERENT option that its assessor also ticked ✓ (Q7, Q10), the entry is verified:false and the discrepancy is noted for the training authority to confirm; the Barker/manual-consistent answer is recorded.",
+      "Marking is exact-set-match: the candidate must select every listed answer and nothing else.",
+      "One theory section (PART 1 — Written or Verbal Questions, Q1–Q16). Letters map onto each question's printed options in order: a/b for True/False, a–f for multiple choice.",
+      "SENSITIVE: this file is the complete answer key to a safety-critical assessment. Repository read access is answer access. The API strips answerKey from every fill-surface payload (stripMarkingSecrets); this source file's audience is authoring staff only.",
+      "Seeds packages/db/scripts/author-small-loader-tool.mjs, which maps these letters onto the imported template's real question fields (pairing by the published questionRef link, document order as fallback)."
+    ],
+    "verifiedBy": "Training authority (Ash Wyborn) — via the marked Barker assessment; Q7 and Q10 pending explicit confirmation",
+    "verifiedOn": "2026-06-05"
+  },
+  "sections": {
+    "general": {
+      "mandatory": true,
+      "questions": [
+        { "n": 1,  "answers": ["a"], "verified": true,  "note": "True — isolate with hasp and personnel lock before entering the machine footprint (SME Manual / practical item 2)." },
+        { "n": 2,  "answers": ["a"], "verified": true,  "note": "True — three points of contact for access/egress; never the steering wheel or control levers (Manual §6.2)." },
+        { "n": 3,  "answers": ["d"], "verified": true,  "note": "All the above — walk-around pre-start inspects for damage, faults, and confirms safe to operate (Manual §10)." },
+        { "n": 4,  "answers": ["c"], "verified": true,  "note": "Do not operate the loader and report the Out of Service tag to pit control." },
+        { "n": 5,  "answers": ["a"], "verified": true,  "note": "True — 40-metre exclusion zone around all working equipment at BBM (Manual §8, §8.1)." },
+        { "n": 6,  "answers": ["a"], "verified": true,  "note": "True — hydraulic oil, transmission fluid and coolant are checked by sight glass (practical item 2)." },
+        { "n": 7,  "answers": ["b"], "verified": false, "note": "False — travelling downhill uses ENGINE braking (1st gear, low revs) with the brake pedal to assist; not the service brake alone (Manual §9.1). Barker form rings (b) ✓. DISCREPANCY: Teasdale form rings (a) True and was also ticked ✓ by its assessor — training authority to confirm." },
+        { "n": 8,  "answers": ["a"], "verified": true,  "note": "True — the right-hand cab window is an emergency exit point." },
+        { "n": 9,  "answers": ["e"], "verified": true,  "note": "All of the above — hopper clean-up: RAP, Duty Production Supervisor authorisation, crusher control orange light, pit control + broadcast to haul trucks (Manual §16)." },
+        { "n": 10, "answers": ["b"], "verified": false, "note": "False — the park/service brake test is not done in 3rd gear forward at 1700 rpm. Barker form rings (b) ✓. DISCREPANCY: Teasdale form rings (a) True and was also ticked ✓ by its assessor — training authority to confirm the correct test gear/rpm." },
+        { "n": 11, "answers": ["a"], "verified": true,  "note": "True — load the bucket in 1st gear only." },
+        { "n": 12, "answers": ["a"], "verified": true,  "note": "True — brake checks at the start of every shift before leaving the park-up (Manual §8.1)." },
+        { "n": 13, "answers": ["d"], "verified": true,  "note": "All of the above — engine oil warning light: shut the engine off, report to pit control, tag out of service (Manual §10)." },
+        { "n": 14, "answers": ["a"], "verified": true,  "note": "True — unchecked quick-hitch locking pins can let the bucket attachment come off." },
+        { "n": 15, "answers": ["a"], "verified": true,  "note": "True — the secondary steering system is battery operated (Manual §8.1 tests primary and secondary steering)." },
+        { "n": 16, "answers": ["f"], "verified": true,  "note": "All of the above — fire: stop and ground the bucket, neutral + park brake, activate suppression, call the emergency, evacuate." }
+      ]
+    }
+  },
+  "practicalAssessorReference": [
+    "Start-up: neutral selected, park brake engaged; horn ONCE then a 5–10 second delay before starting; check warning lights out; do not idle more than 20 minutes (Manual §6).",
+    "Interlocks: steering lock locks steering and F/R gears; implement lock hydraulically locks the implement; transmission lock holds neutral (Manual §6.1).",
+    "Leaving the cab: flat level ground, ground the bucket, shut down, apply all safety locks and the park brake; never use the steering wheel or levers as a hand-hold (Manual §6.2).",
+    "Moving off: clear the 40 m exclusion zone, seat belt fitted, horn TWICE then 5–10 seconds, bucket ~300–400 mm off the ground for travel (Manual §8).",
+    "Operational safety checks before leaving the park-up: primary AND secondary steering, brake pedal holding/accumulator, bucket and boom kick-outs — only proceed if all work (Manual §8.1).",
+    "Travel: bucket level at 300–400 mm, not curled to carry unless carrying material; downhill in 1st gear using engine braking, brake pedal to assist, never the impeller pedal (Manual §9, §9.1).",
+    "Lost or damaged G.E.T is a Category A fault — report immediately, replace before operating; unrecovered G.E.T area demarcated by GPS/survey (Manual §10.1).",
+    "Misfire found: stop, notify the Supervisor, barricade and keep 10 m clear (Manual §11.1).",
+    "Hopper clean-up sequence: Duty Production Supervisor permission → control room orange lights → inform truck operators → enter; afterwards restore green lights via control room and inform the Supervisor/pit control (Manual §16).",
+    "Incident: stop work, call the Supervisor, gather evidence; bogged/stuck — do not self-recover, JHA before removal (Manual §17)."
+  ]
+}

@@ -181,10 +181,18 @@ def graded_section(q: dict) -> str:
     qtext = html.escape(str(q['question']))
     if qtype == 'tf':
         sub = 'Choose True or False — this is a graded assessment question.'
+        # A boolean field posts true/false. A printed "a) True / b) False" that
+        # imported as a RADIO must post its real option strings — an author
+        # script reconciles those in as exactly two `options` (true first);
+        # the thumbs card is kept either way.
+        tf_opts = q.get('options') or [{'val': 'true'}, {'val': 'false'}]
+        if len(tf_opts) != 2:
+            raise SystemExit(f'tf graded question with options needs exactly two (true, false): {q!r}')
+        tv, fv = html.escape(str(tf_opts[0]['val'])), html.escape(str(tf_opts[1]['val']))
         opts = (
             '    <div class="qopts">\n'
-            f'      <div class="qopt tf" data-val="true">{_THUMB}<span class="lab">TRUE</span></div>\n'
-            f'      <div class="qopt tf" data-val="false"><svg viewBox="0 0 24 24" style="transform:rotate(180deg);">'
+            f'      <div class="qopt tf" data-val="{tv}">{_THUMB}<span class="lab">TRUE</span></div>\n'
+            f'      <div class="qopt tf" data-val="{fv}"><svg viewBox="0 0 24 24" style="transform:rotate(180deg);">'
             f'{_THUMB[_THUMB.index(">") + 1:]}<span class="lab">FALSE</span></div>\n'
             '    </div>'
         )
