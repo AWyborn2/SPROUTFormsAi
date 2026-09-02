@@ -1910,6 +1910,8 @@ export interface NextStepPart {
 export type CaseNextStep =
   /** The viewer can start the next part themselves. */
   | { kind: 'continue'; partKey: string; label: string }
+  /** A required course the candidate has not read through yet comes first. */
+  | { kind: 'course'; courseTitle: string | null }
   /** The next part belongs to someone else (or is not yet unlocked). */
   | { kind: 'awaiting_other'; label: string; filledBy: string }
   /** Nothing left for the viewer — every later part is already satisfactory. */
@@ -1925,16 +1927,36 @@ export type CaseNextStep =
  * rather than a role, so this needs no `WorkflowRole` import and cannot go stale
  * against the role list.
  */
+export interface NextStepCourse {
+  /** The tool gates its parts on the reading record. */
+  required: boolean;
+  /** This case's reading record is complete. */
+  complete: boolean;
+  title: string | null;
+}
+
 export function nextStepAfter(
   parts: readonly NextStepPart[],
   currentKey: string,
   viewerIsCandidate: boolean,
+  course: NextStepCourse | null = null,
 ): CaseNextStep {
   const index = parts.findIndex((p) => p.key === currentKey);
   const next = (index === -1 ? [] : parts.slice(index + 1)).find((p) => p.state !== 'satisfactory');
   if (!next) return { kind: 'done' };
 
   const viewerFills = viewerIsCandidate ? next.candidateFills : next.staffFills;
+  /*
+    THE COURSE COMES BEFORE THE CANDIDATE'S NEXT PART. A required course the
+    candidate has not read through is what the open-attempt route will refuse
+    on (or, with the theory in the deck, where their answers are recorded), so
+    "Continue to Part 1" was a button to a refusal — and the refusal read as
+    the assessor withholding something. Nobody is: the next step is the
+    reading, and this says so.
+  */
+  if (viewerIsCandidate && viewerFills && course?.required && !course.complete) {
+    return { kind: 'course', courseTitle: course.title };
+  }
   if (viewerFills && next.state !== 'locked') {
     return { kind: 'continue', partKey: next.key, label: next.label };
   }

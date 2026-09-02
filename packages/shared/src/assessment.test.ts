@@ -1509,6 +1509,16 @@ describe('nextStepAfter', () => {
     });
   });
 
+  it('sends the candidate to a required course they have not read before the next part', () => {
+    const course = { required: true, complete: false, title: 'BBM Small Loader' };
+    expect(nextStepAfter(flow, 'decl', true, course)).toEqual({ kind: 'course', courseTitle: 'BBM Small Loader' });
+    // Read through, not required, or the assessor's turn: the course does not intervene.
+    expect(nextStepAfter(flow, 'decl', true, { ...course, complete: true })).toMatchObject({ kind: 'continue' });
+    expect(nextStepAfter(flow, 'decl', true, { ...course, required: false })).toMatchObject({ kind: 'continue' });
+    expect(nextStepAfter(flow, 'theory', true, course)).toMatchObject({ kind: 'awaiting_other' });
+    expect(nextStepAfter(flow, 'decl', false, course)).toMatchObject({ kind: 'awaiting_other' });
+  });
+
   it('never offers a Continue for a locked part, even one the viewer fills', () => {
     const locked: NextStepPart[] = [
       part({ key: 'a', state: 'satisfactory', candidateFills: true }),

@@ -411,11 +411,11 @@ export function CasePartFillScreen() {
               onClick={() =>
                 openAttempt.mutate(attempt.partKey, {
                   onSuccess: (r) => navigate(`/app/assessments/${caseId}/attempts/${r.id}`),
-                  onError: () =>
-                    toast({
-                      variant: 'warning',
-                      message: "Couldn't open another attempt — your assessor may need to.",
-                    }),
+                  onError: (err) => {
+                    const failure = describeOpenFailure(err);
+                    toast({ variant: 'warning', message: failure.message });
+                    if (failure.toCourse) navigate(`/app/assessments/${caseId}/course`);
+                  },
                 })
               }
             >
@@ -436,14 +436,15 @@ export function CasePartFillScreen() {
         <NextStepPanel
           nextStep={attempt.nextStep}
           opening={openAttempt.isPending}
+          onCourse={() => navigate(`/app/assessments/${caseId}/course`)}
           onContinue={(partKey) =>
             openAttempt.mutate(partKey, {
               onSuccess: (r) => navigate(`/app/assessments/${caseId}/attempts/${r.id}`),
-              onError: () =>
-                toast({
-                  variant: 'warning',
-                  message: "Couldn't open the next part — your assessor may need to.",
-                }),
+              onError: (err) => {
+                const failure = describeOpenFailure(err);
+                toast({ variant: 'warning', message: failure.message });
+                if (failure.toCourse) navigate(`/app/assessments/${caseId}/course`);
+              },
             })
           }
         />
@@ -723,15 +724,57 @@ export function CasePartFillScreen() {
  * `nextStep`, decided from the same workflow access the open-attempt route
  * enforces — so a "Continue" is never offered for a part the server would refuse.
  */
+
+/**
+ * Why the next part would not open, in the candidate's terms.
+ *
+ * The one line this used to show — "your assessor may need to" — was a guess,
+ * and on the flows that hit it (a required course not yet read) it was wrong:
+ * nothing there is the assessor's to approve. Each refusal the open route can
+ * make is named, and the one with an obvious next action (read the course)
+ * carries the reader there.
+ */
+function describeOpenFailure(err: unknown): { message: string; toCourse: boolean } {
+  const code = err instanceof ApiError ? (err.body as { error?: unknown } | null)?.error : null;
+  switch (code) {
+    case 'course_not_complete':
+      return { message: 'Read the course first — opening it now.', toCourse: true };
+    case 'part_locked':
+      return { message: 'That part isn’t open yet — an earlier part has to be completed first.', toCourse: false };
+    case 'forbidden':
+      return { message: 'That part is completed by your assessor, not you.', toCourse: false };
+    case 'part_already_satisfied':
+      return { message: 'That part is already complete.', toCourse: false };
+    default:
+      return { message: 'Couldn’t open the next part — please try again.', toCourse: false };
+  }
+}
+
 function NextStepPanel({
   nextStep,
   opening,
   onContinue,
+  onCourse,
 }: {
   nextStep: CaseNextStep;
   opening: boolean;
   onContinue: (partKey: string) => void;
+  onCourse: () => void;
 }) {
+  if (nextStep.kind === 'course') {
+    return (
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-border-accent bg-surface-accent-soft px-3 py-3">
+        <p className="text-[13px] text-text-secondary">
+          Next: read the course{nextStep.courseTitle ? <> — <strong className="text-text-primary">{nextStep.courseTitle}</strong></> : null}.
+          Your theory questions are answered as you go.
+        </p>
+        <Button leadingIcon="arrow-right" onClick={onCourse}>
+          Start the course
+        </Button>
+      </div>
+    );
+  }
+
   if (nextStep.kind === 'continue') {
     return (
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-border-accent bg-surface-accent-soft px-3 py-3">
