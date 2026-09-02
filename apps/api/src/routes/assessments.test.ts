@@ -7529,6 +7529,8 @@ describe('Small Loader — with the required in-deck course linked', () => {
         201,
       );
       const caseId = kase.id as string;
+      const linked = await expectStatus(await fetch(`${base}/assessment-cases/${caseId}`, { headers: auth() }), 200);
+      expect((linked.course as { assessmentInDeck?: boolean }).assessmentInDeck).toBe(true);
       for (const who of [admin, candidate]) {
         await expectStatus(await fetch(`${base}/assessment-cases/${caseId}`, { headers: auth(who) }), 200);
         const course = await fetch(`${base}/assessment-cases/${caseId}/course`, { headers: auth(who) });

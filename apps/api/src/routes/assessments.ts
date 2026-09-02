@@ -3054,6 +3054,8 @@ assessmentCasesRouter.get(
     let courseBlock: {
       courseId: string;
       required: boolean;
+      /** The theory's graded questions live IN the deck (Option B). */
+      assessmentInDeck: boolean;
       missing: boolean;
       title: string | null;
       kind: string | null;
@@ -3081,6 +3083,7 @@ assessmentCasesRouter.get(
       courseBlock = {
         courseId: detailCourseLink.courseId,
         required: detailCourseLink.required,
+        assessmentInDeck: detailCourseLink.assessmentInDeck === true,
         missing: !active,
         title: active?.title ?? null,
         kind: active?.kind ?? null,
@@ -3189,6 +3192,7 @@ assessmentCasesRouter.get(
         course: {
           courseId: courseLink.courseId,
           required: courseLink.required,
+          assessmentInDeck: courseLink.assessmentInDeck === true,
           missing: true,
           title: null,
           kind: null,
@@ -3214,6 +3218,7 @@ assessmentCasesRouter.get(
       course: {
         courseId: courseRow.id,
         required: courseLink.required,
+        assessmentInDeck: courseLink.assessmentInDeck === true,
         missing: false,
         title: courseRow.title,
         kind: courseRow.kind,

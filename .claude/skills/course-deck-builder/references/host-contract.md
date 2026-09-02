@@ -50,6 +50,7 @@ The engine and the player (`CoursePlayerScreen.tsx`) speak this small protocol.
 | --- | --- | --- |
 | `{type:'course-progress-seed', visited:[…]}` | on iframe load, from the case's recorded reading | marks those slides complete so a reopened course resumes at its frontier |
 | `{type:'course-answer-result', fieldId, correct, hint?}` | after the server grades a `course-answer` | shows the Correct/Incorrect modal; the slide completes **either way** (the answer is recorded; the overall outcome is marked later, at submit) |
+| `{type:'course-answer-error', fieldId, error, message}` | the host could NOT record the answer — the theory part is locked (a declaration unsigned), the server refused it, or the network failed | shows `message` beside Submit immediately, keeps Submit live, and leaves the slide **incomplete** (nothing was recorded). A distinct type so a deck built before it existed ignores it and falls back to its own 6 s timeout, rather than reading it as a wrong answer |
 
 **Graded questions (the in-deck assessment).** A `data-graded` slide carries
 `data-field-id` (the server field to grade) and **no `data-answer`** — the key
