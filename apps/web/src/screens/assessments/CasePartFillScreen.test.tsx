@@ -18,9 +18,10 @@
  *  - a marked attempt is a locked record for the assessor too.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { FormField } from '@formai/shared';
 import type { AttemptFillView } from '../../lib/data/assessments.js';
+import { ApiError } from '../../lib/data/api-client.js';
 
 // The real renderers drag in dictation and canvas; the screen's own contract is
 // which fields it DISABLES and what it saves, so the stub exposes exactly that.
@@ -61,6 +62,8 @@ vi.mock('./TheoryQuiz.js', () => ({ TheoryQuiz: () => <div data-testid="theory-q
 vi.mock('./LogbookProgress.js', () => ({ LogbookProgress: () => null }));
 
 const navigate = vi.fn();
+const toastSpy = vi.fn();
+const openMutate = vi.fn();
 vi.mock('react-router-dom', () => ({
   useNavigate: () => navigate,
   useParams: () => ({ id: 'case-1', attemptId: 'att-1' }),
@@ -70,7 +73,7 @@ vi.mock('react-router-dom', () => ({
 // UI kit (Button, Icon) renders as-is so the role queries are the real DOM.
 vi.mock('@formai/ui', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@formai/ui')>()),
-  useToast: () => ({ toast: vi.fn() }),
+  useToast: () => ({ toast: toastSpy }),
 }));
 
 const saveMutate = vi.fn();
@@ -84,7 +87,7 @@ vi.mock('../../lib/data/hooks.js', () => ({
   useAssessmentAttempt: () => ({ data: hookState.attempt, isLoading: false }),
   useSaveAttempt: () => ({ mutate: saveMutate, isPending: false }),
   useSetAttemptSubmitted: () => ({ mutate: vi.fn(), isPending: false }),
-  useOpenAttempt: () => ({ mutate: vi.fn(), isPending: false }),
+  useOpenAttempt: () => ({ mutate: openMutate, isPending: false }),
   useCheckQuestion: () => ({ mutateAsync: vi.fn() }),
   useSession: () => ({
     data: {
@@ -344,5 +347,62 @@ describe('use saved signature (U5)', () => {
 
     expect(screen.getByRole('alert').textContent).toMatch(/too many attempts/i);
     expect((screen.getByTestId('field-sig') as HTMLInputElement).value).toBe('');
+  });
+});
+
+/*
+  WHAT COMES AFTER A SATISFACTORY PART. A required course the candidate has
+  not read is the next step — not a Continue the open route would refuse —
+  and a refusal names its real reason. The old line, "your assessor may need
+  to", blamed the assessor for a gate that was never theirs.
+*/
+describe('next step after a satisfactory part', () => {
+  it('sends the candidate to a required, unread course', () => {
+    renderScreen(
+      attempt({
+        party: 'candidate',
+        outcome: 'satisfactory',
+        nextStep: { kind: 'course', courseTitle: 'BBM Small Loader Presentation and Assessment' },
+      }),
+    );
+    expect(screen.getByText(/read the course/i)).toBeTruthy();
+    expect(screen.getByText("BBM Small Loader Presentation and Assessment")).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /continue to/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /start the course/i }));
+    expect(navigate).toHaveBeenCalledWith('/app/assessments/case-1/course');
+    expect(screen.queryByText(/assessor may need/i)).toBeNull();
+  });
+
+  it('names the real reason the next part would not open — never the assessor', () => {
+    const refusals: Array<[string, RegExp, boolean]> = [
+      ['course_not_complete', /read the course first/i, true],
+      ['part_locked', /isn.t open yet/i, false],
+      ['forbidden', /completed by your assessor, not you/i, false],
+      ['part_already_satisfied', /already complete/i, false],
+      ['something_else', /please try again/i, false],
+    ];
+    for (const [code, expected, toCourse] of refusals) {
+      toastSpy.mockClear();
+      navigate.mockClear();
+      openMutate.mockImplementation((_partKey: string, opts?: { onError?: (err: unknown) => void }) =>
+        opts?.onError?.(new ApiError(409, { error: code })),
+      );
+      renderScreen(
+        attempt({
+          party: 'candidate',
+          outcome: 'satisfactory',
+          nextStep: { kind: 'continue', partKey: 'theory', label: 'Part 1 — Theory' },
+        }),
+      );
+      fireEvent.click(screen.getByRole('button', { name: /continue to part 1/i }));
+      expect(openMutate).toHaveBeenCalledWith('theory', expect.anything());
+      const message = (toastSpy.mock.calls[0]?.[0] as { message: string } | undefined)?.message ?? '';
+      expect(message, code).toMatch(expected);
+      expect(message, code).not.toMatch(/assessor may need/i);
+      if (toCourse) expect(navigate).toHaveBeenCalledWith('/app/assessments/case-1/course');
+      else expect(navigate).not.toHaveBeenCalled();
+      cleanup();
+    }
+    openMutate.mockReset();
   });
 });

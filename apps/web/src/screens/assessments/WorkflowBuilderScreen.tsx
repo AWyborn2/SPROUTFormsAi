@@ -1299,6 +1299,16 @@ function CourseMaterialCard({
             Required before the assessment can start
           </label>
         )}
+        {value && (
+          <label className="inline-flex items-center gap-1.5 text-[11.5px] text-text-secondary">
+            <input
+              type="checkbox"
+              checked={value.assessmentInDeck === true}
+              onChange={(e) => onChange({ ...value, assessmentInDeck: e.target.checked })}
+            />
+            The theory questions are inside this deck (answered while reading)
+          </label>
+        )}
         {selected && (
           <span className="text-[11px] text-text-tertiary">
             {selected.slideCount ? `${selected.slideCount} slides · ` : ''}

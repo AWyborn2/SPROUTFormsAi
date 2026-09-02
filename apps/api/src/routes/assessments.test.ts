@@ -7551,6 +7551,10 @@ describe('Small Loader — with the required in-deck course linked', () => {
         200,
       );
       await expectStatus(await fetch(`${base}/assessment-cases/${caseId}/attempts/${decl.id}/submit`, { method: 'POST', headers: auth(candidate), body: '{}' }), 200);
+      // The signed declaration's next step is the COURSE, not a Continue the
+      // reading gate would refuse — and never anything an assessor approves.
+      const signed = await expectStatus(await fetch(`${base}/assessment-cases/${caseId}/attempts/${decl.id}`, { headers: auth(candidate) }), 200);
+      expect(signed.nextStep).toEqual({ kind: 'course', courseTitle: 'BBM Small Loader Presentation and Assessment' });
 
       // The theory opens BEFORE the course is complete — the questions live in the deck.
       const theory = await expectStatus(
@@ -7610,6 +7614,43 @@ describe('POST /assessment-cases — a name-keyed assessor stream rule', () => {
         body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new', locationId: MINING }),
       });
       expect(placed.status, await placed.text()).toBe(201);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  RELINKING A COURSE KEEPS THE IN-DECK FLAG. The Course-material card sends
+  {courseId, required} when it links a package; the tool PATCH used to replace
+  the link wholesale, dropping `assessmentInDeck` — after which the theory
+  refused to open until a course that grades the theory had been "read".
+*/
+describe('PATCH /assessment-tools/:id — course link keeps assessmentInDeck', () => {
+  const COURSE_ID = '00000000-0000-4000-8000-00000000c2c2';
+  it('preserves the flag when the client omits it, and honours it when sent', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    rows(store, 'courses').push({
+      id: COURSE_ID, orgId: ORG, title: 'Deck', kind: 'deck', launchPath: 'index.html', slideCount: 3,
+      files: [{ path: 'index.html', size: 10, contentType: 'text/html; charset=utf-8' }], totalBytes: 10,
+      status: 'active', createdByUserId: ADMIN, createdAt: new Date(),
+    });
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base, { ...MANIFEST, course: { courseId: COURSE_ID, required: true, assessmentInDeck: true } });
+      const relink = await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH', headers: auth(), body: JSON.stringify({ course: { courseId: COURSE_ID, required: true } }),
+      });
+      expect(relink.status, await relink.text()).toBe(200);
+      const stored = () => (rows(store, 'assessmentTools').find((t) => t.id === tool.id)!.manifest as AssessmentToolManifest).course;
+      expect(stored()).toEqual({ courseId: COURSE_ID, required: true, assessmentInDeck: true });
+
+      const off = await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH', headers: auth(), body: JSON.stringify({ course: { courseId: COURSE_ID, required: true, assessmentInDeck: false } }),
+      });
+      expect(off.status, await off.text()).toBe(200);
+      expect(stored()?.assessmentInDeck).toBe(false);
     } finally {
       server.close();
     }

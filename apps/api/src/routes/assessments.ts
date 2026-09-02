@@ -2097,8 +2097,24 @@ assessmentToolsRouter.patch(
           return;
         }
       }
-      const { course: _dropped, ...rest } = manifest;
-      manifest = parsed.data.course ? { ...rest, course: parsed.data.course } : rest;
+      /*
+        RELINKING KEEPS THE IN-DECK FLAG. The Course-material card sends
+        {courseId, required}; replacing the link wholesale silently dropped
+        `assessmentInDeck`, and the next case then refused to open the theory
+        until a course that GRADES the theory had been "read through". A
+        client that says nothing about the flag keeps what was stored; one
+        that sends it (the card's own checkbox) is honoured either way.
+      */
+      const { course: previousCourse, ...rest } = manifest;
+      manifest = parsed.data.course
+        ? {
+            ...rest,
+            course: {
+              ...parsed.data.course,
+              assessmentInDeck: parsed.data.course.assessmentInDeck ?? previousCourse?.assessmentInDeck ?? false,
+            },
+          }
+        : rest;
     }
     const partOutcomeEntries = parsed.data.partOutcomeMarks;
     if (partOutcomeEntries !== undefined) {
@@ -3812,6 +3828,28 @@ assessmentCasesRouter.get(
       workflow access the open-attempt route enforces, so it never offers a step
       the server would then refuse.
     */
+    /*
+      A REQUIRED, UNREAD COURSE IS THE CANDIDATE'S NEXT STEP — not a button to
+      the part the reading gates (or, with the theory in the deck, the part
+      whose answers the reading records). Looked up here so the fill screen can
+      say "read the course" rather than offering a Continue the open route
+      would refuse.
+    */
+    let courseStep: { required: boolean; complete: boolean; title: string | null } | null = null;
+    if (manifest.course?.required) {
+      const courseRow = await db.query.courses.findFirst({
+        where: and(eq(schema.courses.id, manifest.course.courseId), eq(schema.courses.orgId, tenant.orgId)),
+      });
+      if (courseRow && courseRow.status === 'active') {
+        const reading = await db.query.assessmentCaseCourseProgress.findFirst({
+          where: and(
+            eq(schema.assessmentCaseCourseProgress.caseId, row.id),
+            eq(schema.assessmentCaseCourseProgress.courseId, courseRow.id),
+          ),
+        });
+        courseStep = { required: true, complete: !!reading?.completedAt, title: courseRow.title };
+      }
+    }
     const nextStep = nextStepAfter(
       progress.map((p) => {
         const pf = fieldsInPart(allFields, manifest, p.part.key);
@@ -3827,6 +3865,7 @@ assessmentCasesRouter.get(
       }),
       attempt.partKey,
       party === 'candidate',
+      courseStep,
     );
     const prereqValues: Record<string, boolean> = {};
     if (prereqHere) {
