@@ -19,13 +19,15 @@
  *
  * With --write, --seed uploads the blank PDF to the org's object store,
  * creates the template and its published v1, then writes the tool exactly as
- * the by-hand path does. Re-running --seed alone creates ANOTHER template;
- * to re-author the seeded one in place — link the course, re-key a question,
- * pick up a template change — pass --seed --template-id <id>: the fields,
- * keys, manifest and workflow are re-applied from the JSON onto its current
- * version, nothing is uploaded, and the stored PDF is kept. (The by-hand path
- * without --seed reads no hints and stores no workflow, so never use it to
- * re-author a seeded template.)
+ * the by-hand path does. Run it again in the same database and it finds the
+ * seeded template (this paper's name, the seed's own field ids) and
+ * re-authors it IN PLACE — link the course, re-key a question, pick up a
+ * template change: fields, keys, manifest and workflow are re-applied from
+ * the JSON onto its current version, nothing is uploaded, the stored PDF is
+ * kept. --template-id <id> names the template explicitly; --new forces a
+ * fresh template beside an existing one. (The by-hand path without --seed
+ * reads no hints and stores no workflow, so never use it to re-author a
+ * seeded template.)
  *
  * Flags: --key <path> (or ANSWER_KEY_PATH; the in-repo copy is the fallback
  * while it exists); --org <uuid> when the database holds more than one org;
@@ -263,16 +265,39 @@ async function main() {
     hints = tpl.hints ?? {};
     const pageCount = Array.isArray(tpl.pages) ? tpl.pages.length : '?';
     console.log(`Seed:     ${tpl.name} — ${fields.length} fields over ${pageCount} pages (${templateJsonPath})`);
-    if (TEMPLATE_ID && !OFFLINE) {
+    /*
+       IDEMPOTENT BY DEFAULT. A seeded template is recognisable — this paper's
+       name, and a published version whose fields carry the seed's own ids — so
+       a second `--seed` in the same database re-authors THAT template in place
+       rather than minting a duplicate nobody asked for. --template-id names
+       one explicitly; --new forces a fresh template beside the existing one.
+    */
+    let inPlaceId = TEMPLATE_ID;
+    if (!inPlaceId && !OFFLINE && !process.argv.includes('--new')) {
+      const seededId = fields[0]?.id;
+      const candidates = await sql`
+        select t.id, v.fields
+        from form_templates t
+        join form_template_versions v on v.id = t.current_version_id
+        where t.name = ${tpl.name} and t.status <> 'archived'
+        order by t.created_at desc
+      `;
+      const seeded = candidates.find((c) => Array.isArray(c.fields) && c.fields.some((f) => f?.id === seededId));
+      if (seeded) {
+        inPlaceId = seeded.id;
+        console.log(`Found the seeded template already in this database — re-authoring it in place (pass --new to create another).`);
+      }
+    }
+    if (inPlaceId && !OFFLINE) {
       // Re-author the seeded template IN PLACE: same ids, fresh geometry, keys,
       // manifest and workflow onto its current version; the stored PDF stays.
-      const [existing] = await sql`select * from form_templates where id = ${TEMPLATE_ID}`;
+      const [existing] = await sql`select * from form_templates where id = ${inPlaceId}`;
       if (!existing) {
-        console.error(`--template-id ${TEMPLATE_ID} is not a template in this database.`);
+        console.error(`--template-id ${inPlaceId} is not a template in this database.`);
         process.exit(1);
       }
       if (!existing.current_version_id) {
-        console.error(`Template ${TEMPLATE_ID} has no published version to re-author.`);
+        console.error(`Template ${inPlaceId} has no published version to re-author.`);
         process.exit(1);
       }
       const [ver] = await sql`select id, source_pdf_asset_id from form_template_versions where id = ${existing.current_version_id}`;
