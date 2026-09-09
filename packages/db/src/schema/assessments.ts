@@ -357,6 +357,26 @@ export const assessmentPartAttempts = pgTable(
       .notNull()
       .default([]),
     signedAt: timestamp('signed_at', { withTimezone: true }),
+    /**
+     * Set when an assessor REOPENED the part this attempt had passed.
+     *
+     * A superseded attempt no longer counts: progress ignores it, the evidence
+     * document never prints it, and the case drops back to `open` until a fresh
+     * attempt passes. The row itself is never deleted or rewritten — the answers
+     * and the mark stay readable, because a part passed, reopened and passed
+     * again is a trail an auditor is entitled to walk. Three columns rather than
+     * an outcome value, so "was satisfactory, then stood down" is not confused
+     * with "was never satisfactory".
+     *
+     * Null on every attempt that still stands, which is all of them until the
+     * first reopen.
+     */
+    supersededAt: timestamp('superseded_at', { withTimezone: true }),
+    supersededByUserId: uuid('superseded_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    /** The assessor's mandatory reason for reopening — prose, printed nowhere. */
+    supersededReason: text('superseded_reason'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [

@@ -414,6 +414,8 @@ function makeDb(
           createdAt: new Date(),
           outcome: null,
           thresholdNotifiedAt: null,
+          supersededAt: null,
+          supersededReason: null,
           state: 'open',
           ...r,
         }));
@@ -7651,6 +7653,184 @@ describe('PATCH /assessment-tools/:id — course link keeps assessmentInDeck', (
       });
       expect(off.status, await off.text()).toBe(200);
       expect(stored()?.assessmentInDeck).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * Reopening a passed part — the assessor's way back from a mark.
+ *
+ * Every other part state already had a control onward; a pass was final until
+ * sign-off, and the open route still refuses it. This route stands the passing
+ * attempt DOWN rather than unmarking it, so what the assertions below are about
+ * is what survives: the row, its answers and its mark, beside a part that now
+ * reads as not passed and a case that is no longer waiting for a signature.
+ */
+describe('POST /assessment-cases/:id/parts/:partKey/reopen', () => {
+  const SIG = 'data:image/png;base64,iVBORw0KGgo=';
+
+  const post = (base: string, path: string, body: unknown, who: Session = admin) =>
+    fetch(`${base}${path}`, { method: 'POST', headers: auth(who), body: JSON.stringify(body) });
+
+  /** Theory and practical both passed — the case sits at `awaiting_sign_off`. */
+  async function passedCase(base: string) {
+    const tool = await seedTool(base);
+    const c = (await (
+      await post(base, '/assessment-cases', { toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' })
+    ).json()) as { id: string };
+    const theory = (await (await post(base, `/assessment-cases/${c.id}/parts/p1/attempts`, {})).json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values: { q1: ['a'] } }),
+    });
+    await post(base, `/assessment-cases/${c.id}/attempts/${theory.id}/outcome`, {});
+    const prac = (await (await post(base, `/assessment-cases/${c.id}/parts/p2/attempts`, {})).json()) as { id: string };
+    await post(base, `/assessment-cases/${c.id}/attempts/${prac.id}/outcome`, {
+      outcome: 'satisfactory',
+      assessorName: 'A. Assessor',
+    });
+    return { c, theory, prac };
+  }
+
+  const detail = async (base: string, id: string) =>
+    (await (await fetch(`${base}/assessment-cases/${id}`, { headers: auth() })).json()) as {
+      state: string;
+      parts: { key: string; state: string; attempts: number }[];
+      attempts: {
+        id: string;
+        partKey: string;
+        attemptNumber: number;
+        outcome: string | null;
+        supersededAt: string | null;
+        supersededReason: string | null;
+      }[];
+    };
+
+  it('stands the passing attempt down and drops the case out of awaiting_sign_off', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { c, prac } = await passedCase(base);
+      expect((await detail(base, c.id)).state).toBe('awaiting_sign_off');
+
+      const res = await post(base, `/assessment-cases/${c.id}/parts/p2/reopen`, {
+        reason: 'Marked against the wrong candidate',
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { supersededAttemptIds: string[]; partState: string; state: string };
+      expect(body.supersededAttemptIds).toEqual([prac.id]);
+      expect(body.partState).toBe('open');
+      expect(body.state).toBe('open');
+
+      const after = await detail(base, c.id);
+      expect(after.state).toBe('open');
+      expect(after.parts.find((p) => p.key === 'p2')?.state).toBe('open');
+      // The other part is untouched.
+      expect(after.parts.find((p) => p.key === 'p1')?.state).toBe('satisfactory');
+
+      // Stood down, not unmarked: the row keeps its outcome, and says who and why.
+      const stood = after.attempts.find((a) => a.id === prac.id)!;
+      expect(stood.outcome).toBe('satisfactory');
+      expect(stood.supersededAt).not.toBeNull();
+      expect(stood.supersededReason).toBe('Marked against the wrong candidate');
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === prac.id)!;
+      expect(row.supersededByUserId).toBe(ADMIN);
+
+      expect(
+        rows(store, 'auditLogEntries').some(
+          (e) => e.action === 'Reopened assessment part' && String(e.target).includes('wrong candidate'),
+        ),
+      ).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('numbers the next attempt on from the trail, and passing it re-reaches sign-off', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { c } = await passedCase(base);
+      await post(base, `/assessment-cases/${c.id}/parts/p2/reopen`, { reason: 'Re-demonstration required' });
+
+      // The open route accepts the part again — a NEW attempt, not the stood-down one.
+      const opened = await post(base, `/assessment-cases/${c.id}/parts/p2/attempts`, {});
+      expect(opened.status).toBe(201);
+      const created = (await opened.json()) as { id: string; attemptNumber: number; reused: boolean };
+      expect(created.attemptNumber).toBe(2);
+      expect(created.reused).toBe(false);
+
+      await post(base, `/assessment-cases/${c.id}/attempts/${created.id}/outcome`, {
+        outcome: 'satisfactory',
+        assessorName: 'A. Assessor',
+      });
+      const after = await detail(base, c.id);
+      expect(after.state).toBe('awaiting_sign_off');
+      expect(after.parts.find((p) => p.key === 'p2')?.state).toBe('satisfactory');
+      // Both attempts remain on the trail; only one of them stands.
+      expect(after.attempts.filter((a) => a.partKey === 'p2')).toHaveLength(2);
+      expect(after.attempts.filter((a) => a.partKey === 'p2' && a.supersededAt === null)).toHaveLength(1);
+
+      const signed = await post(base, `/assessment-cases/${c.id}/sign-off`, { assessorName: 'A. Assessor', signature: SIG });
+      expect(signed.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a reopened theory part starts blank — a pass carries nothing forward', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { c } = await passedCase(base);
+      await post(base, `/assessment-cases/${c.id}/parts/p1/reopen`, { reason: 'Sat under supervision concerns' });
+
+      const opened = await post(base, `/assessment-cases/${c.id}/parts/p1/attempts`, {});
+      expect(opened.status).toBe(201);
+      const created = (await opened.json()) as { id: string };
+      // A failed retry keeps its correct answers; a reopened pass is a fresh paper.
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === created.id)!;
+      expect(row.values ?? {}).toEqual({});
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses without a reason, for a candidate, on a part that has not passed, and once signed off', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { c } = await passedCase(base);
+      const reopen = `/assessment-cases/${c.id}/parts/p2/reopen`;
+
+      expect((await post(base, reopen, {})).status).toBe(400);
+      expect((await post(base, reopen, { reason: 'x' }, candidate)).status).toBe(403);
+      // Outside the pathway: the experienced pathway has no logbook.
+      expect((await post(base, `/assessment-cases/${c.id}/parts/p3/reopen`, { reason: 'x' })).status).toBe(400);
+
+      // Reopening is one-way: the part now reads as open, so a second call has nothing to stand down.
+      expect((await post(base, reopen, { reason: 'first' })).status).toBe(200);
+      const again = await post(base, reopen, { reason: 'second' });
+      expect(again.status).toBe(409);
+      expect(((await again.json()) as { error: string }).error).toBe('part_not_satisfied');
+
+      // Pass it again and certify — from here the case is a certificate, not a draft.
+      const next = (await (await post(base, `/assessment-cases/${c.id}/parts/p2/attempts`, {})).json()) as { id: string };
+      await post(base, `/assessment-cases/${c.id}/attempts/${next.id}/outcome`, {
+        outcome: 'satisfactory',
+        assessorName: 'A. Assessor',
+      });
+      expect(
+        (await post(base, `/assessment-cases/${c.id}/sign-off`, { assessorName: 'A. Assessor', signature: SIG })).status,
+      ).toBe(200);
+      const sealed = await post(base, reopen, { reason: 'too late' });
+      expect(sealed.status).toBe(409);
+      expect(((await sealed.json()) as { error: string }).error).toBe('case_closed');
     } finally {
       server.close();
     }

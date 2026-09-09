@@ -126,6 +126,12 @@ export interface CaseAttemptView {
   markerKind: 'person' | 'automatic' | null;
   /** Assessor-eligibility shortfalls recorded when a person marked it (U14). */
   markingEligibilityWarnings: string[];
+  /**
+   * Set once an assessor reopened the part this attempt had passed. The row
+   * stays in the trail, readable, but it no longer counts toward anything.
+   */
+  supersededAt: string | null;
+  supersededReason: string | null;
 }
 
 export interface AssessmentCaseDetail {
@@ -255,6 +261,9 @@ export interface AttemptFillView {
   outcome: PartOutcome | null;
   /** Null until the candidate hands it in. */
   submittedAt: string | null;
+  /** Set once an assessor reopened the part — frozen, readable, no longer the record. */
+  supersededAt: string | null;
+  supersededReason: string | null;
   templateVersionId: string;
   /**
    * Which side of this assessment the caller is on, decided by the server from
@@ -540,6 +549,19 @@ export const assessmentsApi = {
       `/assessment-cases/${caseId}/attempts/${attemptId}/reopen`,
       {},
     ),
+
+  /**
+   * The assessor reopens a PASSED part for another attempt. The passing attempt
+   * is stood down (kept, readable, no longer counted) and the case leaves
+   * `awaiting_sign_off`. Assessor-only, and refused once the case is signed off.
+   */
+  reopenPart: (caseId: string, partKey: string, reason: string) =>
+    apiClient.post<{
+      partKey: string;
+      supersededAttemptIds: string[];
+      partState: PartState;
+      state: AssessmentCaseState;
+    }>(`/assessment-cases/${caseId}/parts/${partKey}/reopen`, { reason }),
 
   checkQuestion: (caseId: string, attemptId: string, fieldId: string, value: SubmissionValue) =>
     apiClient.post<{ correct: boolean; hint?: string | null }>(
