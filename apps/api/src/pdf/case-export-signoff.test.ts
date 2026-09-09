@@ -934,3 +934,53 @@ describe('withDerivedMarks', () => {
     });
   });
 });
+
+/**
+ * The TYPED sign-off block — feedback, declaration ticks — prints behind the
+ * same gate as the name and signature. It is part of the certification, so a
+ * mid-programme export must not show an assessor's closing remarks on a case
+ * nobody has signed.
+ */
+describe('assembleCaseValues — the typed sign-off fields', () => {
+  const TYPED: AssessmentToolManifest = {
+    ...WITH_MARKS,
+    signOff: { ...WITH_MARKS.signOff, fieldIds: ['feedback', 'declare'] },
+  };
+
+  it('writes them once signed, for the ids the manifest names and no other', () => {
+    const { values } = assembleCaseValues({
+      manifest: TYPED,
+      pathway: 'experienced',
+      attempts: bothParts,
+      signOff: { ...SIGNED, values: { feedback: 'Confident and safe', declare: true, stray: 'never' } },
+    });
+
+    expect(values.feedback).toBe('Confident and safe');
+    expect(values.declare).toBe(true);
+    expect(values.stray).toBeUndefined();
+  });
+
+  it('prints nothing for them until an assessor has signed', () => {
+    const { values } = assembleCaseValues({
+      manifest: TYPED,
+      pathway: 'experienced',
+      attempts: bothParts,
+      signOff: null,
+    });
+
+    expect(values.feedback).toBeUndefined();
+    expect(values.declare).toBeUndefined();
+  });
+
+  it('leaves a box the assessor did not answer blank rather than writing null', () => {
+    const { values } = assembleCaseValues({
+      manifest: TYPED,
+      pathway: 'experienced',
+      attempts: bothParts,
+      signOff: { ...SIGNED, values: { feedback: 'Fine' } },
+    });
+
+    expect(values.feedback).toBe('Fine');
+    expect('declare' in values).toBe(false);
+  });
+});

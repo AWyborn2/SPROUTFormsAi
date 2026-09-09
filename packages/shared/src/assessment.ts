@@ -628,6 +628,45 @@ export function validateSignOffMarks(
   for (const [mark, what] of marks) {
     if (mark) problems.push(...declaredMarkProblems(mark, what, byId));
   }
+  problems.push(...signOffFieldProblems(signOff, new Set(byId.keys())));
+  return problems;
+}
+
+/**
+ * Problems with the sign-off FIELDS — the ones the assessor types at
+ * sign-off. Shared by the PATCH validator and `validateManifest`, so the two
+ * cannot disagree about what the set may contain.
+ *
+ * Two rules: each id must be in the version, and none may be a pointer or
+ * mark the sign-off WRITES (name, signature, date, the verdict and coaching
+ * pairs). A field in both lists would be typed by the assessor and then
+ * overwritten by the certification, and whichever won would be wrong.
+ */
+function signOffFieldProblems(
+  signOff: NonNullable<AssessmentToolManifest['signOff']>,
+  fieldIds: ReadonlySet<string>,
+): string[] {
+  const problems: string[] = [];
+  const written = new Set(
+    [
+      signOff.assessorNameFieldId,
+      signOff.assessorSignatureFieldId,
+      signOff.signedDateFieldId,
+      signOff.overallSatisfactory?.fieldId,
+      signOff.overallNotSatisfactory?.fieldId,
+      signOff.moreCoachingRequiredYes?.fieldId,
+      signOff.moreCoachingRequiredNo?.fieldId,
+    ].filter((id): id is string => !!id),
+  );
+  for (const id of signOff.fieldIds ?? []) {
+    if (!fieldIds.has(id)) {
+      problems.push(`Sign-off field "${id}" is not in this version.`);
+    } else if (written.has(id)) {
+      problems.push(
+        `Sign-off field "${id}" is also a box the sign-off writes (name, signature, date or verdict) — it cannot be both typed and written.`,
+      );
+    }
+  }
   return problems;
 }
 
@@ -1036,6 +1075,23 @@ export interface AssessmentToolManifest {
      */
     moreCoachingRequiredYes?: DeclaredMark;
     moreCoachingRequiredNo?: DeclaredMark;
+    /**
+     * The fields the assessor COMPLETES AT SIGN-OFF — "Assessor's Feedback",
+     * the assessor declaration ticks — typed into the sign-off dialog beside
+     * the name and signature, stored on the case, printed once signed.
+     *
+     * THESE BELONG TO NO PART. `fieldsInPart` excludes them wherever they
+     * print, exactly as it excludes the prerequisite boxes: a closing block
+     * printed after the last part would otherwise fall into that part's slice,
+     * and a part cannot complete on a field that is not the candidate's to
+     * fill and not the assessor's to mark. Track Dozer published its feedback
+     * block as a part, and no case on the experienced pathway could ever reach
+     * sign-off.
+     *
+     * Never one of the pointers or marks above — those are WRITTEN by the
+     * sign-off, not typed — and `validateManifest` says so.
+     */
+    fieldIds?: string[];
   };
   /**
    * The printed pathway tick — "New and inexperienced candidates" /
@@ -1208,7 +1264,26 @@ export function fieldsInPart(
     marking, the publish warnings and the export — agrees it is no part's.
   */
   const nonPart = new Set((manifest.prerequisiteChecks ?? []).map((c) => c.fieldId));
+  // The assessor's sign-off fields are no part's either — completed in the
+  // sign-off dialog, stored on the case. See `signOff.fieldIds`.
+  for (const id of manifest.signOff?.fieldIds ?? []) nonPart.add(id);
   return fields.slice(start, end).filter((f) => !nonPart.has(f.id));
+}
+
+/**
+ * The fields the assessor completes at sign-off, in document order.
+ *
+ * Read off the manifest's `signOff.fieldIds` against the version's fields, so
+ * an id the version no longer carries simply yields nothing — the exporter's
+ * silent-skip contract, not a crash on a stale pointer.
+ */
+export function signOffFields(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+): FormField[] {
+  const wanted = new Set(manifest.signOff?.fieldIds ?? []);
+  if (wanted.size === 0) return [];
+  return fields.filter((f) => wanted.has(f.id));
 }
 
 /**
@@ -1660,6 +1735,7 @@ export function validateManifest(
         problems.push(`Manifest names ${what} "${id}", which is not in this version.`);
       }
     }
+    problems.push(...signOffFieldProblems(signOff, fieldIds));
 
     /*
       THIS USED TO DEMAND type === 'signature', and that was unsatisfiable.
@@ -2358,6 +2434,35 @@ export function missingDeclarationFields(
   partKey: string,
   values: Record<string, SubmissionValue> | null | undefined,
 ): { id: string; label: string }[] {
+  return missingRequiredAmong(fieldsInPart(fields, manifest, partKey), fields, values);
+}
+
+/**
+ * The sign-off fields still empty — what stops the assessor certifying.
+ *
+ * Same rule as a declaration's hand-in, over the sign-off set instead of a
+ * part's slice: required, visible under the answers given, and empty. A tool
+ * with no sign-off fields has nothing missing, so sign-off behaves as it
+ * always has.
+ */
+export function missingSignOffFields(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+  values: Record<string, SubmissionValue> | null | undefined,
+): { id: string; label: string }[] {
+  return missingRequiredAmong(signOffFields(fields, manifest), fields, values);
+}
+
+/**
+ * The one emptiness rule both completeness gates share. Visibility is judged
+ * over the WHOLE version's fields, because a condition's source may print
+ * outside the set being checked.
+ */
+function missingRequiredAmong(
+  candidates: readonly FormField[],
+  fields: readonly FormField[],
+  values: Record<string, SubmissionValue> | null | undefined,
+): { id: string; label: string }[] {
   const answers = values ?? {};
   const visible = new Set(visibleFields(fields, answers as VisibilityAnswers).map((f) => f.id));
   const empty = (v: SubmissionValue | undefined): boolean => {
@@ -2367,7 +2472,7 @@ export function missingDeclarationFields(
     return false;
   };
 
-  return fieldsInPart(fields, manifest, partKey)
+  return candidates
     .filter(
       (f) =>
         f.required &&

@@ -21,7 +21,10 @@ import {
   useSignOffCase,
 } from '../../lib/data/hooks.js';
 import { caseExportFilename, caseExportProblem } from '../../lib/case-export-problem.js';
+import { fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
+import { FieldInput } from '../fields/FieldRenderer.js';
 import type { CaseCourseState, CasePartView } from '../../lib/data/assessments.js';
+import type { FormField, SubmissionValue } from '@formai/shared';
 
 /**
  * The course-material card: what the candidate reads before the parts below
@@ -357,8 +360,24 @@ export function AssessmentCaseScreen() {
         ))}
       </div>
 
+      {/*
+        WHAT THE ASSESSOR WROTE AT SIGN-OFF. The feedback and declaration are
+        typed in the sign-off dialog and live on the case, not on any part —
+        so once signed they are shown here, read-only, beside the parts they
+        conclude. Empty until the case is signed; absent on a tool that has no
+        sign-off fields.
+      */}
+      {c.state === 'competent' && c.signOffFields.length > 0 && (
+        <SignOffSummary fields={c.signOffFields} values={c.signOffValues} />
+      )}
+
       {signingOff && (
-        <SignOffDialog caseId={c.id} toolName={c.toolName} onClose={() => setSigningOff(false)} />
+        <SignOffDialog
+          caseId={c.id}
+          toolName={c.toolName}
+          fields={c.signOffFields}
+          onClose={() => setSigningOff(false)}
+        />
       )}
       {reopening && (
         <ReopenPartDialog caseId={c.id} part={reopening} onClose={() => setReopening(null)} />
@@ -487,11 +506,15 @@ const SIGN_OFF_ERRORS: Record<string, string> = {
   invalid_credentials: 'That password is not right. Re-enter it, or redraw your signature to sign without one.',
   password_required: 'Enter your password to apply your saved signature, or redraw it to sign without one.',
   too_many_attempts: 'Too many password attempts. Wait a few minutes and try again.',
+  sign_off_incomplete: 'The sign-off block is not complete.',
+  foreign_fields: 'The sign-off carried a field this tool does not hand to the assessor.',
 };
 
 function signOffErrorMessage(body: Record<string, unknown>): string {
   const code = typeof body.error === 'string' ? body.error : '';
   const base = SIGN_OFF_ERRORS[code] ?? `Sign-off refused (${code || 'unknown'}).`;
+  // The route names the empty boxes; that is the whole message.
+  if (code === 'sign_off_incomplete' && typeof body.detail === 'string') return body.detail;
   if (code === 'prerequisites_unsatisfied' && typeof body.detail === 'string') {
     // Point the assessor at the fix: a lapsed licence is renewed — re-dated and
     // its new evidence filed — from the person's profile, under Competencies.
@@ -503,18 +526,73 @@ function signOffErrorMessage(body: Record<string, unknown>): string {
   return base;
 }
 
+/** Empty for the completeness gate — the same rule the API applies. */
+function isBlank(v: SubmissionValue | undefined): boolean {
+  if (v === undefined || v === null) return true;
+  if (typeof v === 'string') return v.trim() === '';
+  if (Array.isArray(v)) return v.length === 0;
+  return false;
+}
+
+/** A sign-off answer as words, for the read-only summary. */
+function describeValue(v: SubmissionValue | undefined): string {
+  if (isBlank(v)) return '—';
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  if (Array.isArray(v)) return v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(', ');
+  if (typeof v === 'object' && v !== null) return 'fileName' in v ? String(v.fileName) : JSON.stringify(v);
+  return String(v);
+}
+
+function SignOffSummary({
+  fields,
+  values,
+}: {
+  fields: FormField[];
+  values: Record<string, SubmissionValue>;
+}) {
+  const answered = fields.filter((f) => f.type !== 'section_header');
+  if (answered.length === 0) return null;
+  return (
+    <section
+      aria-label="Assessor's sign-off"
+      className="mt-4 rounded-md border border-border bg-surface-card p-[14px_16px]"
+    >
+      <div className="font-heading text-[15px] font-bold">Assessor’s sign-off</div>
+      <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1.5 text-[12.5px] sm:grid-cols-2">
+        {answered.map((f) => (
+          <div key={f.id} className="min-w-0">
+            <dt className="text-text-tertiary">{f.label}</dt>
+            <dd className="whitespace-pre-wrap text-text-secondary">{describeValue(values[f.id])}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
 function SignOffDialog({
   caseId,
   toolName,
+  fields,
   onClose,
 }: {
   caseId: string;
   toolName: string;
+  /** The tool's sign-off fields — feedback, declaration ticks. Empty is fine. */
+  fields: FormField[];
   onClose: () => void;
 }) {
   const signOff = useSignOffCase(caseId);
   const { toast } = useToast();
   const { data: session } = useSession();
+  /*
+    THE CLOSING BLOCK, TYPED HERE. These fields belong to no part: the
+    assessor's feedback and declaration are made once, at the end, in the same
+    act as the name and signature — so they live in this dialog and on the
+    case row, and the exporter prints them behind the same signed gate.
+  */
+  const [values, setValues] = useState<Record<string, SubmissionValue>>({});
+  const hasBlock = fields.some((f) => f.type !== 'section_header');
   /*
     PREFILLED FROM THE ACCOUNT, so an assessor certifies without re-typing their
     name or re-drawing a signature they have drawn before. The saved signature
@@ -552,11 +630,21 @@ function SignOffDialog({
       setError('Enter your password to apply your saved signature.');
       return;
     }
+    // Same gate the route applies, said here first so the assessor is told
+    // which box before a round trip.
+    const missing = fields.filter(
+      (f) => f.required && f.type !== 'section_header' && isBlank(values[f.id]),
+    );
+    if (missing.length > 0) {
+      setError(`Fill ${missing.map((m) => `"${m.label}"`).join(', ')} before signing off.`);
+      return;
+    }
     try {
       const res = await signOff.mutateAsync({
         assessorName: name.trim(),
         signature,
         ...(usingSaved ? { password } : {}),
+        ...(hasBlock ? { values } : {}),
       });
       const granted = res.granted?.length
         ? ` Competency recorded: ${res.granted.join(', ')}.`
@@ -587,12 +675,36 @@ function SignOffDialog({
       aria-modal="true"
       aria-label="Sign off and certify"
     >
-      <div className="w-full max-w-[460px] rounded-lg border border-border bg-surface-card p-[20px_22px]">
+      <div
+        className={`max-h-[92vh] w-full overflow-y-auto rounded-lg border border-border bg-surface-card p-[20px_22px] ${
+          hasBlock ? 'max-w-[680px]' : 'max-w-[460px]'
+        }`}
+      >
         <h2 className="font-heading text-[17px] font-bold">Sign off and certify</h2>
         <p className="mt-1.5 text-[13px] text-text-tertiary">
           Every part of {toolName} is satisfactory. Your name, signature and today’s date print on
           the assessment record, and this is what makes the case competent.
+          {hasBlock && ' Your feedback and declaration below print with them.'}
         </p>
+
+        {hasBlock && (
+          <div
+            role="group"
+            aria-label="Assessor's feedback and declaration"
+            className="mt-4 grid grid-cols-12 gap-[14px] border-b border-border-subtle pb-4"
+          >
+            {fields.map((f) => (
+              <div key={f.id} className={fillSpanClass(resolveFillSpan(f, true))}>
+                <FieldInput
+                  field={f}
+                  value={values[f.id] ?? null}
+                  onChange={(v) => setValues((prev) => ({ ...prev, [f.id]: v }))}
+                  disabled={signOff.isPending}
+                />
+              </div>
+            ))}
+          </div>
+        )}
 
         <label htmlFor="so-name" className="mt-4 block text-[12.5px] font-semibold text-text-secondary">
           Your name, as it should print

@@ -893,3 +893,49 @@ describe('proposePartCompletionMarks', () => {
     expect(manifest.partCompletionMarks).toBeUndefined();
   });
 });
+
+
+/**
+ * The assessor's closing block leaves the parts list as SIGN-OFF FIELDS.
+ *
+ * Two sources: whatever the extraction tagged as the cover's assessor
+ * declaration that the sign-off does not itself write, and any section the
+ * author marked as the sign-off block. Track Dozer published its feedback
+ * block as a part, and no experienced-pathway case could ever reach sign-off.
+ */
+describe('buildManifest — the sign-off block', () => {
+  it('drops a sign-off-block section from the parts and folds its fields into signOff.fieldIds', () => {
+    const fields = [
+      question('q1'),
+      field({ id: 'feedback', type: 'textarea', label: "Assessor's Feedback" }),
+      field({ id: 'declare', type: 'checkbox', label: 'Conducted fairly' }),
+    ];
+    const parts = derive(
+      [section('a', 'Part 1', ['q1']), section('fb', "Assessor's Feedback and Declaration", ['feedback', 'declare'])],
+      fields,
+    ).map((p) => (p.key === 'fb' ? { ...p, signOffBlock: true } : p));
+
+    const manifest = buildManifest(parts, [], undefined, ['feedback', 'declare']);
+
+    expect(manifest.parts.map((p) => p.key)).toEqual(['a']);
+    expect(manifest.parts[0]).not.toHaveProperty('signOffBlock');
+    expect(manifest.signOff?.fieldIds).toEqual(['feedback', 'declare']);
+  });
+
+  it('takes the cover’s leftover assessor-declaration fields, never the boxes the sign-off writes', () => {
+    const manifest = buildManifest([], [
+      { id: 'n', label: 'Name of Assessor', type: 'text' as const, coverSection: 'assessor_declaration' as const },
+      { id: 'fb', label: "Assessor's Feedback", type: 'textarea' as const, coverSection: 'assessor_declaration' as const },
+      { id: 'h', label: 'Declaration', type: 'section_header' as const, coverSection: 'assessor_declaration' as const },
+      { id: 'cand', label: 'Candidate Name', type: 'text' as const, coverSection: 'candidate_declaration' as const },
+    ]);
+
+    expect(manifest.signOff?.assessorNameFieldId).toBe('n');
+    expect(manifest.signOff?.fieldIds).toEqual(['fb']);
+  });
+
+  it('proposes no sign-off fields when nothing is typed at sign-off', () => {
+    const parts = derive([section('a', 'Part 1', ['q1'])], [question('q1')]);
+    expect(buildManifest(parts, []).signOff?.fieldIds).toBeUndefined();
+  });
+});

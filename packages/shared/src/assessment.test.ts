@@ -21,6 +21,7 @@ import {
   fieldsInSection,
   isCaseCompetent,
   isTerminalCaseState,
+  missingSignOffFields,
   moreCoachingRequired,
   nextStepAfter,
   type NextStepPart,
@@ -28,6 +29,7 @@ import {
   pathwayFromHistory,
   requiredParts,
   resolveLocationParts,
+  signOffFields,
   theoryRetryOf,
   totalLoggedHours,
   validateAnswerKeys,
@@ -1661,5 +1663,65 @@ describe('caseProgress — applicable part keys', () => {
 
     expect(progress.map((p) => p.part.key)).toEqual(['general', 'raw-theory', 'practical']);
     expect(isCaseCompetent(progress)).toBe(false);
+  });
+});
+
+/**
+ * The assessor's sign-off fields — feedback, declaration ticks — belong to NO
+ * part. Track Dozer's feedback block printed after the last part, fell into
+ * that part's slice, and no experienced-pathway case could ever complete it.
+ */
+describe('signOff.fieldIds', () => {
+  const docFields: FormField[] = [
+    header('h-one'),
+    question('q1'),
+    header('h-two'),
+    question('q2'),
+    header('h-feedback'),
+    { id: 'feedback', type: 'textarea', label: "Assessor's feedback", required: true, source: 'imported' },
+    { id: 'declare', type: 'checkbox', label: 'I declare the assessment was conducted fairly', required: true, source: 'imported' },
+  ];
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      part({ key: 'one', ordinal: 1, startFieldId: 'h-one' }),
+      part({ key: 'two', ordinal: 2, startFieldId: 'h-two' }),
+    ],
+    signOff: { assessorNameFieldId: 'q2', fieldIds: ['feedback', 'declare'] },
+  };
+
+  it('carves the sign-off fields out of the last part’s slice, wherever they print', () => {
+    expect(fieldsInPart(docFields, manifest, 'two').map((f) => f.id)).toEqual(['h-two', 'q2', 'h-feedback']);
+  });
+
+  it('lists them in document order, and nothing for a tool naming none', () => {
+    expect(signOffFields(docFields, manifest).map((f) => f.id)).toEqual(['feedback', 'declare']);
+    expect(signOffFields(docFields, { parts: manifest.parts })).toEqual([]);
+  });
+
+  it('names the required boxes still empty — the sign-off completeness gate', () => {
+    expect(missingSignOffFields(docFields, manifest, {}).map((m) => m.id)).toEqual(['feedback', 'declare']);
+    expect(missingSignOffFields(docFields, manifest, { feedback: '   ', declare: true }).map((m) => m.id)).toEqual([
+      'feedback',
+    ]);
+    expect(missingSignOffFields(docFields, manifest, { feedback: 'Solid operator', declare: true })).toEqual([]);
+    // A tool with no sign-off fields has nothing to demand.
+    expect(missingSignOffFields(docFields, { parts: manifest.parts }, {})).toEqual([]);
+  });
+
+  it('refuses a sign-off field that is not in the version, or that the sign-off itself writes', () => {
+    const ghost = validateManifest(
+      { ...manifest, signOff: { fieldIds: ['feedback', 'vanished'] } },
+      docFields,
+    );
+    expect(ghost.some((p) => p.includes('"vanished"') && p.includes('not in this version'))).toBe(true);
+
+    // q2 is the assessor-name box: written at sign-off, so it cannot also be typed.
+    const overlap = validateManifest(
+      { ...manifest, signOff: { assessorNameFieldId: 'q2', fieldIds: ['q2'] } },
+      docFields,
+    );
+    expect(overlap.some((p) => p.includes('"q2"') && p.includes('cannot be both'))).toBe(true);
+
+    expect(validateManifest(manifest, docFields).filter((p) => p.includes('Sign-off field'))).toEqual([]);
   });
 });

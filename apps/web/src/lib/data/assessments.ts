@@ -154,6 +154,14 @@ export interface AssessmentCaseDetail {
   course: CaseCourseState | null;
   parts: CasePartView[];
   attempts: CaseAttemptView[];
+  /**
+   * The fields the assessor completes AT SIGN-OFF (feedback, declaration
+   * ticks), stripped, in document order; empty for a tool that names none.
+   * The sign-off dialog renders them with the real renderer.
+   */
+  signOffFields: FormField[];
+  /** What was typed at sign-off — `{}` until the case is signed. */
+  signOffValues: Record<string, SubmissionValue>;
 }
 
 /** The case's course-material state, as the case detail carries it. */
@@ -631,6 +639,8 @@ export const assessmentsApi = {
     signature: string;
     /** Required by the API when `signature` is the caller's STORED mark. */
     password?: string;
+    /** Answers to the tool's sign-off fields, keyed by field id. */
+    values?: Record<string, SubmissionValue>;
   }) =>
     apiClient.post<{
       state: AssessmentCaseState;

@@ -71,6 +71,12 @@ export interface CaseSignOff {
   name: string;
   /** PNG data URL. */
   signature: string;
+  /**
+   * What the assessor TYPED at sign-off — feedback, declaration ticks — keyed
+   * by field id. Written only for the ids `manifest.signOff.fieldIds` names,
+   * so a stray key can never land in a box the manifest did not hand over.
+   */
+  values?: Record<string, SubmissionValue>;
 }
 
 export interface AssembleCaseInput {
@@ -480,6 +486,12 @@ export function assembleCaseValues({
       if (marks.signedDateFieldId) values[marks.signedDateFieldId] = formatSignedDate(signOff.at);
       if (marks.assessorSignatureFieldId) values[marks.assessorSignatureFieldId] = signOff.signature;
       writeMark(values, marks.overallSatisfactory);
+      // The typed block — feedback, declaration ticks — behind the same gate:
+      // it is part of the certification, and an unsigned export prints it blank.
+      for (const id of marks.fieldIds ?? []) {
+        const v = signOff.values?.[id];
+        if (v !== undefined && v !== null) values[id] = v;
+      }
     }
   }
 

@@ -1615,8 +1615,12 @@ export function useReopenPart(caseId: string) {
 export function useSignOffCase(caseId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { assessorName: string; signature: string; password?: string }) =>
-      assessmentsApi.signOffCase({ caseId, ...input }),
+    mutationFn: (input: {
+      assessorName: string;
+      signature: string;
+      password?: string;
+      values?: Record<string, SubmissionValue>;
+    }) => assessmentsApi.signOffCase({ caseId, ...input }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });

@@ -7836,3 +7836,177 @@ describe('POST /assessment-cases/:id/parts/:partKey/reopen', () => {
     }
   });
 });
+
+
+/**
+ * The assessor's feedback and declaration are completed AT SIGN-OFF, on the
+ * case, and never as a part. These pin the route's two rules — only the
+ * manifest's sign-off fields may be written, and the required ones must be —
+ * and that the case detail hands the dialog the fields to render.
+ */
+describe('POST /assessment-cases/:id/sign-off — the typed sign-off block', () => {
+  const SIG = 'data:image/png;base64,iVBORw0KGgo=';
+  const FEEDBACK: FormField = {
+    id: 'feedback',
+    type: 'textarea',
+    label: "Assessor's feedback",
+    required: true,
+    source: 'imported',
+  };
+  const DECLARE: FormField = {
+    id: 'declare',
+    type: 'checkbox',
+    label: 'Assessment conducted fairly',
+    required: false,
+    source: 'imported',
+  };
+  const TYPED_MANIFEST: AssessmentToolManifest = {
+    ...MANIFEST,
+    signOff: { fieldIds: ['feedback', 'declare'] },
+  };
+
+  const post = (base: string, path: string, body: unknown) =>
+    fetch(`${base}${path}`, { method: 'POST', headers: auth(), body: JSON.stringify(body) });
+
+  /** A case on the typed-block tool with both experienced-pathway parts passed. */
+  async function readyTypedCase(base: string, store: Record<string, Record<string, unknown>[]>) {
+    // The block prints after the last part; appended so every existing slice keeps its shape.
+    rows(store, 'formTemplateVersions')[0]!.fields = [...FIELDS, FEEDBACK, DECLARE];
+    const tool = await seedTool(base, TYPED_MANIFEST);
+    const c = (await (
+      await post(base, '/assessment-cases', { toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' })
+    ).json()) as { id: string };
+    const theory = (await (await post(base, `/assessment-cases/${c.id}/parts/p1/attempts`, {})).json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values: { q1: ['a'] } }),
+    });
+    await post(base, `/assessment-cases/${c.id}/attempts/${theory.id}/outcome`, {});
+    const prac = (await (await post(base, `/assessment-cases/${c.id}/parts/p2/attempts`, {})).json()) as { id: string };
+    await post(base, `/assessment-cases/${c.id}/attempts/${prac.id}/outcome`, {
+      outcome: 'satisfactory',
+      assessorName: 'A. Assessor',
+    });
+    return c;
+  }
+
+  it('hands the dialog the sign-off fields, stripped and in order, and none for a tool without them', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyTypedCase(base, store);
+      const detail = (await (await fetch(`${base}/assessment-cases/${c.id}`, { headers: auth() })).json()) as {
+        state: string;
+        signOffFields: { id: string; label: string }[];
+        signOffValues: Record<string, unknown>;
+      };
+      expect(detail.state).toBe('awaiting_sign_off');
+      expect(detail.signOffFields.map((f) => f.id)).toEqual(['feedback', 'declare']);
+      expect(detail.signOffValues).toEqual({});
+
+      const plain = await seedTool(base);
+      const other = (await (
+        await post(base, '/assessment-cases', { toolId: plain.id, candidateUserId: OTHER_CANDIDATE, pathway: 'experienced' })
+      ).json()) as { id: string };
+      const plainDetail = (await (await fetch(`${base}/assessment-cases/${other.id}`, { headers: auth() })).json()) as {
+        signOffFields: unknown[];
+      };
+      expect(plainDetail.signOffFields).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses to certify until the required sign-off boxes are filled, naming them', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyTypedCase(base, store);
+      const bare = await post(base, `/assessment-cases/${c.id}/sign-off`, { assessorName: 'A. Assessor', signature: SIG });
+      expect(bare.status).toBe(400);
+      const body = (await bare.json()) as { error: string; detail: string; missing: { id: string }[] };
+      expect(body.error).toBe('sign_off_incomplete');
+      expect(body.missing.map((m) => m.id)).toEqual(['feedback']);
+      expect(body.detail).toContain("Assessor's feedback");
+      // Nothing was certified.
+      expect(rows(store, 'assessmentCases')[0]!.signedOffAt).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a field the manifest does not hand to the sign-off', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyTypedCase(base, store);
+      const res = await post(base, `/assessment-cases/${c.id}/sign-off`, {
+        assessorName: 'A. Assessor',
+        signature: SIG,
+        values: { feedback: 'Fine', q1: ['b'] },
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()) as object).toMatchObject({ error: 'foreign_fields', fields: ['q1'] });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stores the block on the case with the certification, and the detail shows it', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyTypedCase(base, store);
+      const res = await post(base, `/assessment-cases/${c.id}/sign-off`, {
+        assessorName: 'A. Assessor',
+        signature: SIG,
+        values: { feedback: 'Confident, safe, ready for solo work', declare: true },
+      });
+      expect(res.status).toBe(200);
+
+      const row = rows(store, 'assessmentCases').find((r) => r.id === c.id)!;
+      expect(row.state).toBe('competent');
+      expect(row.signOffValues).toEqual({ feedback: 'Confident, safe, ready for solo work', declare: true });
+
+      const detail = (await (await fetch(`${base}/assessment-cases/${c.id}`, { headers: auth() })).json()) as {
+        signOffValues: Record<string, unknown>;
+      };
+      expect(detail.signOffValues.feedback).toBe('Confident, safe, ready for solo work');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a tool with no sign-off fields signs exactly as before, values or not', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const c = (await (
+        await post(base, '/assessment-cases', { toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' })
+      ).json()) as { id: string };
+      const theory = (await (await post(base, `/assessment-cases/${c.id}/parts/p1/attempts`, {})).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      await post(base, `/assessment-cases/${c.id}/attempts/${theory.id}/outcome`, {});
+      const prac = (await (await post(base, `/assessment-cases/${c.id}/parts/p2/attempts`, {})).json()) as { id: string };
+      await post(base, `/assessment-cases/${c.id}/attempts/${prac.id}/outcome`, {
+        outcome: 'satisfactory',
+        assessorName: 'A. Assessor',
+      });
+
+      const res = await post(base, `/assessment-cases/${c.id}/sign-off`, { assessorName: 'A. Assessor', signature: SIG });
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+});

@@ -268,6 +268,18 @@ export const assessmentCases = pgTable(
     signedOffLocationName: text('signed_off_location_name').notNull().default(''),
     /** PNG data URL, as SignaturePad emits. One per case; 5-40KB. */
     signedOffSignature: text('signed_off_signature').notNull().default(''),
+    /**
+     * The assessor's sign-off answers — "Assessor's Feedback", the assessor
+     * declaration ticks — keyed by field id, for the fields the manifest's
+     * `signOff.fieldIds` names. Written once, at sign-off, in the same update
+     * as the name and signature; printed by the exporter inside the same
+     * signed gate. On the CASE and not an attempt because they are the
+     * assessor's closing attestation, not a part anybody sits.
+     */
+    signOffValues: jsonb('sign_off_values')
+      .$type<Record<string, SubmissionValue>>()
+      .notNull()
+      .default({}),
   },
   (t) => [
     index('assessment_cases_org_idx').on(t.orgId),

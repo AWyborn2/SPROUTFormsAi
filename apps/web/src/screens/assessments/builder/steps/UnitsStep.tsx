@@ -47,6 +47,9 @@ const KIND_LABELS: Record<PartKind, string> = {
   declaration: 'Declaration',
 };
 
+/** The kind select's extra choice — a section that is the sign-off block, not a part. */
+const SIGN_OFF_BLOCK = 'sign_off_block';
+
 const PATHWAY_LABELS: Record<AssessmentPathway, string> = {
   new: 'New',
   experienced: 'Experienced',
@@ -221,8 +224,12 @@ export function UnitsStep({ draft }: UnitsStepProps) {
 
               <select
                 aria-label={`Kind for ${part.label}`}
-                value={part.kind}
-                onChange={(e) => partOps.update(part.key, { kind: e.target.value as PartKind })}
+                value={part.signOffBlock ? SIGN_OFF_BLOCK : part.kind}
+                onChange={(e) =>
+                  e.target.value === SIGN_OFF_BLOCK
+                    ? partOps.update(part.key, { signOffBlock: true })
+                    : partOps.update(part.key, { kind: e.target.value as PartKind, signOffBlock: false })
+                }
                 className="h-[28px] flex-none rounded-lg border border-border bg-surface-page px-2 text-[11px]"
               >
                 {PART_KINDS.map((k) => (
@@ -230,9 +237,24 @@ export function UnitsStep({ draft }: UnitsStepProps) {
                     {KIND_LABELS[k]}
                   </option>
                 ))}
+                {/*
+                  NOT A PART. The assessor's closing feedback and declaration
+                  are completed in the sign-off dialog, so a section holding
+                  them must leave the parts list — published as a part it can
+                  never complete, and the case never reaches sign-off.
+                */}
+                <option value={SIGN_OFF_BLOCK}>Sign-off block</option>
               </select>
             </div>
 
+            {part.signOffBlock && (
+              <p className="mt-2.5 text-[11.5px] text-text-secondary">
+                Not a part. The assessor completes these fields in the Sign off and certify dialog,
+                and they print once the case is signed.
+              </p>
+            )}
+
+            {!part.signOffBlock && (
             <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
               <span className="text-[11px] text-text-tertiary">Required by</span>
               {ASSESSMENT_PATHWAYS.map((pathway) => {
@@ -261,8 +283,9 @@ export function UnitsStep({ draft }: UnitsStepProps) {
                 );
               })}
             </div>
+            )}
 
-            {part.kind === 'logbook' && (
+            {part.kind === 'logbook' && !part.signOffBlock && (
               <div className="mt-2.5 flex flex-wrap items-center gap-2">
                 <label className="inline-flex items-center gap-1.5 text-[11.5px] text-text-secondary">
                   Unit

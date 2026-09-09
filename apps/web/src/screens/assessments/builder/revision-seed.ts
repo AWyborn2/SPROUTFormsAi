@@ -120,21 +120,45 @@ function structureFromManifest(
       fields: fields.slice(0, firstAnchor).map((f) => ({ id: f.id })),
     });
   }
+  /*
+    THE SIGN-OFF BLOCK IS CARVED OUT OF WHICHEVER PART IT PRINTS INSIDE. The
+    manifest's `signOff.fieldIds` belong to no part at runtime, but this
+    reconstruction slices by anchor and would fold them back into the last
+    part's section — and a republish that touched nothing would then present
+    the feedback block as part fields. Shown instead as its own section, which
+    `overridesFromManifest` flags as the sign-off block, so the Units step
+    opens saying exactly what is live.
+  */
+  const signOffIds = new Set(manifest.signOff?.fieldIds ?? []);
+  const signOffFieldRefs: { id: string }[] = [];
   for (let i = 0; i < anchored.length; i++) {
     const part = anchored[i]!;
     const from = anchorAt.get(part.key)!;
     const to = i + 1 < anchored.length ? anchorAt.get(anchored[i + 1]!.key)! : fields.length;
+    const slice = fields.slice(from, to);
+    signOffFieldRefs.push(...slice.filter((f) => signOffIds.has(f.id)).map((f) => ({ id: f.id })));
     sections.push({
       key: part.key,
       label: part.label,
       cols: 1,
       // The anchor header itself stays in the section — it is the part's
       // printed heading and the id the manifest's startFieldId names.
-      fields: fields.slice(from, to).map((f) => ({ id: f.id })),
+      fields: slice.filter((f) => !signOffIds.has(f.id)).map((f) => ({ id: f.id })),
+    });
+  }
+  if (signOffFieldRefs.length > 0) {
+    sections.push({
+      key: SIGN_OFF_SECTION_KEY,
+      label: 'Assessor sign-off block',
+      cols: 1,
+      fields: signOffFieldRefs,
     });
   }
   return sections;
 }
+
+/** The revision structure's section for the manifest's sign-off fields. */
+export const SIGN_OFF_SECTION_KEY = 'sign_off_block';
 
 /**
  * Part edits that pin the derived manifest to the tool's stored one.
@@ -152,6 +176,9 @@ function overridesFromManifest(
     const { key: _key, ordinal: _ordinal, ...rest } = part;
     out[part.key] = rest as Record<string, unknown>;
   }
+  // The carved-out sign-off section derives as a part; this pins it back to
+  // what it is. See `structureFromManifest`.
+  if (manifest.signOff?.fieldIds?.length) out[SIGN_OFF_SECTION_KEY] = { signOffBlock: true };
   return out;
 }
 
