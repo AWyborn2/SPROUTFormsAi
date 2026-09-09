@@ -15,6 +15,7 @@ import {
   useExportCasePdf,
   useOpenAttempt,
   useRecordOutcome,
+  useReopenPart,
   useSession,
   useSetCaseLocation,
   useSignOffCase,
@@ -147,6 +148,8 @@ export function AssessmentCaseScreen() {
   const exportPdf = useExportCasePdf();
   const { toast } = useToast();
   const [signingOff, setSigningOff] = useState(false);
+  /** The passed part the assessor is about to reopen, while its dialog is up. */
+  const [reopening, setReopening] = useState<CasePartView | null>(null);
 
   const isCandidate = session?.role === 'candidate';
   const tools = useAssessmentTools();
@@ -317,6 +320,13 @@ export function AssessmentCaseScreen() {
             part={part}
             readOnly={isCandidate}
             attempts={c.attempts.filter((a) => a.partKey === part.key)}
+            /*
+              A passed part can be reopened by the assessor until the case is
+              signed off — the server's rule, mirrored here only so the control
+              is not offered where the request would be refused.
+            */
+            canReopen={!isCandidate && (c.state === 'open' || c.state === 'awaiting_sign_off')}
+            onReopen={() => setReopening(part)}
             onOpen={() =>
               openAttempt.mutate(part.key, {
                 // The server authorises per workflow: a candidate may open the
@@ -350,6 +360,108 @@ export function AssessmentCaseScreen() {
       {signingOff && (
         <SignOffDialog caseId={c.id} toolName={c.toolName} onClose={() => setSigningOff(false)} />
       )}
+      {reopening && (
+        <ReopenPartDialog caseId={c.id} part={reopening} onClose={() => setReopening(null)} />
+      )}
+    </div>
+  );
+}
+
+const REOPEN_ERRORS: Record<string, string> = {
+  case_closed: 'This case is signed off or closed. A part can only be reopened before sign-off.',
+  part_not_satisfied: 'This part is not satisfactory, so there is nothing to reopen — start another attempt instead.',
+  forbidden: 'Only an assessor can reopen a part.',
+  part_not_in_pathway: 'This part is not required on the case’s pathway.',
+};
+
+/**
+ * Reopening a passed part.
+ *
+ * A reason is demanded because the act stands down a mark somebody made: the
+ * passing attempt stays on the trail, tagged, with this reason beside it — so a
+ * reader later can tell "the assessor changed their mind" from "marked in
+ * error" from "re-demonstrated after an incident". The dialog says plainly what
+ * happens next, because the part's green tick is about to disappear.
+ */
+function ReopenPartDialog({
+  caseId,
+  part,
+  onClose,
+}: {
+  caseId: string;
+  part: CasePartView;
+  onClose: () => void;
+}) {
+  const reopen = useReopenPart(caseId);
+  const { toast } = useToast();
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setError(null);
+    if (!reason.trim()) {
+      setError('Say why this part is being reopened — it is recorded beside the attempt it stands down.');
+      return;
+    }
+    try {
+      await reopen.mutateAsync({ partKey: part.key, reason: reason.trim() });
+      toast({
+        variant: 'success',
+        message: `${part.label} reopened. Start another attempt when ready.`,
+      });
+      onClose();
+    } catch (e) {
+      const code =
+        e instanceof ApiError && e.body && typeof e.body === 'object'
+          ? String((e.body as Record<string, unknown>).error ?? '')
+          : '';
+      setError(REOPEN_ERRORS[code] ?? (e instanceof Error ? e.message : 'Could not reopen this part.'));
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgb(0 0 0 / 0.45)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Reopen part"
+    >
+      <div className="w-full max-w-[460px] rounded-lg border border-border bg-surface-card p-[20px_22px]">
+        <h2 className="font-heading text-[17px] font-bold">Reopen {part.label}</h2>
+        <p className="mt-1.5 text-[13px] text-text-tertiary">
+          The satisfactory attempt is stood down: it stays on the record, marked as superseded,
+          but no longer counts. The part goes back to open, the case leaves sign-off, and a new
+          attempt has to pass before this case can be certified.
+        </p>
+
+        <label htmlFor="reopen-reason" className="mt-4 block text-[12.5px] font-semibold text-text-secondary">
+          Why is this part being reopened?
+        </label>
+        <textarea
+          id="reopen-reason"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          rows={3}
+          className="mt-1 w-full rounded-md border border-border bg-surface-card p-[9px_11px] text-[13.5px]"
+          placeholder="Marked against the wrong candidate; re-demonstration required after the incident on 3 Sept…"
+        />
+
+        {error && (
+          <p className="mt-3 text-[12.5px]" style={{ color: 'var(--danger)' }}>
+            {error}
+          </p>
+        )}
+
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose} disabled={reopen.isPending}>
+            Cancel
+          </Button>
+          <Button leadingIcon="rotate-ccw" onClick={submit} disabled={reopen.isPending}>
+            {reopen.isPending ? 'Reopening…' : 'Reopen part'}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -542,6 +654,8 @@ function PartCard({
   part,
   attempts,
   readOnly,
+  canReopen,
+  onReopen,
   onOpen,
   opening,
 }: {
@@ -554,14 +668,21 @@ function PartCard({
     submittedAt: string | null;
     dispositionReason: string | null;
     markerKind: 'person' | 'automatic' | null;
+    supersededAt: string | null;
+    supersededReason: string | null;
   }[];
   readOnly: boolean;
+  /** The assessor may reopen a passed part while the case is unsigned. */
+  canReopen: boolean;
+  onReopen: () => void;
   onOpen: () => void;
   opening: boolean;
 }) {
   const style = PART_STATE[part.state];
-  const openAttempt = attempts.find((a) => a.outcome === null);
-  const resolved = attempts.filter((a) => a.outcome !== null);
+  // A stood-down attempt is never the open one, even if it was never marked.
+  const openAttempt = attempts.find((a) => a.outcome === null && !a.supersededAt);
+  // The trail: everything no longer being worked on — marked, or stood down.
+  const resolved = attempts.filter((a) => a.outcome !== null || a.supersededAt);
 
   return (
     <div className="rounded-md border border-border bg-surface-card p-[14px_16px]">
@@ -588,35 +709,72 @@ function PartCard({
           renders only the passing one, but the trail is the record. */}
       {resolved.length > 0 && (
         <ul className="mt-2.5 flex flex-col gap-1 border-t border-border-subtle pt-2.5 text-[12.5px]">
-          {resolved.map((a) => (
-            <li key={a.id} className="flex items-start gap-2">
-              <Icon
-                name={a.outcome === 'satisfactory' ? 'circle-check' : 'circle-x'}
-                size={14}
-                className={a.outcome === 'satisfactory' ? 'mt-0.5 flex-none text-success-text' : 'mt-0.5 flex-none text-danger'}
-              />
-              <span className="text-text-secondary">
-                {/* Readable after the fact, never editable — the fill screen
-                    locks a marked attempt. A candidate who failed should be
-                    able to see what they actually answered. */}
-                <Link
-                  to={`/app/assessments/${caseId}/attempts/${a.id}`}
-                  className="underline decoration-dotted underline-offset-2"
-                >
-                  Attempt {a.attemptNumber}
-                </Link>{' '}
-                — {a.outcome === 'satisfactory' ? 'satisfactory' : 'not satisfactory'}
-                {a.dispositionReason ? `: ${a.dispositionReason}` : ''}
-                {/* An automatic mark was made by nobody — say so distinctly (U15). */}
-                {a.markerKind === 'automatic' && (
-                  <span className="ml-1.5 rounded-sm bg-surface-sunken px-1.5 py-px font-mono text-[9px] uppercase tracking-wide text-text-tertiary">
-                    auto-marked
-                  </span>
-                )}
-              </span>
-            </li>
-          ))}
+          {resolved.map((a) => {
+            // Stood down by a reopen: still on the trail, still readable, but
+            // greyed and tagged so nobody mistakes it for the standing mark.
+            const stoodDown = a.supersededAt !== null;
+            return (
+              <li key={a.id} className="flex items-start gap-2">
+                <Icon
+                  name={stoodDown ? 'rotate-ccw' : a.outcome === 'satisfactory' ? 'circle-check' : 'circle-x'}
+                  size={14}
+                  className={
+                    stoodDown
+                      ? 'mt-0.5 flex-none text-text-tertiary'
+                      : a.outcome === 'satisfactory'
+                        ? 'mt-0.5 flex-none text-success-text'
+                        : 'mt-0.5 flex-none text-danger'
+                  }
+                />
+                <span className={stoodDown ? 'text-text-tertiary' : 'text-text-secondary'}>
+                  {/* Readable after the fact, never editable — the fill screen
+                      locks a marked attempt. A candidate who failed should be
+                      able to see what they actually answered. */}
+                  <Link
+                    to={`/app/assessments/${caseId}/attempts/${a.id}`}
+                    className="underline decoration-dotted underline-offset-2"
+                  >
+                    Attempt {a.attemptNumber}
+                  </Link>{' '}
+                  —{' '}
+                  {a.outcome === 'satisfactory'
+                    ? 'satisfactory'
+                    : a.outcome === 'not_satisfactory'
+                      ? 'not satisfactory'
+                      : 'unmarked'}
+                  {a.dispositionReason ? `: ${a.dispositionReason}` : ''}
+                  {/* An automatic mark was made by nobody — say so distinctly (U15). */}
+                  {a.markerKind === 'automatic' && (
+                    <span className="ml-1.5 rounded-sm bg-surface-sunken px-1.5 py-px font-mono text-[9px] uppercase tracking-wide text-text-tertiary">
+                      auto-marked
+                    </span>
+                  )}
+                  {stoodDown && (
+                    <>
+                      <span className="ml-1.5 rounded-sm bg-surface-sunken px-1.5 py-px font-mono text-[9px] uppercase tracking-wide text-text-tertiary">
+                        superseded
+                      </span>
+                      {a.supersededReason ? ` — reopened: ${a.supersededReason}` : ''}
+                    </>
+                  )}
+                </span>
+              </li>
+            );
+          })}
         </ul>
+      )}
+
+      {/*
+        THE WAY BACK FROM A PASS. Every other state has a control onward; a
+        passed part had none, so an assessor who marked the wrong part was stuck.
+        Offered only while the case is unsigned — a certificate is not edited.
+      */}
+      {part.state === 'satisfactory' && canReopen && (
+        <div className="mt-3 border-t border-border-subtle pt-3">
+          <Button variant="outline" size="sm" leadingIcon="rotate-ccw" onClick={onReopen}>
+            Reopen for another attempt
+          </Button>
+        </div>
       )}
 
       {part.state !== 'locked' && part.state !== 'satisfactory' && (

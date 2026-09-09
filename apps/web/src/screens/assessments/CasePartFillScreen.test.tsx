@@ -125,6 +125,8 @@ const attempt = (over: Partial<AttemptFillView> = {}): AttemptFillView => ({
   attemptNumber: 1,
   outcome: null,
   submittedAt: '2026-08-20T00:00:00Z',
+  supersededAt: null,
+  supersededReason: null,
   templateVersionId: 'ver-1',
   party: 'assessor',
   markingGuide: [{ fieldId: 'q1', modelAnswer: MODEL_TEXT }],

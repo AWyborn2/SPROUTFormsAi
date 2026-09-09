@@ -112,6 +112,15 @@ describe('attempts', () => {
     expect(post).toHaveBeenCalledWith(`/assessment-cases/${CASE}/parts/p1-theory/attempts`, {});
   });
 
+  it('reopens a passed part with the assessor’s reason', async () => {
+    post.mockResolvedValue({ partKey: 'p2', supersededAttemptIds: [ATTEMPT], partState: 'open', state: 'open' });
+    await assessmentsApi.reopenPart(CASE, 'p2', 'Marked in error');
+
+    expect(post).toHaveBeenCalledWith(`/assessment-cases/${CASE}/parts/p2/reopen`, {
+      reason: 'Marked in error',
+    });
+  });
+
   it('saves values under a values key', async () => {
     patch.mockResolvedValue({ id: ATTEMPT, hours: null, thresholdReached: false });
     await assessmentsApi.saveAttempt(CASE, ATTEMPT, { ai_29: 'True' });

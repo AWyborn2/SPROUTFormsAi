@@ -1593,6 +1593,24 @@ export function useRecordOutcome(caseId: string) {
   });
 }
 
+/**
+ * Reopen a passed part for another attempt. Moves the case and the part's
+ * state, so it refreshes everything an outcome does.
+ */
+export function useReopenPart(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { partKey: string; reason: string }) =>
+      assessmentsApi.reopenPart(caseId, input.partKey, input.reason),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
+      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
+    },
+  });
+}
+
 /** The assessor's final approval. Invalidates the same three views an outcome does. */
 export function useSignOffCase(caseId: string) {
   const qc = useQueryClient();

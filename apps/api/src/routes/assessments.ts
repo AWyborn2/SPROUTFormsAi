@@ -531,12 +531,26 @@ async function unmetPrerequisites(
   return gaps;
 }
 
-function toAttemptFacts(rows: { partKey: string; attemptNumber: number; outcome: string | null }[]): AttemptFact[] {
-  return rows.map((r) => ({
-    partKey: r.partKey,
-    attemptNumber: r.attemptNumber,
-    outcome: (r.outcome as AttemptFact['outcome']) ?? null,
-  }));
+/**
+ * The attempt rows as progress reads them.
+ *
+ * A SUPERSEDED ATTEMPT IS NOT A FACT. An assessor reopening a passed part stands
+ * its passing attempt down (`supersededAt`), and from then on the part must read
+ * as not passed — which is only true if the row never reaches `caseProgress`.
+ * Dropped HERE, the one conversion every progress read goes through, so the
+ * case screen, both dashboards, the open-attempt gate and the state recompute
+ * after marking cannot disagree about whether a stood-down attempt counts.
+ */
+function toAttemptFacts(
+  rows: { partKey: string; attemptNumber: number; outcome: string | null; supersededAt?: Date | null }[],
+): AttemptFact[] {
+  return rows
+    .filter((r) => !r.supersededAt)
+    .map((r) => ({
+      partKey: r.partKey,
+      attemptNumber: r.attemptNumber,
+      outcome: (r.outcome as AttemptFact['outcome']) ?? null,
+    }));
 }
 
 /**
@@ -551,10 +565,11 @@ function toAttemptFacts(rows: { partKey: string; attemptNumber: number; outcome:
  */
 export function caseAwaitsAssessor(
   state: string,
-  attempts: readonly { submittedAt: unknown; outcome: string | null }[],
+  attempts: readonly { submittedAt: unknown; outcome: string | null; supersededAt?: Date | null }[],
 ): boolean {
   if (state === 'awaiting_sign_off') return true;
-  return attempts.some((a) => a.submittedAt !== null && a.outcome === null);
+  // A stood-down attempt is nobody's pending work, marked or not.
+  return attempts.some((a) => !a.supersededAt && a.submittedAt !== null && a.outcome === null);
 }
 
 // ── assessment tools ────────────────────────────────────────────────────────
@@ -3152,6 +3167,9 @@ assessmentCasesRouter.get(
         markerKind: a.markerKind,
         /** Any assessor-eligibility shortfall recorded when a person marked it (U14). */
         markingEligibilityWarnings: a.markingEligibilityWarnings,
+        /** Set once an assessor reopened the part — this attempt no longer counts. */
+        supersededAt: a.supersededAt,
+        supersededReason: a.supersededReason,
       })),
     });
   }),
@@ -3463,7 +3481,9 @@ assessmentCasesRouter.patch(
  * Refuses a locked part — the sequence exists so a final demonstration cannot
  * happen before the hours it depends on are logged. A part that already passed
  * is also refused: re-opening it would put a second satisfactory attempt on the
- * record with nothing to say which is authoritative.
+ * record with nothing to say which is authoritative. The way back is the
+ * assessor's `/parts/:partKey/reopen`, which stands the passing attempt down
+ * first, so the part reads as open again and THIS route accepts it.
  *
  * THE CANDIDATE MAY OPEN THEIR OWN NEXT STEP. `own`-scoped edit reaches this
  * for the caller's own case, gated below on the workflow actually giving the
@@ -3524,7 +3544,10 @@ assessmentCasesRouter.post(
     }
 
     const mine = attempts.filter((a) => a.partKey === partKey);
-    const open = mine.find((a) => a.outcome === null);
+    // A stood-down attempt is never resumed, even an unmarked one: the reopen
+    // that superseded it asked for a fresh start. It still counts in `mine`,
+    // so the new attempt numbers on from where the trail left off.
+    const open = mine.find((a) => a.outcome === null && !a.supersededAt);
     if (open) {
       res.status(200).json({ id: open.id, attemptNumber: open.attemptNumber, reused: true });
       return;
@@ -3927,6 +3950,9 @@ assessmentCasesRouter.get(
       attemptNumber: attempt.attemptNumber,
       outcome: attempt.outcome,
       submittedAt: attempt.submittedAt,
+      /** Set once an assessor reopened the part — readable, frozen, and not the record. */
+      supersededAt: attempt.supersededAt,
+      supersededReason: attempt.supersededReason,
       templateVersionId: attempt.templateVersionId,
       /*
         Which side of the assessment this caller is on, so the screen can say
@@ -4103,6 +4129,11 @@ async function setSubmitted(
   // assessor already judged.
   if (attempt.outcome !== null) {
     res.status(409).json({ error: 'attempt_resolved' });
+    return;
+  }
+  // Stood down by a reopen: nothing can be handed in on it or taken back.
+  if (attempt.supersededAt) {
+    res.status(409).json({ error: 'attempt_superseded' });
     return;
   }
 
@@ -4347,6 +4378,141 @@ assessmentCasesRouter.post(
   withErrorHandling((req, res) => setSubmitted(req, res, false)),
 );
 
+const reopenPartBody = z.object({
+  reason: z.string().trim().min(1),
+});
+
+/**
+ * Reopen a part that has PASSED, so it can be attempted again.
+ *
+ * The one gap in the retry model. A failed part offers "start another
+ * attempt" and an unmarked hand-in can be taken back, but a part that passed
+ * was final the moment it was marked: the open route refuses it, because a
+ * second satisfactory attempt would leave nothing to say which one is the
+ * record. An assessor who marked the wrong part, or who now doubts a
+ * demonstration they watched, had no way back short of a new case.
+ *
+ * Reopening STANDS THE PASSING ATTEMPT DOWN rather than deleting or unmarking
+ * it: `supersededAt` is set, with who and why, and every read of progress
+ * ignores the row from then on (`toAttemptFacts`). The part reverts to open —
+ * or to not-satisfactory, if an earlier failed attempt now stands as its latest
+ * outcome — the case drops out of `awaiting_sign_off`, and the next attempt
+ * numbers on from where the trail left off. The answers and the mark stay
+ * readable: a part passed, reopened and passed again is a history an auditor
+ * walks, not one we tidy away. Failed attempts are left exactly as they were;
+ * they never were the record, and they remain the history.
+ *
+ * ASSESSOR-ONLY, and only BEFORE SIGN-OFF. `hasPermission` asks for the
+ * org-wide grant, so a candidate cannot reopen their own passed part. Once the
+ * case is signed off it is a certificate; unpicking one is an appeal — a new
+ * case — never an edit to this one.
+ */
+assessmentCasesRouter.post(
+  '/:id/parts/:partKey/reopen',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await hasPermission(tenant, 'assessments', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = reopenPartBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (row.signedOffAt || isTerminalCaseState(row.state)) {
+      res.status(409).json({ error: 'case_closed' });
+      return;
+    }
+    const tool = await loadTool(db, row.toolId, tenant.orgId);
+    if (!tool) {
+      res.status(409).json({ error: 'tool_missing' });
+      return;
+    }
+
+    const partKey = req.params.partKey!;
+    const attempts = await attemptsFor(db, row.id);
+    const progress = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(attempts),
+      applicablePartsFor(tool, row),
+    );
+    const target = progress.find((p) => p.part.key === partKey);
+    if (!target) {
+      res.status(400).json({ error: 'part_not_in_pathway' });
+      return;
+    }
+    // Every other state already has a way onward — this route exists for the
+    // one that did not.
+    if (target.state !== 'satisfactory') {
+      res.status(409).json({ error: 'part_not_satisfied' });
+      return;
+    }
+
+    // What makes the part count as passed, plus any still-open attempt — one
+    // cannot sit beside a pass today, but it must not outlive a reopen if it
+    // ever does, or the "fresh start" would resume it.
+    const standing = attempts.filter(
+      (a) =>
+        a.partKey === partKey &&
+        !a.supersededAt &&
+        (a.outcome === 'satisfactory' || a.outcome === null),
+    );
+    const now = new Date();
+    for (const a of standing) {
+      await db
+        .update(schema.assessmentPartAttempts)
+        .set({
+          supersededAt: now,
+          supersededByUserId: tenant.userId,
+          supersededReason: parsed.data.reason,
+        })
+        .where(eq(schema.assessmentPartAttempts.id, a.id));
+    }
+
+    // The case cannot wait for a signature on a part that no longer stands.
+    // Recomputed from the rows, the same way marking does — never assumed.
+    const after = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(await attemptsFor(db, row.id)),
+      applicablePartsFor(tool, row),
+    );
+    const nextState: AssessmentCaseState = isCaseCompetent(after) ? 'awaiting_sign_off' : 'open';
+    if (nextState !== row.state) {
+      await db
+        .update(schema.assessmentCases)
+        .set({ state: nextState })
+        .where(eq(schema.assessmentCases.id, row.id));
+    }
+
+    await recordAudit(db, tenant, {
+      action: 'Reopened assessment part',
+      target: `${row.id} / ${partKey}: ${parsed.data.reason}`,
+      category: 'submissions',
+      icon: 'rotate-ccw',
+    });
+
+    res.json({
+      partKey,
+      supersededAttemptIds: standing.map((a) => a.id),
+      partState: after.find((p) => p.part.key === partKey)?.state ?? 'open',
+      state: nextState,
+    });
+  }),
+);
+
 /*
   CHECK A SINGLE QUESTION — interactive theory feedback.
 
@@ -4391,6 +4557,11 @@ assessmentCasesRouter.post(
     }
     if (attempt.outcome !== null) {
       res.status(409).json({ error: 'attempt_resolved' });
+      return;
+    }
+    // Stood down by a reopen: frozen like a marked one, but it is not the record.
+    if (attempt.supersededAt) {
+      res.status(409).json({ error: 'attempt_superseded' });
       return;
     }
 
@@ -4495,6 +4666,11 @@ assessmentCasesRouter.post(
     // A resolved attempt is signed evidence — never rewrite it.
     if (attempt.outcome !== null) {
       res.status(409).json({ error: 'attempt_resolved' });
+      return;
+    }
+    // Stood down by a reopen: frozen like a marked one, but it is not the record.
+    if (attempt.supersededAt) {
+      res.status(409).json({ error: 'attempt_superseded' });
       return;
     }
     // Handed in, not yet marked: the candidate's answers are frozen, the same
@@ -4622,6 +4798,11 @@ assessmentCasesRouter.patch(
     // signed; a correction is a new attempt.
     if (attempt.outcome !== null) {
       res.status(409).json({ error: 'attempt_resolved' });
+      return;
+    }
+    // Stood down by a reopen: frozen like a marked one, but it is not the record.
+    if (attempt.supersededAt) {
+      res.status(409).json({ error: 'attempt_superseded' });
       return;
     }
     /*
@@ -4866,7 +5047,9 @@ assessmentCasesRouter.post(
       return;
     }
 
-    const attemptRows = await attemptsFor(db, row.id);
+    // A stood-down attempt never prints and never counts toward the coaching
+    // pair: the part it passed was reopened, so on paper it has not passed.
+    const attemptRows = (await attemptsFor(db, row.id)).filter((a) => !a.supersededAt);
     /*
       FILL THE MARKS OLDER ATTEMPTS NEVER STORED. `withDerivedMarks` re-runs
       the marking arithmetic over each passing self-marked attempt against ITS
@@ -5304,6 +5487,11 @@ assessmentCasesRouter.post(
     }
     if (attempt.outcome !== null) {
       res.status(409).json({ error: 'attempt_resolved' });
+      return;
+    }
+    // Stood down by a reopen: frozen like a marked one, but it is not the record.
+    if (attempt.supersededAt) {
+      res.status(409).json({ error: 'attempt_superseded' });
       return;
     }
     const tool = await loadTool(db, row.toolId, tenant.orgId);

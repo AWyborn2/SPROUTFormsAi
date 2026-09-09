@@ -216,6 +216,9 @@ export function CasePartFillScreen() {
   // take it back until it is marked.
   const marked = attempt.outcome !== null;
   const handedIn = attempt.submittedAt !== null;
+  // Stood down by an assessor's reopen: frozen like a marked attempt, but it is
+  // not the record any more — the way forward is a new attempt at the part.
+  const superseded = attempt.supersededAt !== null;
   /*
     THE MARKING PASS: the assessor on a handed-in, not-yet-marked attempt. The
     server already narrowed `writableFieldIds` to the marking surface — the
@@ -225,8 +228,8 @@ export function CasePartFillScreen() {
     decided server-side, so a self-assessing candidate is `candidate` here and
     keeps today's frozen view of their own handed-in paper.
   */
-  const markingPass = attempt.party === 'assessor' && handedIn && !marked;
-  const readOnly = marked || (handedIn && attempt.party === 'candidate');
+  const markingPass = attempt.party === 'assessor' && handedIn && !marked && !superseded;
+  const readOnly = marked || superseded || (handedIn && attempt.party === 'candidate');
 
   /*
     Clamped on READ rather than reset on change: a question answered on the last
@@ -395,16 +398,18 @@ export function CasePartFillScreen() {
         </p>
       </header>
 
-      {marked && (
+      {(marked || superseded) && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5">
           <p className="text-[13px] text-text-secondary">
-            {attempt.outcome === 'satisfactory'
-              ? 'Marked satisfactory — this attempt is now a locked record.'
-              : attempt.outcome === 'not_satisfactory'
-                ? 'Marked not satisfactory. Your correct answers carry over to a new attempt — go back over the ones that were missed.'
-                : 'This attempt has been marked, so it can no longer be changed.'}
+            {superseded
+              ? `The assessor reopened this part${attempt.supersededReason ? ` — ${attempt.supersededReason}` : ''}. This attempt stays readable but no longer counts; the part needs a fresh attempt.`
+              : attempt.outcome === 'satisfactory'
+                ? 'Marked satisfactory — this attempt is now a locked record.'
+                : attempt.outcome === 'not_satisfactory'
+                  ? 'Marked not satisfactory. Your correct answers carry over to a new attempt — go back over the ones that were missed.'
+                  : 'This attempt has been marked, so it can no longer be changed.'}
           </p>
-          {attempt.outcome === 'not_satisfactory' && (
+          {(attempt.outcome === 'not_satisfactory' || superseded) && (
             <Button
               leadingIcon="rotate-ccw"
               disabled={openAttempt.isPending}
@@ -419,7 +424,7 @@ export function CasePartFillScreen() {
                 })
               }
             >
-              {openAttempt.isPending ? 'Opening…' : 'Try again'}
+              {openAttempt.isPending ? 'Opening…' : superseded ? 'Start a new attempt' : 'Try again'}
             </Button>
           )}
         </div>
@@ -432,7 +437,7 @@ export function CasePartFillScreen() {
         assessor's. Shown only once THIS part has passed, so a part still waiting
         on a mark is not told to move on.
       */}
-      {marked && attempt.outcome === 'satisfactory' && (
+      {marked && attempt.outcome === 'satisfactory' && !superseded && (
         <NextStepPanel
           nextStep={attempt.nextStep}
           opening={openAttempt.isPending}
