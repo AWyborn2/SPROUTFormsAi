@@ -805,3 +805,43 @@ describe('composeRevisionManifest — the summary wiring survives a revision', (
     ).toEqual({ courseId: 'course-1', required: true });
   });
 });
+
+
+/**
+ * The typed sign-off fields follow the pointers' doctrine through a revision:
+ * the derivation wins where it names any, the seeded ids that still resolve
+ * carry otherwise, and a ghost id never reaches a republish.
+ */
+describe('composeRevisionManifest — the typed sign-off fields', () => {
+  it('carries the seeded ids that still resolve when the derivation names none', async () => {
+    const { composeRevisionManifest } = await import('./builder-publish.js');
+    const seeded: AssessmentToolManifest = {
+      ...manifestWith(),
+      signOff: { assessorNameFieldId: 'sign-name', fieldIds: ['feedback', 'vanished'] },
+    };
+    const derived: AssessmentToolManifest = { ...manifestWith(), signOff: { assessorNameFieldId: 'sign-name' } };
+    const fields = [question('q1'), field({ id: 'sign-name' }), field({ id: 'feedback', type: 'textarea' })];
+
+    const merged = composeRevisionManifest(seeded, derived, fields);
+    expect(merged.signOff?.fieldIds).toEqual(['feedback']);
+  });
+
+  it('lets the derivation win when the author chose a block in this revision', async () => {
+    const { composeRevisionManifest } = await import('./builder-publish.js');
+    const seeded: AssessmentToolManifest = { ...manifestWith(), signOff: { fieldIds: ['feedback'] } };
+    const derived: AssessmentToolManifest = { ...manifestWith(), signOff: { fieldIds: ['feedback', 'declare'] } };
+    const fields = [question('q1'), field({ id: 'feedback', type: 'textarea' }), field({ id: 'declare', type: 'checkbox' })];
+
+    const merged = composeRevisionManifest(seeded, derived, fields);
+    expect(merged.signOff?.fieldIds).toEqual(['feedback', 'declare']);
+  });
+
+  it('drops the list entirely when no seeded id survives', async () => {
+    const { composeRevisionManifest } = await import('./builder-publish.js');
+    const seeded: AssessmentToolManifest = { ...manifestWith(), signOff: { fieldIds: ['vanished'] } };
+    const derived: AssessmentToolManifest = { ...manifestWith(), signOff: {} };
+
+    const merged = composeRevisionManifest(seeded, derived, [question('q1')]);
+    expect(merged.signOff?.fieldIds).toBeUndefined();
+  });
+});

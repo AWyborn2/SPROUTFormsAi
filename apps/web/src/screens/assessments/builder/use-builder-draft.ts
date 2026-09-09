@@ -1123,10 +1123,21 @@ export function useBuilderDraftState({
     return [...ordered, ...withEdits.filter((p) => !seen.has(p.key))];
   }, [structure, fields, setup, keys, excluded, partOverrides, partOrder]);
 
-  const manifest = useMemo(
-    () => buildManifest(parts, extraction?.fields ?? [], setup),
-    [parts, extraction, setup],
-  );
+  const manifest = useMemo(() => {
+    /*
+      A SIGN-OFF BLOCK'S FIELDS come from its structure section — the derived
+      part carries only an anchor. Excluded fields never reach the published
+      version, so they are dropped here rather than failing validation as
+      "not in this version" at publish.
+    */
+    const blockIds = parts
+      .filter((p) => p.signOffBlock)
+      .flatMap((p) => structure.find((s) => s.key === p.sectionKey)?.fields.map((f) => f.id) ?? [])
+      .filter((id) => !excluded.has(id))
+      // A heading is nothing to type at sign-off.
+      .filter((id) => fields.find((f) => f.id === id)?.type !== 'section_header');
+    return buildManifest(parts, extraction?.fields ?? [], setup, blockIds);
+  }, [parts, structure, fields, excluded, extraction, setup]);
 
   /*
     The problems come from the SHARED validator, live — and they are computed

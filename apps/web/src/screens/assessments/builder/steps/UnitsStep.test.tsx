@@ -309,3 +309,31 @@ describe('UnitsStep', () => {
     expect(screen.getByText(/No parts yet/)).toBeTruthy();
   });
 });
+
+
+/**
+ * A section can be the SIGN-OFF BLOCK rather than a part: the assessor's
+ * closing feedback and declaration, completed in the sign-off dialog. Chosen
+ * from the same select as the kind, because "what is this section" is one
+ * question — and published as a part it could never complete.
+ */
+describe('UnitsStep — the sign-off block', () => {
+  it('offers the choice, drops the section from the parts and folds its fields into signOff.fieldIds', async () => {
+    const ref = await renderLiveStep(PAPER);
+    expect(ref.current.manifest.parts.map((p) => p.key)).toHaveLength(2);
+
+    fireEvent.change(screen.getByLabelText('Kind for PART 3 — LOG'), { target: { value: 'sign_off_block' } });
+
+    expect(ref.current.parts.find((p) => p.label === 'PART 3 — LOG')?.signOffBlock).toBe(true);
+    expect(ref.current.manifest.parts.map((p) => p.label)).toEqual(['PART 1 — THEORY']);
+    expect(ref.current.manifest.signOff?.fieldIds).toEqual(['tbl']);
+    expect(screen.getByText(/Not a part\. The assessor completes these fields/)).toBeTruthy();
+    // No pathway toggles on something that is not a part.
+    expect(screen.queryByLabelText('New requires PART 3 — LOG')).toBeNull();
+
+    // Choosing a kind again makes it a part once more.
+    fireEvent.change(screen.getByLabelText('Kind for PART 3 — LOG'), { target: { value: 'logbook' } });
+    expect(ref.current.manifest.parts.map((p) => p.label)).toEqual(['PART 1 — THEORY', 'PART 3 — LOG']);
+    expect(ref.current.manifest.signOff?.fieldIds).toBeUndefined();
+  });
+});

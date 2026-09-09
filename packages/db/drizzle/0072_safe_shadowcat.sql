@@ -1,0 +1,1 @@
+ALTER TABLE "assessment_cases" ADD COLUMN "sign_off_values" jsonb DEFAULT '{}'::jsonb NOT NULL;

@@ -243,3 +243,37 @@ describe('seedRevisionSnapshot — written questions with model answers', () => 
     expect(edited.keys.find((k) => k.fieldId === 'w1')?.verifiedBy).toBeUndefined();
   });
 });
+
+
+/**
+ * A tool whose manifest already names sign-off fields must open its revision
+ * SHOWING them as the sign-off block — not folded back into the last part,
+ * which is where an anchor-to-anchor reconstruction would put them.
+ */
+describe('seedRevisionSnapshot — the sign-off block', () => {
+  const TYPED_FIELDS: FormField[] = [
+    ...FIELDS,
+    { id: 'feedback', type: 'textarea', label: "Assessor's feedback", required: true, source: 'imported' },
+  ];
+  const TYPED_TOOL = {
+    ...TOOL,
+    manifest: { ...MANIFEST, signOff: { fieldIds: ['feedback'] } },
+  };
+  const TYPED_VERSION = { ...VERSION, fields: TYPED_FIELDS };
+
+  it('carves the sign-off fields into their own section and pins it as the sign-off block', () => {
+    const snap = seedRevisionSnapshot({ tool: TYPED_TOOL, version: TYPED_VERSION });
+
+    const last = snap.structure.find((s) => s.key === 'sec_h2')!;
+    expect(last.fields.map((f) => f.id)).toEqual(['h2', 'q3']);
+    const block = snap.structure.find((s) => s.key === 'sign_off_block')!;
+    expect(block.fields.map((f) => f.id)).toEqual(['feedback']);
+    expect(snap.partOverrides['sign_off_block']).toEqual({ signOffBlock: true });
+  });
+
+  it('adds no such section to a tool that names none', () => {
+    const snap = seedRevisionSnapshot({ tool: TOOL, version: VERSION });
+    expect(snap.structure.some((s) => s.key === 'sign_off_block')).toBe(false);
+    expect(snap.partOverrides['sign_off_block']).toBeUndefined();
+  });
+});

@@ -505,6 +505,13 @@
       "when": 1788921759069,
       "tag": "0071_hesitant_deathstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1788936618016,
+      "tag": "0072_safe_shadowcat",
+      "breakpoints": true
     }
   ]
 }

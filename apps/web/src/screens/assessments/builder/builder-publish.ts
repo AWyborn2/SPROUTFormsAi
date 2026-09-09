@@ -128,6 +128,18 @@ export function composeRevisionManifest(
       const mark = seeded.signOff[key];
       if (mark && byId.has(mark.fieldId)) next[key] = mark;
     }
+    /*
+      The TYPED sign-off fields follow the same doctrine, per id: the
+      derivation wins when it names any (the author chose a block in Units &
+      gating, or the extraction tagged the cover), otherwise the seeded ids
+      that still resolve are carried — a republish that touches nothing must
+      not turn the feedback block back into nobody's fields.
+    */
+    if (!next.fieldIds?.length && seeded.signOff.fieldIds?.length) {
+      const kept = seeded.signOff.fieldIds.filter((id) => byId.has(id));
+      if (kept.length > 0) next.fieldIds = kept;
+      else delete next.fieldIds;
+    }
     merged.signOff = next;
   }
 

@@ -15,6 +15,8 @@ import {
   fieldsInSection,
   isCaseCompetent,
   isTerminalCaseState,
+  missingSignOffFields,
+  signOffFields,
   nextStepAfter,
   deriveChecklistOutcome,
   isSelfMarking,
@@ -605,6 +607,9 @@ const signOffSchema = z.object({
   overallNotSatisfactory: declaredMarkSchema.optional(),
   moreCoachingRequiredYes: declaredMarkSchema.optional(),
   moreCoachingRequiredNo: declaredMarkSchema.optional(),
+  // The fields the assessor TYPES at sign-off. Listed here or a workflow
+  // save strips them — see the note above this schema.
+  fieldIds: z.array(z.string().min(1)).optional(),
 });
 
 const partCompletionMarkSchema = z.object({
@@ -3171,6 +3176,14 @@ assessmentCasesRouter.get(
         supersededAt: a.supersededAt,
         supersededReason: a.supersededReason,
       })),
+      /*
+        THE ASSESSOR'S SIGN-OFF FIELDS, for the sign-off dialog to render with
+        the real renderer — stripped like every field a screen receives, in
+        document order, empty for a tool that names none. The stored answers
+        ride beside them so a signed case can show what was written.
+      */
+      signOffFields: stripMarkingSecrets(signOffFields(caseFields, tool.manifest)),
+      signOffValues: row.signOffValues ?? {},
     });
   }),
 );
@@ -5134,7 +5147,14 @@ assessmentCasesRouter.post(
           it does today.
         */
         signOff: row.signedOffAt
-          ? { at: row.signedOffAt, name: row.signedOffName, signature: row.signedOffSignature }
+          ? {
+              at: row.signedOffAt,
+              name: row.signedOffName,
+              signature: row.signedOffSignature,
+              // The feedback and declaration ticks typed at sign-off —
+              // printed inside the same signed gate as the name.
+              values: row.signOffValues ?? {},
+            }
           : null,
         // Resolved = finished either way. The coaching pair is written on a
         // resolved case only; while it is open, neither box is ticked.
@@ -5693,6 +5713,12 @@ const signOffBody = z.object({
     mark (see the gate in the route). A fresh drawing never carries one.
   */
   password: z.string().min(1).optional(),
+  /**
+   * The assessor's answers to the manifest's sign-off fields (feedback, the
+   * assessor declaration ticks), keyed by field id. Validated in the route
+   * against the tool: foreign ids are refused, required boxes must be filled.
+   */
+  values: z.record(z.string(), z.unknown()).optional(),
 });
 
 /**
@@ -5902,6 +5928,38 @@ assessmentCasesRouter.post(
       assessorNeeds.knownLocationIds.map((id) => ruleLocationNames.get(id) ?? id),
     );
 
+    /*
+      THE ASSESSOR'S CLOSING BLOCK — feedback, declaration ticks — is typed
+      HERE, not attempted as a part. Same two rules as saving an attempt: only
+      the fields the manifest hands the sign-off may be written (a foreign id
+      is refused, never dropped silently), and every required box that is
+      visible must be filled before the certificate is made. A tool naming no
+      sign-off fields accepts an empty (or absent) map and signs as it always
+      has.
+    */
+    const signOffValues = (parsed.data.values ?? {}) as Record<string, SubmissionValue>;
+    const allowedSignOffIds = new Set(tool.manifest.signOff?.fieldIds ?? []);
+    const foreign = Object.keys(signOffValues).filter((id) => !allowedSignOffIds.has(id));
+    if (foreign.length > 0) {
+      res.status(400).json({ error: 'foreign_fields', fields: foreign });
+      return;
+    }
+    if (allowedSignOffIds.size > 0) {
+      const missing = missingSignOffFields(
+        await fieldsForVersion(db, row.currentVersionId),
+        tool.manifest,
+        signOffValues,
+      );
+      if (missing.length > 0) {
+        res.status(400).json({
+          error: 'sign_off_incomplete',
+          missing,
+          detail: `Fill ${missing.map((m) => `"${m.label}"`).join(', ')} before signing off.`,
+        });
+        return;
+      }
+    }
+
     const signedOffAt = new Date();
     await db
       .update(schema.assessmentCases)
@@ -5909,6 +5967,7 @@ assessmentCasesRouter.post(
         signedOffAt,
         signedOffByUserId: tenant.userId,
         signedOffName: parsed.data.assessorName,
+        signOffValues,
         // Capture the Location's name as signed (R138), so a later rename does
         // not change what this settled certificate reads.
         signedOffLocationName: row.locationId ? (ruleLocationNames.get(row.locationId) ?? '') : '',

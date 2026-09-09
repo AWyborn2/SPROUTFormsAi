@@ -116,6 +116,14 @@ export function findDurationColumn(table: FormField | undefined): string | undef
 export interface DerivedPart extends AssessmentPart {
   /** The structure section this came from. Not part of the manifest. */
   sectionKey: string;
+  /**
+   * The author marked this section as the SIGN-OFF BLOCK: not a part at all,
+   * but the assessor's closing feedback and declaration, completed in the
+   * sign-off dialog. `buildManifest` drops it from `parts` and folds its
+   * fillable fields into `signOff.fieldIds`. Builder bookkeeping like
+   * `sectionKey`; never stored on the manifest.
+   */
+  signOffBlock?: boolean;
 }
 
 export interface DeriveInput {
@@ -493,6 +501,55 @@ export function proposePartMarks(
 }
 
 /** Assemble the manifest the publish step will validate and write. */
+/**
+ * The sign-off block with its TYPED fields attached.
+ *
+ * Two sources, both the assessor's closing block: whatever the extraction's
+ * `assessor_declaration` cover slice holds that is not a pointer or mark the
+ * sign-off WRITES, and every section the author marked as the sign-off block
+ * in Units & gating. Excluded from both: section headers (nothing to type), the
+ * name / signature / date / verdict / coaching boxes (written at sign-off, so
+ * `validateManifest` refuses them in this list), and the methods-checklist
+ * table the completion marks tick as parts pass. What is left — "Assessor's
+ * Feedback", the declaration ticks — is what the sign-off dialog renders.
+ *
+ * Track Dozer is why this exists: its feedback block was published as a part
+ * and no experienced-pathway case could ever reach sign-off.
+ */
+function signOffWithFields(
+  base: AssessmentToolManifest['signOff'] | undefined,
+  extracted: readonly Pick<ExtractedField, 'id' | 'type' | 'coverSection'>[],
+  blockFieldIds: readonly string[],
+  completionMarks: readonly { fieldId: string }[],
+): AssessmentToolManifest['signOff'] | undefined {
+  const written = new Set<string>(
+    [
+      base?.assessorNameFieldId,
+      base?.assessorSignatureFieldId,
+      base?.signedDateFieldId,
+      base?.overallSatisfactory?.fieldId,
+      base?.overallNotSatisfactory?.fieldId,
+      base?.moreCoachingRequiredYes?.fieldId,
+      base?.moreCoachingRequiredNo?.fieldId,
+      ...completionMarks.map((m) => m.fieldId),
+    ].filter((id): id is string => !!id),
+  );
+  const ids: string[] = [];
+  for (const f of extracted) {
+    if (f.coverSection === 'assessor_declaration' && f.type !== 'section_header' && !written.has(f.id)) {
+      ids.push(f.id);
+    }
+  }
+  // A REVISION draft has no extraction, so the block's ids are trusted as
+  // handed over (the caller has already dropped headers and excluded fields);
+  // only the boxes the sign-off writes are refused here.
+  for (const id of blockFieldIds) {
+    if (!written.has(id) && !ids.includes(id)) ids.push(id);
+  }
+  if (ids.length === 0) return base;
+  return { ...(base ?? {}), fieldIds: ids };
+}
+
 /** The sign-off block, from the cover's assessor-declaration fields alone. */
 const CANDIDATE_NAME = /candidate'?s?\s+name/i;
 const COMPANY_NAME = /company\s+name/i;
@@ -638,14 +695,24 @@ export function buildManifest(
     SetupAnswers,
     'theoryRendering' | 'passRule' | 'passPercentage' | 'theoryAllowRetry' | 'theoryRetry'
   >,
+  /**
+   * Field ids of every section the author marked as the sign-off block, in
+   * document order, minus anything excluded from the digital form. Folded
+   * into `signOff.fieldIds` beside the cover's own leftovers.
+   */
+  signOffBlockFieldIds: readonly string[] = [],
 ): AssessmentToolManifest {
-  const completionMarks = proposePartCompletionMarks(parts, extracted);
+  // A sign-off block is not a part. It leaves here as sign-off fields.
+  const realParts = parts.filter((p) => !p.signOffBlock);
+  const completionMarks = proposePartCompletionMarks(realParts, extracted);
   // Resolve the retry mode from either the new field or a draft that still
   // carries only the legacy boolean, so re-publishing an old tool keeps it.
   const retryMode = setup?.theoryRetry ?? (setup?.theoryAllowRetry ? 'immediate' : 'end');
+  const signOff = signOffWithFields(signOffFrom(extracted), extracted, signOffBlockFieldIds, completionMarks);
   return {
-    // `sectionKey` is builder bookkeeping and must not reach the stored record.
-    parts: parts.map(({ sectionKey: _sectionKey, ...part }) => part),
+    // `sectionKey` and `signOffBlock` are builder bookkeeping and must not
+    // reach the stored record.
+    parts: realParts.map(({ sectionKey: _sectionKey, signOffBlock: _block, ...part }) => part),
     ...proposeCoverPointers(extracted),
     // The completion checklist ticks itself as parts pass — see the manifest
     // property. Proposed here so a tool published by this builder keeps its
@@ -665,7 +732,7 @@ export function buildManifest(
       empty `signOff` that made a signed competent case export a certificate
       with nobody's name on it.
     */
-    ...(signOffFrom(extracted) ? { signOff: signOffFrom(extracted) } : {}),
+    ...(signOff ? { signOff } : {}),
     /*
       IDENTITY FILLS ITSELF. The whole document search is safe here in a way it
       is not for the sign-off block: "Candidate's Company Name" prints once,
